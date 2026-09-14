@@ -1,0 +1,11 @@
+# 可选的 AI / 视觉 / 自动化扩展
+#
+# 这些是「AI 控制台」用的，不装也不影响小爪的正常使用：
+#   .venv\Scripts\python.exe -m pip install -r requirements-ai.txt
+#
+# 装好之后，设置页的「关于」里会显示「视觉模块：已就绪」。
+
+mss>=9.0.0
+numpy>=1.26.0
+opencv-python>=4.9.0
+pyautogui>=0.9.54

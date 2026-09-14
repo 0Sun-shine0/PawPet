@@ -1,0 +1,9 @@
+# 小爪助手的运行依赖
+#
+# 注意：只把 PySide6 装到项目自带的 .venv 里，不要装到全局 Python。
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# 如果 pypi.org 下载慢，可以加国内镜像：
+#   ... -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+PySide6-Essentials>=6.6,<6.12

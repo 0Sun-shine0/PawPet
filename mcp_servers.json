@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "name": "example-local",
+      "command": ["python", "your_mcp_server.py"],
+      "enabled": false
+    }
+  ]
+}

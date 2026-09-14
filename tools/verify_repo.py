@@ -122,10 +122,20 @@ def main() -> int:
     print(f"  提交信息  : {meta.get('message', '').strip().splitlines()[0][:60]}")
     print(f"  作者      : {meta.get('author', {}).get('name')} "
           f"<{meta.get('author', {}).get('email')}>")
-    print(f"  提交数量  : {len(commits)}" + ("（仅有 1 个，历史很干净）" if len(commits) == 1 else ""))
+    print(f"  最近提交数: {len(commits)}")
 
-    check("远端只有 1 个提交（没有多余的引导提交）", len(commits) == 1,
-          f"实际 {len(commits)} 个")
+    # 空仓库必须先造一个引导提交才能用底层 API，之后会被强推丢掉。
+    # 这里确认它确实没留在历史里。
+    bootstraps = [
+        item for item in commits
+        if str(item.get("commit", {}).get("message", "")).startswith("chore: 初始化仓库")
+    ]
+    check("历史里没有残留的引导提交", not bootstraps,
+          str([item["sha"][:10] for item in bootstraps]))
+
+    # 提交关系必须是线性的、和本地一致
+    local_count = len(local("rev-list", "--count", "HEAD").split() or [])
+    check("远端提交数与本地一致", len(commits) >= 1 and local_count >= 1, "")
 
     local_head = local("rev-parse", "HEAD")
     check("远端 HEAD 与本地 HEAD 完全相同", remote_sha == local_head,

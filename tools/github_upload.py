@@ -251,6 +251,8 @@ def local_commit_info() -> dict:
         "author": {"name": fields[0], "email": fields[1], "date": fields[2].strip()},
         "committer": {"name": fields[3], "email": fields[4], "date": fields[5].strip()},
         "tree": fields[6].strip(),
+        # 父提交也必须带上 —— 它参与哈希，漏了就算不出正确的 SHA
+        "parents": local_parents(),
     }
 
 
@@ -259,6 +261,9 @@ def verify_payload(info: dict) -> tuple[bool, str]:
 
     相当于在本地先把服务端要做的哈希算一遍。能对上，就说明上传后
     远端提交的 SHA 会和本地完全一致，本地和远程天然同步。
+
+    踩过的坑：一开始忘了把父提交传给 commit-tree，于是它按根提交算，
+    对非首个提交必然算不对，报出假警报。父提交是哈希的一部分，不能漏。
     """
     env = dict(os.environ)
     env.update({
@@ -269,9 +274,14 @@ def verify_payload(info: dict) -> tuple[bool, str]:
         "GIT_COMMITTER_EMAIL": info["committer"]["email"],
         "GIT_COMMITTER_DATE": info["committer"]["date"],
     })
+
+    command = ["git", "commit-tree", info["tree"]]
+    for parent in info.get("parents") or []:
+        command += ["-p", parent]
+
     try:
         result = subprocess.run(
-            ["git", "commit-tree", info["tree"]],
+            command,
             input=info["message"].encode("utf-8"),
             cwd=str(ROOT), capture_output=True, env=env, timeout=30,
         )
@@ -500,10 +510,10 @@ def upload(owner: str, repo: str, token: str, branch: str,
         print(f"       [!!] tree 与本地不一致（本地 {local_tree[:10]}）—— 内容可能有差异")
 
     # ------------------------------------------------ 5. 组装父提交
-    # 父提交**直接照搬本地的**。SHA 是父提交的哈希的一部分，只要父子关系
-    # 和本地一致、tree/作者/时间/消息也一致，服务端算出的 SHA 就必然相同。
-    # 本地是根提交 → 远端也必须是根提交。
-    parents = local_parents()
+    # 父提交**直接照搬本地的**（local_commit_info 里已经取好）。
+    # SHA 是父提交的哈希的一部分，只要父子关系和本地一致、
+    # tree / 作者 / 时间 / 消息也一致，服务端算出的 SHA 就必然相同。
+    parents = info.get("parents") or []
     if parents:
         print(f"\n  本地提交的父：{[p[:10] for p in parents]}")
     else:

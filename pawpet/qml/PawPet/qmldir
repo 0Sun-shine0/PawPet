@@ -1,0 +1,25 @@
+module PawPet
+
+singleton Theme 1.0 Theme.qml
+
+Card 1.0 Card.qml
+PawButton 1.0 PawButton.qml
+PawField 1.0 PawField.qml
+PawSlider 1.0 PawSlider.qml
+AiBubble 1.0 AiBubble.qml
+PawSwitch 1.0 PawSwitch.qml
+Pet 1.0 Pet.qml
+PetEye 1.0 PetEye.qml
+
+PetWindow 1.0 PetWindow.qml
+BubbleWindow 1.0 BubbleWindow.qml
+CommandBar 1.0 CommandBar.qml
+Dashboard 1.0 Dashboard.qml
+
+TodayPage 1.0 page/TodayPage.qml
+FocusPage 1.0 page/FocusPage.qml
+TasksPage 1.0 page/TasksPage.qml
+NotesPage 1.0 page/NotesPage.qml
+RemindersPage 1.0 page/RemindersPage.qml
+AiPage 1.0 page/AiPage.qml
+SettingsPage 1.0 page/SettingsPage.qml

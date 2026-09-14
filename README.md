@@ -1,0 +1,412 @@
+# 小爪助手 🐾
+
+一个常驻桌面的小助手：宠物只是它的脸，真正在干活的是**待办 + 番茄钟 + 提醒 + 便签 + AI 操作**。
+数据全部保存在本机，不联网、不上传。
+
+界面用 **PySide6 + Qt Quick/QML**，是 GPU 渲染的矢量抗锯齿画面：
+真圆角、真阴影、60fps 缓动动画，而不是 tkinter 那种带锯齿的 GDI 线条。
+
+**宠物有 4 套形象可以随时切换**（设置页里点一下就行）：麻薯猫 / 柴犬 / 企鹅 / 小狐狸。
+
+---
+
+## 快速开始
+
+**别人拿到怎么用**：把 `小爪助手-安装程序.exe` 发给他，双击、下一步、完成。
+不需要装 Python，运行库已经打进去了。详见 `build\使用说明.md`（会随安装包一起发）。
+
+**你自己在本机开发**：
+
+```powershell
+.venv\Scripts\python.exe run_pawpet.py
+```
+
+双击 `启动小爪助手.cmd` 也可以。
+
+> 首次在新机器上跑源码，先装依赖（只装进项目自带的 `.venv`）：
+>
+> ```powershell
+> .venv\Scripts\python.exe -m pip install -r requirements.txt
+> ```
+>
+> 国内网络慢加镜像：`-i https://pypi.tuna.tsinghua.edu.cn/simple`
+
+---
+
+## 打包成安装程序
+
+```powershell
+.venv\Scripts\python.exe tools\build.py --installer --zip
+```
+
+一条命令做完这些事：
+
+1. 跑一遍自测（不通过就不打包）
+2. 生成多分辨率图标 `build\pawpet.ico`
+3. PyInstaller 打成 `dist\PawPet\`（onedir，约 297MB 解压后）
+4. **真的启动一次打出来的 exe** 验证能跑
+5. 压缩成 `build\payload.zip`（110MB）
+6. 打成单文件安装程序 `dist\小爪助手-安装程序.exe`（约 120MB）
+7. 端到端测一遍安装流程
+8. 生成绿色版 `dist\小爪助手-2.1.0-绿色版.zip`
+
+### 产物
+
+| 文件 | 用途 |
+| --- | --- |
+| `dist\小爪助手-安装程序.exe` | **发给别人用这个**，双击安装 |
+| `dist\小爪助手-2.1.0-绿色版.zip` | 解压即用，放 U 盘里带着走 |
+| `dist\PawPet\` | 未压缩的运行目录，调试用 |
+
+### 安装程序做了什么
+
+用 **tkinter 自己写的安装向导**（`build\setup_ui.py`），没有依赖 Inno Setup
+之类的第三方工具，`--installer` 一条命令就能出成品。
+
+向导里可以选：
+- **安装位置**（默认 `%LOCALAPPDATA%\Programs\PawPet`，**不需要管理员权限**）
+- 创建桌面快捷方式
+- 开机自动启动
+- 安装完成后立即运行
+
+安装时它会：
+- 把内嵌的程序解压到目标目录
+- 用 WScript.Shell 建 `.lnk` 快捷方式（开始菜单 + 可选桌面）
+- 写卸载信息到 `HKCU\...\Uninstall\PawPet`，于是**「设置 → 应用」里能看到它**
+- 把自己复制成 `uninstall.exe` 作为卸载程序
+
+卸载时它会：
+- 先 `taskkill` 掉正在跑的实例（否则文件删不掉）
+- 删程序文件、快捷方式、注册表项、自启项
+- **问你一句要不要删数据，默认保留** —— `%APPDATA%\PawPet` 里是你的待办和便签，
+  比程序本身重要
+- 最后起一个延迟的 `cmd` 把自己也删掉
+
+### 数据放在哪（三种形态）
+
+`pawpet/config.py` 会按运行方式自动选：
+
+| 运行方式 | 数据位置 | 为什么 |
+| --- | --- | --- |
+| 源码运行 | 项目目录旁边 | 便携，方便开发 |
+| 绿色版（exe 旁边可写） | exe 旁边 | 便携，能塞 U 盘 |
+| 安装版（Program Files） | `%APPDATA%\PawPet` | 安装目录是只读的，写不进去 |
+
+判断顺序是「先看有没有被 PyInstaller 打包，再看所在目录能不能写」，
+所以同一个 exe 既能当安装版也能当绿色版。
+
+也支持用环境变量 `PAWPET_HOME` 强制指定数据目录（自动化测试用这个）。
+
+---
+
+## 怎么用
+
+| 操作 | 结果 |
+| --- | --- |
+| **单击小爪** | **就地弹出指令栏，打完回车就走**（可在设置里改成「打开工作台」） |
+| 双击小爪 | 打开工作台（永远是双击，不受上面那条影响） |
+| 按住小爪左键拖动 | 换位置，**位置会自动记住** |
+| 右键小爪 | 快捷菜单 |
+| 鼠标悬停小爪 | 显示当前状态；鼠标长时间不动时自动变淡，不挡视线 |
+| 左键单击托盘图标 | 显示 / 隐藏小爪 |
+| 托盘右键 | 完整的快捷菜单 |
+
+### 指令栏：日常用 AI 的主入口
+
+以前每次让 AI 干活都要打开一个大面板，挡视野又麻烦。现在**单击小爪就弹出一个
+小输入条**贴在旁边，打完回车直接走：
+
+- **点哪儿弹哪儿**，视线不用移动（也可以在设置里改成「屏幕底部居中」）。
+- 结果直接显示在条子里，不用再翻对话记录。
+- **AI 需要你确认时，按钮就出现在这个条子里** —— 如果还要求你开工作台才能点
+  「允许」，那这个快捷栏就白做了。
+- AI 正在跑的时候它**不会自动收起**，你切去干别的事也看得到进度；想收起来按 `Esc`，
+  这时 AI 继续跑，跑完用气泡通知你。
+- 下面有一排快捷指令：「看看屏幕」「解释报错」「翻译屏幕」「整理成待办」，点一下就走。
+
+**全局热键 `Ctrl + Alt + 空格`** 可以在任何程序里唤出它，不用先去找小爪。
+
+### 全局快捷键（在任何程序里都生效）
+
+| 快捷键 | 作用 |
+| --- | --- |
+| `Ctrl + Alt + 空格` | **唤出指令栏**（最常用） |
+| `Ctrl + Alt + P` | 打开工作台 |
+| `Ctrl + Alt + T` | 开始 / 暂停专注 |
+| `Ctrl + Alt + N` | 直接跳到待办页 |
+
+可以在「设置」里改，改完点「立即重启」生效。
+
+### 工作台七个页面
+
+- **今日** — 问候、大时钟、今日专注目标和进度、近 7 天柱状图、健康提醒、接下来的日程。
+- **专注** — 大圆环倒计时、开始/暂停/重置/跳过、15/25/45/60/90 分钟快捷选择、自动衔接下一阶段。
+- **待办** — 优先级（普通/重要/紧急）、到期日、双击改名、勾选完成、三种排序、
+  只看待办或看全部、清除已完成。**多少条都能滚动看到。**
+- **便签** — 左边列表、右边编辑，**输入即自动保存**。
+- **提醒** — 定时提醒（仅一次 / 每天 / 工作日 / 每周）+ 久坐提醒。
+- **AI 操作** — 让 AI 看屏幕、替你操作电脑，见下一节。
+- **设置** — 换宠物形象、大小与透明度、是否置顶、开机自启、全局热键、数据位置、关于。
+
+---
+
+## AI 操作
+
+它不只是聊天，而是**真的能看见你的屏幕、动你的鼠标键盘**。
+
+### 先配置模型
+
+任何 **OpenAI 兼容**的接口都能用（OpenAI、DeepSeek、Moonshot、通义、本地 Ollama…）：
+
+1. 打开「AI 操作」页 → 点「设置」按钮展开模型设置；
+2. 填**接口地址**（如 `https://api.openai.com/v1`）、**模型名**（如 `gpt-4.1-mini`）、**API Key**；
+3. 点「测试连接」确认通了。
+
+> **必须用支持视觉的模型**，因为它要看截图。纯文本模型用不了。
+> Key 只写进 `.env`，不会存进 `pet_data.json`。
+
+### 能做什么
+
+- 「屏幕上这个报错是什么意思」→ 截图分析并解释
+- 「打开记事本，写下明天要做的三件事」→ 启动程序、输入文字
+- 「帮我把这段话记成待办」→ 直接写进小爪自己的待办清单
+- 「把浏览器切到前台，点登录按钮」→ 切换窗口、点击
+- 配合 MCP 还能接你自己的工具
+
+### 权限分级（重要）
+
+在「操作权限」里选，默认是**逐步确认**：
+
+| 等级 | 行为 |
+| --- | --- |
+| **只读** | 只能看屏幕，任何会动键鼠的操作直接被拒 |
+| **逐步确认**（默认） | 点击、输入、按键前都弹卡片问你 |
+| **自动执行** | 只读和键鼠自动跑，执行命令仍需确认 |
+| **完全自动** | 不再询问（包括执行命令，谨慎用） |
+
+**三道保险：**
+1. **急停**：把鼠标快速甩到屏幕左上角，立刻中断当前操作（pyautogui FAILSAFE）。
+2. **危险命令黑名单**：`format`、`diskpart`、`shutdown`、`vssadmin delete` 之类直接拒绝，
+   模型说什么都不执行。
+3. **审计日志**：每次动作都记下来（谁批准的、几点几分），在 `.cache/ai-actions.log`。
+   每一步也都会以卡片形式留在对话里，做过什么一目了然。
+
+### 关于 MCP
+
+`mcp_servers.json` 里配本地 stdio server，把 `enabled` 改成 `true`，
+在 AI 页点「连接 MCP」。连上后这些工具会自动加进模型可用的工具列表。
+
+### 输出格式
+
+模型总是会吐 Markdown（`**加粗**`、`- 列表`、`# 标题`）。这些记号如果在纯文本
+控件里直接显示，你看到的就是一堆星号和井号 —— 非常难读。
+
+所以这里做了一层转换：`pawpet/ai/markdown.py` 把常见的 Markdown 子集转成
+Qt 富文本，界面上显示的是**真正的加粗、列表、引用、链接、表格**。
+同时系统提示里也要求模型「回答控制在 3 到 6 行、不要用表格和大段代码」，
+因为这个窗口本来就小。
+
+另外两处相关处理：
+- 用户的输入、命令的回显一律按**纯文本**渲染。Qt 的 Text 默认是 AutoText，
+  遇到尖括号会当 HTML 解析，命令输出里一个 `<` 就能把整块显示搞乱。
+- 转换前会把 `<` `>` `&` 转义，模型输出的 HTML 不会被执行。
+
+---
+
+## 这些设计是为了解决什么
+
+这一版是针对旧 tkinter 版本的具体毛病重做的，每条都对应一个真实问题：
+
+| 旧版的问题 | 现在的做法 |
+| --- | --- |
+| 启动脚本调用全局 `pythonw`，绕过了装了依赖的 `.venv`，AI 面板永远显示「未安装」 | 启动器优先用 `.venv`，`.env` 改由 Python 解析，哪个入口启动行为都一致 |
+| 待办只渲染最后 5 条，第 6 条开始看不见也删不掉 | `ListView` + 真模型，全部可滚动；**每秒重建整个列表**的写法也去掉了 |
+| 宠物坐标写死，每次启动都回到原位 | 位置存进 `pet_data.json`，多显示器也会夹回可见区域 |
+| `overrideredirect` 窗口不在任务栏，也没有托盘 | 系统托盘常驻，菜单里能显示/隐藏、切专注、退出 |
+| 双击启动两次 = 两只猫 | 命名互斥体做单实例；第二次启动会把已有窗口叫到前台 |
+| 直接覆盖写 JSON，写一半崩溃就丢数据 | 「写临时文件 → fsync → 原子替换」，保留备份；主文件损坏自动从备份恢复 |
+| 关掉程序番茄钟就归零 | 截止时间以墙钟秒存盘，重开继续走；**关机期间跑完的轮次补记为「离线补记」** |
+| 「休息提醒」只是循环切 30/45/60/90 的按钮，人不在也照弹 | 真正的提醒引擎：用 `GetLastInputInfo` 判断你是否离开，离开就重新计时；全屏游戏/演示时不打扰 |
+| `desktop_actions.py`、`mcp_client.call_tool` 是没有任何调用点的死代码 | **这一版把它们真正接上了**：桌面控制成了 AI 的工具，MCP 也能连了 |
+| tkinter 的 Canvas 在 Windows 走 GDI，没有抗锯齿 | Qt Quick 场景图 + GPU 渲染，圆角、阴影、缓动都是原生能力 |
+
+---
+
+## 关于「用 C++ 写会不会更好看」
+
+**不会。** 好看与否取决于**渲染管线**，不取决于宿主语言：
+
+- C++ + Qt Quick 和 Python + PySide6 用的是**同一套渲染器**（同一个 Qt RHI / 场景图），
+  画出来像素级一致。换语言不会多一个抗锯齿，只会让以后改不动。
+- C++ + Dear ImGui 是给引擎调试工具用的，只会更丑。
+- C++ + Direct2D 手写：为一只桌宠做这件事，工作量是现在的十倍以上，收益是零。
+
+真正的差别来自：**矢量抗锯齿、GPU 合成、缓动曲线、字体渲染、圆角与阴影**。
+这一版把这些都补齐了，所以旧版那种「锯齿 + 硬边」的观感已经消失。
+
+如果你以后确实需要 C++（比如要编译成单文件 exe 分发），合理的路径是
+**保留这套 QML 界面不动，只把 Python 侧换成 Qt/C++** —— QML 是声明式的，
+两边可以共用，不需要重写界面。
+
+---
+
+## 项目结构
+
+```
+run_pawpet.py            启动入口（解析 .env、给出清晰的缺依赖提示）
+启动小爪助手.cmd          双击用的启动器（纯 ASCII，见下方说明）
+pet_data.json            你的数据（自动生成、自动迁移、自动备份）
+pet_data.backup.json     上一版数据的备份
+
+pawpet/
+  app.py                 QApplication、托盘、全局热键、心跳定时器
+  backend.py             暴露给 QML 的唯一接口（改数据都走这里）
+  store.py               原子写入、备份、旧版数据迁移
+  models.py              待办 / 提醒 / 便签 / 专注记录 / 周统计模型
+  focus.py               番茄钟引擎（墙钟恢复、自动轮转）
+  reminders.py           久坐提醒（AFK + 全屏感知）与定时提醒
+  services.py            提示音合成、托盘通知、单实例管道
+  win32.py               单实例互斥体、全局热键、空闲检测、开机自启
+  config.py              路径、.env 读写
+  ai/
+    vision.py            屏幕捕获、缩放与坐标映射
+    actions.py           键鼠/窗口/命令行 + 分级安全 + 审计
+    client.py            OpenAI 兼容客户端（函数调用）
+    tools.py             给模型的工具定义与执行器
+    agent.py             观察-决策-执行-再观察 主循环
+    markdown.py          模型输出的 Markdown → Qt 富文本
+    mcp.py               本地 MCP stdio 客户端
+    controller.py        接到 Qt/QML 的那一层（含跨线程审批）
+  qml/PawPet/
+    Main.qml             四个窗口的根节点与信号接线
+    Theme.qml            设计系统（颜色 / 字号 / 圆角 / 间距 / 缓动）
+    Pet.qml              宠物本体：4 套形象的矢量绘制 + 动画
+    PetEye.qml           眼睛（复用组件）
+    PetWindow.qml        无边框透明置顶窗，拖动、位置记忆、单击分流
+    CommandBar.qml       指令栏：日常用 AI 的主入口
+    BubbleWindow.qml     宠物旁边的对话气泡（点击穿透）
+    Dashboard.qml        工作台（自绘标题栏 + 侧栏 + 页面堆栈）
+    AiBubble.qml         AI 对话里的一条消息气泡（富文本渲染）
+    page/*.qml           今日 / 专注 / 待办 / 便签 / 提醒 / AI / 设置
+
+tools/
+  selftest.py            核心逻辑自测（92 项）
+  mdtest.py              Markdown 转换器自测（51 项）
+  aitest.py              AI 模块自测（76 项）
+  agenttest.py           Agent 端到端联调，带假模型服务器（27 项）
+  smoketest.py           真实启动冒烟，含指令栏交互（41 项）
+  auditprops.py          检查 Python 属性名和 QML 访问名是否对得上
+  layouttest.py          窄窗口下两栏布局是否会被挤坏
+  menudiag.py            右键菜单的关闭行为（真鼠标点击）
+  bomproof.py            演示 BOM 容错 bug 与修复
+  watchsettings.py       观察应用启动前后有没有偷改设置
+  preview.py             生成界面截图到 .cache/preview
+  aipreview.py           生成 AI 页各状态截图
+  mdpreview.py           生成 Markdown 渲染对比图
+  petgallery.py          把 4 套形象并排渲染出来
+  crop.py                放大看截图局部
+
+  # ---- 打包相关 ----
+  build.py               一键打包（exe / 安装程序 / 绿色版）
+  build/ 目录下：
+    pawpet.spec          主程序的 PyInstaller 配置
+    setup.spec           安装程序的 PyInstaller 配置
+    setup_ui.py          安装向导界面与安装/卸载逻辑
+    使用说明.md           随安装包发给最终用户的说明
+    payload.zip          压缩后的程序本体（由 make_payload.py 生成）
+  make_icon.py           生成多分辨率 .ico
+  make_payload.py        把 dist\PawPet 压成 payload.zip
+  packtest.py            验证打出来的 exe 能跑
+  setuptest.py           验证安装程序：解压、启动、卸载件
+  setupui_test.py        安装向导的布局几何检查
+  setupui_shot.py        给安装向导截图
+  procwindows.py         列出某进程的窗口（区分「正常运行」和「卡在弹窗」）
+
+legacy/                  旧 tkinter 实现（保留备查，程序不再引用）
+```
+
+---
+
+## 自测
+
+```powershell
+.venv\Scripts\python.exe tools\selftest.py       # 核心逻辑，92 项
+.venv\Scripts\python.exe tools\mdtest.py         # Markdown 渲染，51 项
+.venv\Scripts\python.exe tools\aitest.py         # AI 模块，76 项
+.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，27 项
+.venv\Scripts\python.exe tools\smoketest.py      # 真实启动，41 项
+.venv\Scripts\python.exe tools\menudiag.py       # 右键菜单，6 项（会动鼠标）
+.venv\Scripts\python.exe tools\setupui_test.py   # 安装向导布局，17 项
+.venv\Scripts\python.exe tools\packtest.py       # 打包产物能跑，9 项
+.venv\Scripts\python.exe tools\setuptest.py      # 安装流程，16 项
+.venv\Scripts\python.exe tools\auditprops.py     # 属性名一致性
+.venv\Scripts\python.exe tools\layouttest.py     # 布局稳健性
+```
+
+`agenttest.py` 会起一个**假的 OpenAI 兼容服务**，把「截图 → 决策 → 审批 → 执行 →
+回灌结果 → 再决策」整条链路真跑一遍，不联网、不花钱。
+
+想看界面长什么样：
+
+```powershell
+.venv\Scripts\python.exe tools\preview.py      # 各页面
+.venv\Scripts\python.exe tools\aipreview.py    # AI 页的对话/审批状态
+.venv\Scripts\python.exe tools\mdpreview.py    # 指令栏 + Markdown 渲染
+.venv\Scripts\python.exe tools\petgallery.py   # 4 套形象对比
+```
+
+> Qt 的 `offscreen` 平台在这台机器上加载不到系统字体（文字会变方块），
+> 所以这些脚本默认用真实平台、把窗口挪到屏幕外抓图。
+
+**这些脚本都不会碰你的 `pet_data.json`**，全部使用 `.cache/` 下的独立副本。
+
+---
+
+## 四个踩过的坑（写在这里免得以后再撞）
+
+**1. `启动小爪助手.cmd` 必须是纯 ASCII 的。**
+cmd.exe 用系统 OEM 代码页（中文 Windows 是 GBK）解析 `.cmd` 文件。UTF-8 编码的
+中文字符，其字节序列末尾可能被 GBK 当成双字节字符的首字节，于是**把后面的换行符
+一起吃掉**，两行命令粘成一条乱命令，脚本直接报 `'"D:\pet\"' is not recognized`。
+所以启动器里的注释和提示一律用英文，中文提示交给 Python 弹窗。
+
+**2. `.venv\Scripts\pythonw.exe` 是个「重定向器」。**
+它比基础解释器的 `pythonw.exe` 大（258KB vs 102KB），运行时会再拉起真正的解释器，
+所以任务管理器里看到**两个 pythonw 进程是正常的**，不是双实例。
+好消息是 `sys.executable` 会正确报成 venv 里的路径，所以「开机自启」和
+「立即重启」都会用到装了 PySide6 的那个解释器。
+
+**3. PySide6 的 `@Property` 用 Python 函数名当属性名。**
+函数名写成 `client_label`，QML 里就必须写 `backend.ai.client_label`；
+写驼峰会**静默拿到 undefined**，不报错、不崩溃，界面就是一片空白，非常难查。
+所以这一版所有暴露给 QML 的属性一律用驼峰命名，并且有 `tools\auditprops.py`
+专门扫这类不匹配。改完 Python 侧属性名之后，记得跑一下它。
+
+**4. `pet_data.json` 用 `utf-8-sig` 读，不是 `utf-8`。**
+这是个查了很久的坑：Windows 记事本、以及很多编辑器的「另存为 UTF-8」，都会在
+文件开头写一个 **BOM**（`EF BB BF`）。而 Python 的 `json.load` 遇到 BOM 会直接抛
+`JSONDecodeError: Unexpected UTF-8 BOM`。
+
+原来的代码用 `encoding="utf-8"` 读，于是**主文件被误判成「损坏」，程序静默回退到
+备份**——你最近加的那条待办就凭空消失了，而且没有任何提示。`utf-8-sig` 在没有
+BOM 时行为与 `utf-8` 完全一致，所以这是纯收益。
+
+`tools\bomproof.py` 把这个 bug 和修复都演示了一遍，`selftest.py` 里也有对应的
+回归测试（手写一个带 BOM 的文件，验证不会被误判成损坏）。
+
+---
+
+## 可选：AI 依赖
+
+AI 操作需要的视觉/自动化依赖不在主 `requirements.txt` 里，按需安装：
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-ai.txt
+```
+
+装完可以用 `tools\probe_ai.py` 确认状态。不装的话，桌宠、待办、番茄钟、
+提醒、便签全部照常工作，只有「AI 操作」页会提示缺依赖。
+
+`mcp_servers.json` 用来配置可选的 MCP 工具服务器。
+
+

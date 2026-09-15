@@ -84,6 +84,7 @@ class AiController(QObject):
     _approvalIn = Signal(str, str, str, str)
     _modelsIn = Signal(bool, object)
     _learnedIn = Signal(str, object)
+    _batchIn = Signal(object)
 
     def __init__(self, store, parent=None) -> None:
         super().__init__(parent)
@@ -103,6 +104,10 @@ class AiController(QObject):
         self._pending: dict | None = None
         self._approval_lock = threading.Lock()
         self._approvals: dict[str, dict] = {}
+        # 合并确认：当前待决定的批次
+        self._batches: dict[str, dict] = {}
+        self._batch_entry: dict | None = None
+        self._batch: list[dict] = []
         self._preview_rev = 0
         self._preview_path = ""
         self._models: list[str] = []
@@ -118,6 +123,7 @@ class AiController(QObject):
         self._approvalIn.connect(self._show_approval)
         self._modelsIn.connect(self._apply_models)
         self._learnedIn.connect(self._apply_learned)
+        self._batchIn.connect(self._apply_batch)
 
         self._load_persisted_preview()
         self._greet()
@@ -525,6 +531,11 @@ class AiController(QObject):
         }
         self.approvalChanged.emit()
 
+    def _apply_batch(self, items: object) -> None:
+        """主线程：把整批待确认操作显示出来。"""
+        self._batch = list(items or [])
+        self.approvalChanged.emit()
+
     @Slot(str, bool)
     def resolveApproval(self, request_id: str, approved: bool) -> None:
         with self._approval_lock:
@@ -594,6 +605,8 @@ class AiController(QObject):
                 max_steps=self.maxSteps,
                 memory_text=self._memory_text() if self.memoryEnabled else "",
             )
+            # 任务开始时先自动看一眼（界面上那个「每轮开始自动看一眼屏幕」）
+            self.runner.auto_screenshot = self.autoScreenshot
             if self.memoryEnabled:
                 self.runner.memory_provider = self._memory_text
             # 保留之前的对话上下文
@@ -754,6 +767,81 @@ class AiController(QObject):
         with self._approval_lock:
             self._approvals.pop(request_id, None)
         return bool(entry["result"])
+
+    # ------------------------------------------------------------ 合并确认
+    @Property("QVariantList", notify=approvalChanged)
+    def pendingBatch(self) -> list:
+        """当前待确认的批次清单，给界面画「一次问完」的卡片。"""
+        return list(self._batch or [])
+
+    @Property(bool, notify=approvalChanged)
+    def hasPendingBatch(self) -> bool:
+        return bool(self._batch)
+
+    @Slot(int, bool)
+    def resolveBatchItem(self, index: int, approved: bool) -> None:
+        """用户在批次卡片上逐条决定允许/拒绝。"""
+        entry = self._batch_entry
+        if entry is None:
+            return
+        decisions = entry.setdefault("decisions", {})
+        decisions[int(index)] = bool(approved)
+        self.approvalChanged.emit()   # 让界面刷新勾选状态
+
+    @Slot(bool)
+    def resolveBatchAll(self, approved: bool) -> None:
+        """一键全部允许 / 全部拒绝。"""
+        entry = self._batch_entry
+        if entry is None:
+            return
+        for item in entry.get("items") or []:
+            entry.setdefault("decisions", {})[item["index"]] = bool(approved)
+        entry["event"].set()
+
+    @Slot()
+    def confirmBatch(self) -> None:
+        """按当前勾选提交。没勾的按**拒绝**处理（fail closed）。"""
+        entry = self._batch_entry
+        if entry is None:
+            return
+        entry["event"].set()
+
+    def request_approval_batch_blocking(self, items: list) -> dict:
+        """在工作线程里被调用，阻塞等待用户对整批做出决定。
+
+        和单个确认的区别：这里一次把清单摆出来，用户勾完提交。
+        批量比单个更容易让人犹豫，但超时策略不变（fail closed）。
+        """
+        batch_id = f"b{int(time.time() * 1000)}"
+        payload = [item.as_dict() for item in items]
+        entry = {
+            "event": threading.Event(),
+            "decisions": {},
+            "items": payload,
+            "id": batch_id,
+        }
+        with self._approval_lock:
+            self._batches[batch_id] = entry
+
+        self._batch_entry = entry
+        self._batch = payload
+        self._batchIn.emit(payload)
+
+        if not entry["event"].wait(timeout=300):
+            with self._approval_lock:
+                self._batches.pop(batch_id, None)
+            self._batch_entry = None
+            self._batch = []
+            self.approvalChanged.emit()
+            return {}
+
+        with self._approval_lock:
+            self._batches.pop(batch_id, None)
+        decisions = dict(entry.get("decisions") or {})
+        self._batch_entry = None
+        self._batch = []
+        self.approvalChanged.emit()
+        return decisions
 
     # ---------------------------------------------------------------- 控制
     @Slot()
@@ -943,3 +1031,7 @@ class _QtCallbacks(AgentCallbacks):
 
     def request_approval(self, request: ApprovalRequest) -> bool:
         return self._c.request_approval_blocking(request)
+
+    def request_approval_batch(self, items: list) -> dict:
+        """把整批操作一次问完，而不是逐个弹卡片。"""
+        return self._c.request_approval_batch_blocking(items)

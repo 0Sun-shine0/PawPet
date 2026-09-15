@@ -28,6 +28,7 @@ from .actions import (
     Risk,
 )
 from .advisor import Advisor
+from .batch import BatchItem, should_merge
 from .client import AIClient, AiError
 from .tools import TOOL_INDEX, ToolContext, describe_arguments, openai_tools
 
@@ -112,6 +113,24 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 2. 一次只做一步有意义的操作，做完确认结果，不要连续盲操作。
 3. 如果连续两次尝试都没能让界面发生变化，停下来向用户说明情况，
    不要反复重试同一个动作。
+
+**批量做，少截图（省时间也省钱）**
+
+每一步都截图确认是很慢的：**一张截图在上下文里是几万 token**，
+而且每多一轮就要重发一次历史。所以：
+
+* **互相不依赖的操作，一轮里一起调。** 比如「点保存」→「输入文件名」→
+  「按回车」这三件事彼此不依赖对方的**结果**，就在同一轮里一起发出来。
+  界面会把它们合成**一次**确认，用户只点一次。
+* **只有下一步需要看结果时才分开。** 比如「点了这个按钮之后跳出来的
+  对话框里有什么」—— 这种必须等结果，就单独一轮。
+* **不要每步都截图。** 任务开始时看一眼已经够了；做完一串操作之后
+  再看一眼确认结果。中间那些「我截个图看看变了没有」多数是浪费。
+* 判断标准：**下一步的决策需不需要用到上一步的结果？**
+  不需要就合并，需要就分开。
+
+（批量不是让人一口气做十件事 —— 一轮里最多合并 6 个操作，
+而且危险操作不参与合并，仍然单独问你。）
 
 **失败之后怎么办（重要）**
 
@@ -209,6 +228,21 @@ class AgentCallbacks:
         """默认拒绝。真正实现由界面层提供。"""
         return False
 
+    def request_approval_batch(self, items: list) -> dict:
+        """一次问多个操作，返回 {序号: 是否允许}。
+
+        默认实现退回逐个询问 —— 这样不支持批量的界面（比如测试用的
+        空实现）行为不变，不用为了合并确认去改所有调用方。
+        """
+        decisions: dict[int, bool] = {}
+        for item in items:
+            request = ApprovalRequest(
+                tool_name=item.tool, risk=item.risk, summary=item.summary,
+                arguments={},
+            )
+            decisions[item.index] = bool(self.request_approval(request))
+        return decisions
+
 
 class AgentRunner:
     def __init__(self, client: AIClient, context: ToolContext, actions,
@@ -231,6 +265,11 @@ class AgentRunner:
         self.memory_provider = None
         # 失败跟踪与恢复建议。每个任务一次，reset() 里清空。
         self.advisor = Advisor()
+        # 本轮攒下来的待确认操作，回到 _run_round 里合成一次询问
+        self._pending: list[dict] = []
+        # 任务开始时先自动看一眼屏幕（对应界面上那个开关）。
+        # 这个开关以前是死的 —— 存了设置但没人读。现在真的生效。
+        self.auto_screenshot = False
         self.messages: list[dict] = [
             {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
         ]
@@ -352,6 +391,14 @@ class AgentRunner:
         self._append_user(user_text)
         final_text = ""
 
+        # 任务开始时先看一眼屏幕。
+        #
+        # 为什么放在这里而不是每步都截：一次截图在上下文里是几万 token，
+        # 每步都截是**主要**的开销来源。任务开始时看一眼足够它规划；
+        # 之后需要确认时它自己会再调 screenshot。
+        if self.auto_screenshot:
+            self._auto_look()
+
         try:
             for step in range(1, self.max_steps + 1):
                 if self._stop:
@@ -403,16 +450,9 @@ class AgentRunner:
                     ],
                 })
 
-                images: list[dict] = []
-
-                for index, call in enumerate(reply.tool_calls):
-                    call_id = call.id or f"call_{step}_{index}"
-                    bundle = self._run_one(call, call_id)
-                    if bundle is not None:
-                        images.append(bundle)
-
-                    if self._stop:
-                        break
+                # 一轮里的多个调用一起处理：先跑不用确认的，
+                # 再把要确认的合成一次询问（见 _run_round）
+                images = self._run_round(reply.tool_calls, step)
 
                 # 截图单独作为一条 user 消息补进去。
                 # 说明文字是截图当时就绑好的，不受后续截图影响。
@@ -457,6 +497,136 @@ class AgentRunner:
         self.callbacks.on_finished(final_text)
         return final_text
 
+    def _auto_look(self) -> None:
+        """任务开始时自动截一张，让模型先看清现状。
+
+        失败就静默跳过 —— 这是个优化，不该因为它没成而影响任务本身。
+        """
+        try:
+            ok, _text, bundle = self.context.execute("screenshot", {"monitor": 1})
+        except Exception:  # noqa: BLE001
+            return
+        if not ok or not bundle:
+            return
+        data_url = bundle.get("data_url") or ""
+        if not data_url:
+            return
+        note = bundle.get("note") or ""
+        self._append_user(f"[系统] 这是任务开始时的屏幕。{note}", data_url)
+
+    # -------------------------------------------------------------- 单步执行
+    def _run_round(self, tool_calls, step: int) -> list[dict]:
+        """执行一轮里的**所有**工具调用，返回要补进对话的图片包。
+
+        顺序有讲究：先跑不需要确认的（读、以及权限够高的写），
+        再把需要确认的合成一次询问。
+        这样批次里的顺序仍然和模型想的基本一致。
+        """
+        self._pending = []
+        images: list[dict] = []
+
+        for index, call in enumerate(tool_calls):
+            call_id = call.id or f"call_{step}_{index}"
+            bundle = self._run_one(call, call_id)
+            if bundle is not None:
+                images.append(bundle)
+            if self._stop:
+                return images
+
+        if self._pending:
+            images.extend(self._resolve_pending())
+        return images
+
+    def _resolve_pending(self) -> list[dict]:
+        """处理这一轮攒下来的待确认操作。
+
+        一个 → 照旧单独问；多个 → 合并成**一次**询问。
+        用户拒绝时默认只拒绝被拒的那些，其余照常执行。
+        """
+        pending = self._pending
+        self._pending = []
+        if not pending:
+            return []
+
+        if not should_merge(pending):
+            entry = pending[0]
+            request = ApprovalRequest(
+                tool_name=entry["call"].name,
+                risk=entry["spec"].risk,
+                summary=entry["summary"],
+                arguments=entry["call"].arguments,
+            )
+            approved = bool(self.callbacks.request_approval(request))
+            self.actions.audit.add(
+                entry["call"].name, entry["summary"], entry["spec"].risk,
+                "user" if approved else "denied",
+            )
+            if not approved:
+                self._deny_one(entry)
+                return []
+            bundle = self._execute_one(
+                entry["call"], entry["call_id"], entry["spec"], entry["summary"])
+            return [bundle] if bundle is not None else []
+
+        # ---- 多个：合成一次询问
+        items = [
+            BatchItem(index=position + 1, tool=entry["call"].name,
+                      risk=entry["spec"].risk, summary=entry["summary"])
+            for position, entry in enumerate(pending)
+        ]
+        decisions = self.callbacks.request_approval_batch(items) or {}
+
+        # 用户拒绝了哪些就跳过哪些 —— 不做「一个被拒就整批作废」，
+        # 那会让用户不敢只拒一条（只能全拒或全放，反而更不安全）。
+        approved_count = sum(1 for item in items if decisions.get(item.index))
+        denied_count = len(items) - approved_count
+
+        results: list[dict] = []
+        for position, entry in enumerate(pending):
+            index = position + 1
+            allowed = bool(decisions.get(index))
+            self.actions.audit.add(
+                entry["call"].name, entry["summary"], entry["spec"].risk,
+                "user" if allowed else "denied",
+            )
+            if not allowed:
+                self._deny_one(entry, merged=len(items))
+                continue
+            bundle = self._execute_one(
+                entry["call"], entry["call_id"], entry["spec"], entry["summary"])
+            if bundle is not None:
+                results.append(bundle)
+
+        # 明确告诉模型批次里有几个没被批准 —— 否则它可能以为全做完了
+        if denied_count:
+            note = (
+                f"（这一批 {len(items)} 个操作里，"
+                f"{approved_count} 个被允许、{denied_count} 个被拒绝。"
+                "被拒绝的**不要**换个说法再试，需要就重新问用户。）"
+            )
+            self._record_system_note(note)
+        return results
+
+    def _deny_one(self, entry: dict, merged: int = 0) -> None:
+        """记录一次用户拒绝，并给模型可执行的下一步。"""
+        tool = entry["call"].name
+        if merged:
+            message = (
+                f"用户在这一批操作里拒绝了「{entry['summary']}」。"
+                "**不要换个说法再试同一个动作**，问他想怎么处理。"
+            )
+        else:
+            message = "用户拒绝了这个操作，请换一种方式，或者停下来询问用户。"
+        self.callbacks.on_event(StepEvent(
+            kind="error", tool=tool, risk=entry["spec"].risk, ok=False,
+            text="用户已拒绝", detail=message,
+        ))
+        self._record_tool(entry["call_id"], tool, message, ok=False)
+
+    def _record_system_note(self, note: str) -> None:
+        """往对话里插一条系统说明（当作 user 消息，模型看得到）。"""
+        self.messages.append({"role": "user", "content": f"[系统] {note}"})
+
     # -------------------------------------------------------------- 单步执行
     def _run_one(self, call, call_id: str):
         spec = TOOL_INDEX.get(call.name)
@@ -464,7 +634,10 @@ class AgentRunner:
             self._record_tool(call_id, call.name, f"未知工具：{call.name}", ok=False)
             return None
 
-        summary = describe_arguments(call.name, call.arguments)
+        # 只算人话版的描述。原来这里还同时算了原始 JSON（describe_arguments），
+        # 结果两处混用，审批卡片上冒出过 {"x": 640, "y": 360} 这种
+        # 用户没法判断的东西。审计日志要细节时直接用 call.arguments。
+        human = self._human_summary(call.name, call.arguments)
 
         # ---- 止损：完全相同的调用已经失败太多次，就别再执行了
         #
@@ -493,29 +666,49 @@ class AgentRunner:
             self._record_tool(call_id, call.name, message, ok=False)
             return None
 
-        # ---- 需要用户确认
+        # ---- 需要用户确认。
+        #
+        # 注意：**这里不再直接阻塞询问**。同一轮可能有多个待确认操作，
+        # 逐个弹卡片会让用户点很多次（也正因如此，用户最后干脆全自动）。
+        # 改成先登记，回到 run() 里合成**一次**询问 —— 见 _run_round。
+        #
+        # danger 级例外：执行命令这种事**绝不合并**。
+        # 它要是藏在批量的第 7 条里，用户很可能没细看就一起批了。
         if self.actions.needs_approval(spec.risk):
-            request = ApprovalRequest(
-                tool_name=call.name,
-                risk=spec.risk,
-                summary=self._human_summary(call.name, call.arguments),
-                arguments=call.arguments,
-            )
-            approved = bool(self.callbacks.request_approval(request))
-            self.actions.audit.add(
-                call.name, summary, spec.risk, "user" if approved else "denied"
-            )
-            if not approved:
-                message = "用户拒绝了这个操作，请换一种方式，或者停下来询问用户。"
-                self.callbacks.on_event(StepEvent(
-                    kind="error", tool=call.name, risk=spec.risk, ok=False,
-                    text="用户已拒绝", detail=message,
-                ))
-                self._record_tool(call_id, call.name, message, ok=False)
-                return None
-        else:
-            self.actions.audit.add(call.name, summary, spec.risk, "auto")
+            if spec.risk == Risk.DANGER:
+                # 高危操作单独问（不参与合并），描述用 human 不是原始 JSON
+                approved = bool(self.callbacks.request_approval(ApprovalRequest(
+                    tool_name=call.name, risk=spec.risk,
+                    summary=human, arguments=call.arguments,
+                )))
+                self.actions.audit.add(
+                    call.name, human, spec.risk,
+                    "user" if approved else "denied",
+                )
+                if not approved:
+                    message = ("用户拒绝了这条高危操作，"
+                               "请换一种方式，或者停下来询问用户。")
+                    self.callbacks.on_event(StepEvent(
+                        kind="error", tool=call.name, risk=spec.risk, ok=False,
+                        text="用户已拒绝（高危操作单独确认）", detail=message,
+                    ))
+                    self._record_tool(call_id, call.name, message, ok=False)
+                    return None
+                return self._execute_one(call, call_id, spec, human)
 
+            self._pending.append({
+                "call": call,
+                "call_id": call_id,
+                "spec": spec,
+                "summary": human,
+            })
+            return None
+
+        self.actions.audit.add(call.name, human, spec.risk, "auto")
+        return self._execute_one(call, call_id, spec, human)
+
+    def _execute_one(self, call, call_id: str, spec, summary: str):
+        """真正执行一个工具，并把结果整理成回给模型的内容。"""
         # ---- 真正执行
         self.callbacks.on_status(f"执行 {call.name}…")
         started = time.time()

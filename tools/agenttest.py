@@ -370,6 +370,73 @@ def main() -> int:
         check("401 错误提示了 Key 问题", ok is False and "Key" in message, message[:80])
         auth_server.shutdown()
 
+        # ============================================ 场景五：界面元素工具
+        # 这是 P0 功能的端到端验证：AI 是否真的能通过 UIA 拿到控件信息，
+        # 而不是只会看图猜坐标
+        print("\n=== 场景五：界面元素（UI Automation）工具 ===")
+
+        model5 = FakeModel([
+            tool_call("u1", "ui_windows", {}),
+            tool_call("u2", "ui_element_at", {"x": 960, "y": 540}),
+            tool_call("u3", "ui_focused", {}),
+            {"content": "我看过界面上的控件了。"},
+        ])
+        server5, base5 = make_server(model5)
+        client5 = AIClient(api_key="sk-fake", model="fake", base_url=base5, timeout=30)
+
+        store5 = Store(scratch / "s5.json", scratch / "s5.bak.json")
+        store5.load()
+        actions5 = DesktopActions(AuditLog())
+        context5 = ToolContext(capture, actions5, store5)
+
+        events5: list[StepEvent] = []
+        approvals5: list[str] = []
+
+        class Recorder5:
+            def on_status(self, text): pass
+            def on_event(self, event): events5.append(event)
+            def on_image(self, png, note): pass
+            def on_finished(self, text): pass
+            def on_error(self, text): events5.append(StepEvent(kind="error", text=text))
+            def request_approval(self, request):
+                approvals5.append(request.tool_name)
+                return True
+
+        runner5 = AgentRunner(client5, context5, actions5, Recorder5())
+        runner5.run("看看当前有哪些窗口，屏幕中间是什么控件")
+
+        ui_events = [e for e in events5 if e.kind == "tool" and e.tool.startswith("ui_")]
+        check("AI 调用了界面元素工具", len(ui_events) >= 3,
+              f"实际 {len(ui_events)} 个：{[e.tool for e in ui_events]}")
+        check("界面元素查询不需要审批（只读）", len(approvals5) == 0,
+              f"实际 {approvals5}")
+        check("窗口列表返回了内容",
+              any(e.tool == "ui_windows" and e.ok and "窗口" in (e.detail or "")
+                  for e in ui_events),
+              str([(e.tool, (e.detail or '')[:40]) for e in ui_events]))
+        check("坐标查询返回了控件信息",
+              any(e.tool == "ui_element_at" and e.ok
+                  and ("控件" in (e.detail or "") or "没有读到" in (e.detail or ""))
+                  for e in ui_events),
+              str([(e.tool, (e.detail or '')[:50]) for e in ui_events]))
+        check("界面工具没让 agent 卡死（全部及时返回）",
+              all(e.seconds < 15 for e in ui_events),
+              str([(e.tool, round(e.seconds, 1)) for e in ui_events]))
+
+        # 关键：系统提示词里必须引导模型优先用 UIA 而不是猜坐标
+        from pawpet.ai.agent import SYSTEM_PROMPT
+        check("系统提示词要求优先用界面元素接口",
+              "ui_element_at" in SYSTEM_PROMPT and "ui_controls" in SYSTEM_PROMPT,
+              "提示词里没提到这些工具")
+        check("系统提示词说明了控件读不到时怎么办",
+              "读不到" in SYSTEM_PROMPT or "自绘" in SYSTEM_PROMPT)
+
+        # 工具定义里必须带上这些
+        from pawpet.ai.tools import TOOL_INDEX
+        for name in ("ui_element_at", "ui_focused", "ui_windows",
+                     "ui_controls", "ui_click", "ui_set_text"):
+            check(f"工具 {name} 已注册", name in TOOL_INDEX)
+
     finally:
         server.shutdown()
         try:

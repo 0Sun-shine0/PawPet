@@ -46,11 +46,77 @@ _BOOL = {"type": "boolean"}
 
 
 TOOLS: list[ToolSpec] = [
+    # ------------------------------------------------------- 界面元素（UIA）
+    # 这一组是「准确率和速度的总开关」：不再靠像素猜坐标，而是直接问
+    # Windows 那个坐标上到底是什么控件、叫什么名字、能不能点。
+    ToolSpec(
+        "ui_element_at",
+        "查看屏幕上某个坐标上**实际是什么控件**。"
+        "在点击之前用它确认目标，比单纯看截图可靠得多 —— "
+        "它会返回控件的类型（按钮/输入框/链接…）、名字、精确位置、以及能不能点。"
+        "坐标用真实屏幕坐标（和 screen_info 返回的坐标系一致）。",
+        _schema({
+            "x": {**_INT, "description": "真实屏幕 x 坐标"},
+            "y": {**_INT, "description": "真实屏幕 y 坐标"},
+        }, ["x", "y"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "ui_focused",
+        "查看当前**键盘焦点在哪个控件**上，以及它的名字和位置。"
+        "要在输入框里打字之前，用这个确认焦点对不对。",
+        _schema({}),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "ui_windows",
+        "列出当前打开的窗口（标题 + 句柄）。比截图更直接，用来确认目标程序是否已打开。",
+        _schema({}),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "ui_controls",
+        "读取某个窗口内部的控件列表（控件名、类型、精确位置、可用操作）。"
+        "拿到清单后就能按名字定位，不必再靠坐标。"
+        "注意：浏览器、Office、WPS 这类程序支持得很好；"
+        "而用 Tk/Qt 绘制的程序可能读不到（会返回说明而不是卡住）。",
+        _schema({
+            "window": {**_STRING, "description": "窗口标题的一部分，不区分大小写"},
+            "limit": {**_INT, "description": "最多返回多少个控件，默认 60，上限 150"},
+        }, ["window"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "ui_click",
+        "**按控件名字点击**，直接触发这个控件，不移动鼠标、不需要坐标。"
+        "比坐标点击可靠得多，也不会因为窗口位置变化而点错。"
+        "先用 ui_controls 拿到控件清单，再用这里给的名字。",
+        _schema({
+            "window": {**_STRING, "description": "控件所在窗口标题的一部分"},
+            "name": {**_STRING, "description": "控件的名字（可以是其中的一部分）"},
+            "type": {**_STRING, "description": "可选的控件类型，如 Button、MenuItem。用于消歧"},
+        }, ["window", "name"]),
+        Risk.CONFIRM,
+    ),
+    ToolSpec(
+        "ui_set_text",
+        "**按控件名字直接设置输入框的内容**，不模拟键盘。"
+        "不受输入法、焦点、键盘布局影响，也不会因为窗口失焦而丢字 —— "
+        "输入中文时尤其推荐。",
+        _schema({
+            "window": {**_STRING, "description": "输入框所在窗口标题的一部分"},
+            "name": {**_STRING, "description": "输入框的名字（可以是其中的一部分）"},
+            "text": {**_STRING, "description": "要填入的内容"},
+        }, ["window", "name", "text"]),
+        Risk.CONFIRM,
+    ),
+
     # -------------------------------------------------------------- 观察
     ToolSpec(
         "screenshot",
-        "截取屏幕并查看当前画面。这是你了解屏幕状态的唯一方式，"
-        "每次操作之后都应该重新截图确认结果。返回的图片尺寸不同于真实屏幕尺寸，"
+        "截取屏幕并查看当前画面。用它了解**界面长什么样、有没有报错弹窗**；"
+        "但要定位控件、获取精确坐标时，优先用 ui_element_at / ui_controls，"
+        "那比看图猜坐标准确得多。返回的图片尺寸不同于真实屏幕尺寸，"
         "你给出的所有坐标都要基于返回图片的尺寸。",
         _schema({
             "monitor": {**_INT, "description": "要截取的显示器序号，从 1 开始。默认 1。"},
@@ -334,6 +400,273 @@ class ToolContext:
         lines.append("显示器：")
         lines.append(self.capture.describe_monitors())
         return True, "\n".join(lines), None
+
+    # ==================================================================
+    #  界面元素（UI Automation）
+    #
+    #  这一组的价值：把「看图猜坐标」换成「直接问系统这个控件是什么」。
+    #  UIA 会卡死（见 uia.py 的说明），所以每个调用都包在
+    #  call_with_timeout 里，超时就给出说明而不是挂住整个对话。
+    # ==================================================================
+    def _uia(self):
+        """惰性取 UIA 客户端。不可用时返回 (None, 原因)。"""
+        try:
+            from . import uia
+        except Exception as exc:  # noqa: BLE001
+            return None, f"UI Automation 模块加载失败：{exc}"
+        try:
+            client = uia.get_client()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"UI Automation 初始化失败：{exc}"
+        if not client.available:
+            return None, client.error or "UI Automation 不可用"
+        return (client, uia), ""
+
+    def _do_ui_element_at(self, args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, uia = got
+
+        x = int(args.get("x") or 0)
+        y = int(args.get("y") or 0)
+
+        ok, result = uia.call_with_timeout(
+            lambda: client.element_at(x, y), timeout=5.0)
+        if not ok:
+            return False, str(result), None
+        if result is None:
+            return True, (f"({x}, {y}) 上没有读到控件信息。 "
+                          "可能那里是空白区域，或者目标程序不提供辅助功能信息。"), None
+
+        element = result
+        lines = [
+            f"坐标 ({x}, {y}) 上是一个 **{element.type_name}** 控件。",
+            f"名称：{element.name or '(没有名称)'}",
+            f"位置：({element.left}, {element.top})，尺寸 {element.width}x{element.height}",
+            f"中心点：{element.center}",
+        ]
+        if element.automation_id:
+            lines.append(f"标识：{element.automation_id}")
+        if not element.is_enabled:
+            lines.append("状态：**已禁用**（点了也不会生效）")
+        if element.patterns:
+            names = [uia.PATTERN_NAMES.get(p, str(p)) for p in element.patterns]
+            lines.append("可用操作：" + "、".join(names))
+            if uia.PATTERN_INVOKE in element.patterns:
+                lines.append("→ 这个控件可以直接点击（可用 ui_click 按名字点它）")
+        else:
+            lines.append("可用操作：（没有可直接调用的操作，可能只是个容器）")
+        return True, "\n".join(lines), None
+
+    def _do_ui_focused(self, _args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, uia = got
+
+        ok, result = uia.call_with_timeout(lambda: client.focused(), timeout=5.0)
+        if not ok:
+            return False, str(result), None
+        if result is None:
+            return True, "当前没有控件拥有键盘焦点（可能焦点在系统级界面上）。", None
+
+        element = result
+        lines = [
+            f"当前焦点在 **{element.type_name}** 上。",
+            f"名称：{element.name or '(没有名称)'}",
+            f"位置：({element.left}, {element.top})，尺寸 {element.width}x{element.height}",
+        ]
+        if element.automation_id:
+            lines.append(f"标识：{element.automation_id}")
+
+        # 支持 Value 模式的话顺手把当前内容读出来 —— 模型常想知道
+        if uia.PATTERN_VALUE in element.patterns:
+            value_ok, value = uia.call_with_timeout(
+                lambda: client.read_value(element), timeout=3.0)
+            if value_ok and value:
+                shown = value if len(value) <= 200 else value[:200] + "…"
+                lines.append(f"当前内容：{shown}")
+            elif value_ok:
+                lines.append("当前内容：（空）")
+        return True, "\n".join(lines), None
+
+    def _do_ui_windows(self, _args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, _uia_mod = got
+
+        windows = client.windows()
+        if not windows:
+            return True, "没有找到有标题的可见窗口。", None
+
+        lines = [f"当前有 {len(windows)} 个打开的窗口："]
+        for index, item in enumerate(windows[:40], 1):
+            lines.append(f"{index:2d}. {item.title}")
+        if len(windows) > 40:
+            lines.append(f"…还有 {len(windows) - 40} 个")
+        lines.append("")
+        lines.append("要对某个窗口操作控件时，把标题里的一段传给 "
+                     "ui_controls / ui_click / ui_set_text。")
+        return True, "\n".join(lines), None
+
+    def _do_ui_controls(self, args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, uia = got
+
+        keyword = str(args.get("window") or "").strip()
+        if not keyword:
+            return False, "需要指定窗口标题的一部分", None
+
+        limit = max(1, min(150, int(args.get("limit") or 60)))
+
+        window = client.find_window(keyword)
+        if window is None:
+            available = [w.title for w in client.windows()][:15]
+            return False, (f"没找到标题含「{keyword}」的窗口。\n"
+                           f"当前打开的窗口有：{'；'.join(available)}"), None
+
+        # 读控件树可能很慢（甚至超时），给足时间但也设上限
+        ok, result = uia.call_with_timeout(
+            lambda: client.tree(window, max_elements=limit), timeout=12.0)
+        if not ok:
+            return False, (f"读取「{window.title}」的控件超时。\n"
+                           "这个程序可能不支持辅助功能接口"
+                           "（用 Tk/Qt 自绘界面的程序常见）。\n"
+                           "改用截图观察，或者用 ui_element_at 按坐标确认控件。"), None
+
+        elements, note = result
+        if not elements:
+            return True, (f"{note}\n"
+                          "这个窗口没有提供可读的控件信息（界面可能是自绘的）。\n"
+                          "建议改用截图观察，或者用 ui_element_at 逐点确认。"), None
+
+        lines = [note, ""]
+        for element in elements:
+            lines.append("  " + element.summary())
+
+        actionable = [e for e in elements if e.patterns]
+        if actionable:
+            lines.append("")
+            lines.append(f"其中 {len(actionable)} 个可以**按名字直接操作**，例如：")
+            for element in actionable[:6]:
+                lines.append(f"  · {element.name!r}（{element.type_name}）")
+            lines.append("用 ui_click / ui_set_text 传这些名字即可，不需要坐标。")
+        return True, "\n".join(lines), None
+
+    def _find_control(self, client, uia, keyword: str, name: str,
+                      type_filter: str = ""):
+        """在窗口里找一个控件。返回 (元素, 错误说明)。"""
+        window = client.find_window(keyword)
+        if window is None:
+            available = [w.title for w in client.windows()][:12]
+            return None, (f"没找到标题含「{keyword}」的窗口。"
+                          f"当前窗口：{'；'.join(available)}")
+
+        ok, result = uia.call_with_timeout(
+            lambda: client.tree(window, max_elements=150, interesting_only=False),
+            timeout=12.0)
+        if not ok:
+            return None, (f"读取「{window.title}」的控件超时，"
+                          "可能是这个程序不支持辅助功能接口。改用坐标点击。")
+
+        elements, _note = result
+        if not elements:
+            return None, (f"「{window.title}」没有提供可读的控件"
+                          "（界面可能是自绘的）。改用截图 + 坐标点击。")
+
+        element = client.find_in(elements, name=name, control_type=type_filter)
+        if element is None:
+            candidates = [e for e in elements if e.patterns][:10]
+            listing = "；".join(f"{e.name!r}({e.type_name})" for e in candidates)
+            suffix = f"、类型为 {type_filter}" if type_filter else ""
+            return None, (f"在「{window.title}」里没找到名字含「{name}」{suffix} 的控件。\n"
+                          f"可操作的控件有：{listing or '（没有）'}")
+        return element, ""
+
+    def _do_ui_click(self, args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, uia = got
+
+        keyword = str(args.get("window") or "").strip()
+        name = str(args.get("name") or "").strip()
+        type_filter = str(args.get("type") or "").strip()
+        if not keyword or not name:
+            return False, "需要同时给出窗口和控件名字", None
+
+        element, error = self._find_control(client, uia, keyword, name, type_filter)
+        if element is None:
+            return False, error, None
+
+        # 优先用 Invoke（不移动鼠标，最可靠）
+        fallback_reason = ""
+        if uia.PATTERN_INVOKE in element.patterns:
+            ok, message = uia.call_with_timeout(
+                lambda: client.invoke(element), timeout=6.0)
+            if ok:
+                return True, f"{message}（用的是控件接口，不是模拟鼠标）", None
+            fallback_reason = str(message)
+        elif uia.PATTERN_SELECTION_ITEM in element.patterns:
+            ok, message = uia.call_with_timeout(
+                lambda: client.select(element), timeout=6.0)
+            if ok:
+                return True, f"{message}（用的是控件接口）", None
+            fallback_reason = str(message)
+        else:
+            fallback_reason = f"「{element.name}」不支持直接触发"
+
+        # 退回坐标点击。注意：这个坐标是**从控件读出来的**，比看图猜准得多。
+        cx, cy = element.center
+        if cx <= 0 and cy <= 0:
+            return False, f"{fallback_reason}，而且它没有有效的位置信息", None
+        result = self.actions.click(cx, cy)
+        if result.ok:
+            return True, (f"{fallback_reason}，已改用坐标点击 ({cx}, {cy}) —— "
+                          "这个坐标是从控件读出来的，比看图猜准确。"), None
+        return False, f"{fallback_reason}；坐标点击也失败：{result.message}", None
+
+    def _do_ui_set_text(self, args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        client, uia = got
+
+        keyword = str(args.get("window") or "").strip()
+        name = str(args.get("name") or "").strip()
+        text = str(args.get("text") or "")
+        if not keyword or not name:
+            return False, "需要同时给出窗口和控件名字", None
+
+        element, error = self._find_control(client, uia, keyword, name, "Edit")
+        if element is None:
+            # 有些输入框的控件类型不是 Edit，放宽类型再找一次
+            element, error = self._find_control(client, uia, keyword, name)
+        if element is None:
+            return False, error, None
+
+        if uia.PATTERN_VALUE not in element.patterns:
+            return False, (f"「{element.name}」不支持直接设值（不是标准输入框）。"
+                           "可以先 ui_click 聚焦它，再用 type_text 输入。"), None
+
+        ok, message = uia.call_with_timeout(
+            lambda: client.set_value(element, text), timeout=6.0)
+        if not ok:
+            return False, f"设置内容失败：{message}", None
+
+        # 回读确认，避免「以为写进去了其实没有」
+        verify_ok, actual = uia.call_with_timeout(
+            lambda: client.read_value(element), timeout=3.0)
+        if verify_ok and actual == text:
+            return True, f"{message}，已回读确认内容正确。", None
+        if verify_ok:
+            return True, (f"{message}。注意：回读到的是 {actual!r}，"
+                          "和期望不完全一致，可能控件对内容做了格式化。"), None
+        return True, f"{message}（未能回读确认）。", None
 
     def _do_list_windows(self, _args: dict):
         titles = self.actions.list_windows()

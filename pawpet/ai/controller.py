@@ -215,6 +215,15 @@ class AiController(QObject):
     def capabilityReport(self) -> str:
         lines = [self.capture.status()]
         lines.append(self.actions.status())
+
+        # UI Automation 是「读控件而不是猜坐标」的总开关，放在显眼位置
+        try:
+            from . import uia
+
+            lines.append(uia.status())
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"UI Automation 不可用：{exc}")
+
         try:
             import pyautogui  # noqa: F401
 

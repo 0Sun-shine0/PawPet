@@ -21,6 +21,7 @@ Item {
     property string detail: ""
     property string toolName: ""
     property string risk: ""
+    property string recovery: ""       // 失败时给「接下来怎么办」的一行说明
     property bool ok: true
     property string stamp: ""
     property real seconds: 0
@@ -213,6 +214,18 @@ Item {
                 wrapMode: Text.Wrap
                 maximumLineCount: 5
                 elide: Text.ElideRight
+            }
+
+            // 失败时的一行「接下来怎么办」。让用户看得懂它是在换路，
+            // 而不是在原地卡死。
+            Text {
+                Layout.fillWidth: true
+                visible: !bubble.ok && bubble.recovery.length > 0
+                text: "→ " + bubble.recovery
+                color: Theme.gold
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
             }
         }
     }

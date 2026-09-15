@@ -224,9 +224,55 @@ class AgentRunner:
 
         # 硬上限：超出就从头砍，但保留 system
         if len(self.messages) > MAX_HISTORY_MESSAGES:
-            head = self.messages[:1]
-            tail = self.messages[-(MAX_HISTORY_MESSAGES - 1):]
-            self.messages = head + tail
+            cut = len(self.messages) - (MAX_HISTORY_MESSAGES - 1)
+            # **必须从一个合法的位置开始砍。**
+            #
+            # OpenAI 兼容接口的硬规矩：role="tool" 的消息必须紧跟在
+            # 「带 tool_calls 的 assistant」后面，tool_call_id 要对得上。
+            # 从中间一刀切下去，很容易把 assistant 砍掉、把它的 tool 结果
+            # 留在开头 —— 于是下一次请求直接 400：
+            #   No tool call found for tool output with call_id call_xxx
+            #
+            # 实测踩过这个坑。所以往后挪，直到落在一个不是 tool 的消息上。
+            while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+                cut += 1
+            # 极端情况：挪到末尾了（整段都是 tool），那就什么都别留更安全
+            if cut >= len(self.messages):
+                self.messages = self.messages[:1]
+            else:
+                self.messages = self.messages[:1] + self.messages[cut:]
+
+    def _repair_tool_messages(self) -> int:
+        """确保每条 role="tool" 都能找到它对应的 assistant tool_calls。
+
+        这是发给模型前的最后一道保险。返回丢弃的条数。
+
+        `_trim_history` 已经会避开这个坑，但历史还可能从别处变脏
+        （比如 controller 回放历史、以后有人改了裁剪逻辑）。
+        与其让用户吃一个 400 错误、还不知道为什么，不如在这里兜住：
+        宁可少一条工具结果，也不能整个对话发不出去。
+        """
+        known: set[str] = set()
+        survivors: list[dict] = []
+        dropped = 0
+
+        for message in self.messages:
+            role = message.get("role")
+            if role == "assistant":
+                for call in message.get("tool_calls") or []:
+                    call_id = call.get("id")
+                    if call_id:
+                        known.add(call_id)
+            elif role == "tool":
+                call_id = message.get("tool_call_id")
+                if not call_id or call_id not in known:
+                    dropped += 1
+                    continue
+            survivors.append(message)
+
+        if dropped:
+            self.messages = survivors
+        return dropped
 
     def _append_user(self, text: str, image_data_url: str = "") -> None:
         if image_data_url:
@@ -268,6 +314,9 @@ class AgentRunner:
 
                 self.callbacks.on_status(f"思考中…（第 {step} 步）")
                 self._trim_history()
+                # 发出去之前最后兜一次：宁可少一条工具结果，
+                # 也不能让整个请求因为 call_id 对不上而 400。
+                self._repair_tool_messages()
 
                 try:
                     reply = self.client.chat(self.messages, tools=openai_tools())

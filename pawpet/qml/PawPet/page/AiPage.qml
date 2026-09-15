@@ -474,7 +474,9 @@ Item {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.margins: 9
-                            text: backend.ai.capabilityReport
+                            // 把「当前跑的是什么版本、步数设置是多少」也摆出来。
+                            // 改了代码却没重启时，这里一眼就能看出来。
+                            text: backend.buildInfo + "\n" + backend.ai.capabilityReport
                             color: Theme.textFaint
                             font.family: Theme.font
                             font.pixelSize: Theme.fsTiny

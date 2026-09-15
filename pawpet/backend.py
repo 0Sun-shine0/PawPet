@@ -583,6 +583,15 @@ class Backend(QObject):
             parts.append("自动化模块：已就绪（pyautogui）")
         except ImportError:
             parts.append("自动化模块：未安装")
+
+        # UI Automation 是「读控件而不是猜坐标」的关键，单独报出来
+        try:
+            from .ai import uia
+
+            parts.append("界面元素：" + uia.status())
+        except Exception as exc:  # noqa: BLE001
+            parts.append(f"界面元素：不可用（{exc}）")
+
         key = os.environ.get("OPENAI_API_KEY", "").strip()
         parts.append("AI 模型：" + ("已配置" if key else "未配置（在 .env 里填 OPENAI_API_KEY 后重启）"))
         return "\n".join(parts)

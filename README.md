@@ -173,6 +173,52 @@
 - 「把浏览器切到前台，点登录按钮」→ 切换窗口、点击
 - 配合 MCP 还能接你自己的工具
 
+### 界面元素（UI Automation）—— 准确率和速度的总开关
+
+这是 AI 操作能力的核心改进。在此之前，AI 只能**看图猜坐标**：
+截图 → 目测「保存按钮大概在 (640, 380)」→ 点过去 → 再截图确认。
+每一步都可能出错，而且慢（一张截图几百 KB、几千 token）。
+
+现在它会**直接问 Windows**：那个坐标上到底是什么控件。
+
+| 工具 | 作用 |
+| --- | --- |
+| `ui_element_at(x, y)` | 这个坐标上是什么控件？名字、类型、精确位置、能不能点 |
+| `ui_controls("窗口")` | 列出这个窗口里所有可操作的控件 |
+| `ui_click("窗口", "按钮名")` | **按名字点击**，不需要坐标 |
+| `ui_set_text("窗口", "输入框", "内容")` | **直接设值**，不受输入法影响 |
+| `ui_focused()` | 当前焦点在哪个输入框，以及里面已有什么 |
+| `ui_windows()` | 列出打开的窗口 |
+
+**收益：**
+
+- **准**：控件移动、窗口缩放、分辨率变化都不影响
+- **快**：读一次是毫秒级，不产生 token
+- **中文输入可靠**：`SetValue` 直接写进控件，绕开输入法和焦点问题
+- **能判断可点性**：知道控件是否被禁用、支持哪些操作
+
+**边界（工具会如实说明，不会假装成功）：**
+
+- 浏览器、Office、WPS、VS Code 这类程序 → 读得很完整
+- 用 Tk / Qt 自绘界面的程序 → 读不到控件（界面是一整块画布）。
+  小爪自己的工作台就是 Qt Quick 画的，对它也读不到，这是正常的
+- 游戏、部分 Java 程序 → 读不到
+
+**一个重要的工程决定：UIA 会卡死，所以每个调用都有超时保护。**
+
+实测发现（`tools/uia_isolate.py` 可复现）：在**桌面根节点**上做批量枚举
+会永久卡死 —— UIA 会同步等待每个程序响应，桌面上只要有一个无响应的程序
+就会一直等下去。
+
+所以这里做了三件事：
+
+1. **枚举窗口用 Win32**（`EnumWindows`，实测 6 毫秒，永不卡死），
+   UIA 只用来读某个具体窗口内部的控件
+2. **每个 UIA 调用都有超时**（`call_with_timeout`），超时就放弃并说明原因
+3. 系统提示词里明确告诉模型：**读控件超时是正常现象，不要反复重试，改用截图**
+
+宁可给不出信息，也绝不让 AI 卡死 —— 这是对用户的硬承诺。
+
 ### 权限分级（重要）
 
 在「操作权限」里选，默认是**逐步确认**：
@@ -269,6 +315,7 @@ pawpet/
   win32.py               单实例互斥体、全局热键、空闲检测、开机自启
   config.py              路径、.env 读写
   ai/
+    uia.py               界面元素读取（UI Automation，零依赖 ctypes）
     vision.py            屏幕捕获、缩放与坐标映射
     actions.py           键鼠/窗口/命令行 + 分级安全 + 审计
     client.py            OpenAI 兼容客户端（函数调用）
@@ -293,8 +340,11 @@ tools/
   selftest.py            核心逻辑自测（92 项）
   mdtest.py              Markdown 转换器自测（51 项）
   aitest.py              AI 模块自测（76 项）
-  agenttest.py           Agent 端到端联调，带假模型服务器（27 项）
+  agenttest.py           Agent 端到端联调，带假模型服务器（40 项）
   smoketest.py           真实启动冒烟，含指令栏交互（41 项）
+  uia_test.py            界面元素模块测试（10 项，含位置正确性检验）
+  uia_isolate.py         逐个子进程探测哪些 UIA 调用会卡死
+  uia_probe.py           探测 UIA 可用通道（comtypes / ctypes）
   auditprops.py          检查 Python 属性名和 QML 访问名是否对得上
   layouttest.py          窄窗口下两栏布局是否会被挤坏
   menudiag.py            右键菜单的关闭行为（真鼠标点击）
@@ -333,7 +383,7 @@ legacy/                  旧 tkinter 实现（保留备查，程序不再引用�
 .venv\Scripts\python.exe tools\selftest.py       # 核心逻辑，92 项
 .venv\Scripts\python.exe tools\mdtest.py         # Markdown 渲染，51 项
 .venv\Scripts\python.exe tools\aitest.py         # AI 模块，76 项
-.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，27 项
+.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，40 项
 .venv\Scripts\python.exe tools\smoketest.py      # 真实启动，41 项
 .venv\Scripts\python.exe tools\menudiag.py       # 右键菜单，6 项（会动鼠标）
 .venv\Scripts\python.exe tools\setupui_test.py   # 安装向导布局，17 项

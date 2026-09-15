@@ -11,6 +11,8 @@ Item {
     objectName: "aiPage"
 
     property bool showSettings: false
+    // 记忆全文默认收起：它可能很长，展开会把左边栏撑得没法看
+    property bool showMemory: false
 
     // 给自测用的只读探针：两栏的真实宽度
     readonly property real leftColumnWidth: leftColumn.width
@@ -554,6 +556,77 @@ Item {
                             text: "每轮开始自动看一眼屏幕"
                             checked: backend.ai.autoScreenshot
                             onToggled: backend.ai.autoScreenshot = checked
+                        }
+                    }
+
+                    // -------------------------------------------------- 跨会话记忆
+                    // 记忆会进系统提示词，属于「AI 知道什么」的一部分，
+                    // 所以必须让用户看得见、删得掉 —— 偷偷记住东西很招人烦。
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: memColumn.implicitHeight + 20
+                        radius: Theme.radiusMd
+                        color: Theme.surfaceAlt
+                        border.width: 1
+                        border.color: Theme.borderSoft
+
+                        ColumnLayout {
+                            id: memColumn
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.margins: 10
+                            spacing: 8
+
+                            PawSwitch {
+                                Layout.fillWidth: true
+                                text: "记住我的习惯和进度"
+                                checked: backend.aiMemoryEnabled
+                                onToggled: backend.aiMemoryEnabled = checked
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: backend.aiMemoryCount > 0
+                                      ? "已记住 " + backend.aiMemoryCount + " 条"
+                                      : "还没有记忆，聊几次就有了"
+                                color: Theme.textDim
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                            }
+
+                            // 只在展开时才渲染全文，免得挤占左栏空间
+                            Text {
+                                Layout.fillWidth: true
+                                visible: page.showMemory
+                                text: backend.aiMemorySummary
+                                color: Theme.textFaint
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.35
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                PawButton {
+                                    small: true
+                                    text: page.showMemory ? "收起" : "看看记住了什么"
+                                    onClicked: {
+                                        page.showMemory = !page.showMemory
+                                        if (page.showMemory)
+                                            backend.refreshMemory()
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                                PawButton {
+                                    small: true
+                                    text: "清空"
+                                    enabled: backend.aiMemoryCount > 0
+                                    onClicked: backend.aiClearMemory()
+                                }
+                            }
                         }
                     }
                 }

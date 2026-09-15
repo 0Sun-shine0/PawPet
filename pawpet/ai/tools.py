@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 from .actions import LEVEL_READ_ONLY, Risk
@@ -280,6 +281,64 @@ TOOLS: list[ToolSpec] = [
             "timeout": {**_INT, "description": "超时秒数，默认 20"},
         }, ["command"]),
         Risk.DANGER,
+    ),
+
+    # ------------------------------------------------------------ 跨会话记忆
+    # 这些工具让「记住」变成模型能主动做的事。没有它们的话，
+    # 每一轮对话都得让用户从头交代一遍。
+    ToolSpec(
+        "remember",
+        "**把关于用户的事情长期记下来**，下次打开小爪还在。"
+        "适合记：常用程序、称呼习惯、排版偏好、工作流程、"
+        "「以后都这样」这类明确的要求。"
+        "不适合记：只对这一次有效的细节（临时坐标、本次对话的中间结果）。"
+        "重复记同一件事不会产生两条，会合并成一条。",
+        _schema({
+            "text": {**_STRING, "description":
+                     "要记的内容，一句完整的话，比如「他习惯用 WPS 而不是 Office」"},
+            "category": {**_STRING, "description":
+                         "分类：identity（身份）/ preference（偏好）/ "
+                         "workflow（工作方式）/ environment（环境）/ other"},
+            "confidence": {**_INT, "description":
+                           "3=确定（用户明说的）；2=比较确定（默认）；"
+                           "1=不太确定（你推测的，用的时候要再确认）"},
+        }, ["text"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "forget_memory",
+        "**忘掉**一条记错或过期的记忆。"
+        "当用户说「不对」「不是这样」「以后不用了」，或者你发现记忆和"
+        "眼前的事实冲突时用它。传记忆内容的片段即可。",
+        _schema({
+            "text": {**_STRING, "description": "要忘掉的那条记忆的内容片段"},
+        }, ["text"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "recall_memory",
+        "查看当前**已经记住的全部内容**。"
+        "系统提示词里只列出了最重要的一部分，"
+        "怀疑自己有相关记忆但没看到时，用它查全量。",
+        _schema({
+            "keyword": {**_STRING, "description":
+                        "可选。只列出包含这个词的记忆，不传就列全部"},
+        }),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "note_task_state",
+        "**记录一件事做到哪了**，下次开机能接着做。"
+        "任务跨度比较大、这一轮做不完，或者用户说「先这样，回头再弄」时用。"
+        "做完之后同样用它把状态改成 done，别让已完成的事一直挂在待办里。",
+        _schema({
+            "text": {**_STRING, "description": "这件事是什么，一句话"},
+            "status": {**_STRING, "description":
+                       "open=进行中（默认）；done=已完成；blocked=卡住了"},
+            "next_step": {**_STRING, "description":
+                          "可选。下一步具体该做什么，写清楚下次能直接上手"},
+        }, ["text"]),
+        Risk.READ,
     ),
 ]
 
@@ -754,8 +813,80 @@ class ToolContext:
         return result.ok, result.message, None
 
     def _do_activate_window(self, args: dict):
-        result = self.actions.activate_window(str(args.get("title") or ""))
+        title = str(args.get("title") or "")
+        result = self.actions.activate_window(title)
+        if result.ok:
+            self._observe_app(title)
         return result.ok, result.message, None
+
+    # ------------------------------------------------------- 被动观察常用程序
+    def _observe_app(self, keyword: str, max_apps: int = 5, threshold: int = 3):
+        """留意用户常切到哪些程序，用够了就记进长期记忆。
+
+        为什么要被动学：让模型每次都用 remember 记「他用了 WPS」太浪费 ——
+        那是一句废话，还占一次工具往返。而「常用程序」是有用的长期信息：
+        下次它就知道该找哪个窗口，不用用户再说一遍「还是用 WPS」。
+
+        threshold 是「用够几次才算习惯」。只切一次就记下来的话，
+        偶发操作会被当成习惯，记忆很快就脏了。
+        """
+        keyword = (keyword or "").strip()
+        if not keyword or len(keyword) > 60:
+            return
+
+        apps = self.store.memory.setdefault("app_usage", {})
+        if not isinstance(apps, dict):
+            apps = {}
+            self.store.memory["app_usage"] = apps
+
+        now = time.time()
+        key = keyword.lower()
+        entry = apps.get(key)
+        if isinstance(entry, dict):
+            entry["count"] = int(entry.get("count") or 0) + 1
+            entry["last"] = now
+            entry["label"] = keyword
+        else:
+            entry = {"count": 1, "last": now, "label": keyword}
+            apps[key] = entry
+
+        # 只留最常用的几个，别让这个表无限长大
+        if len(apps) > 20:
+            ordered = sorted(apps.items(),
+                             key=lambda kv: kv[1].get("count", 0), reverse=True)
+            self.store.memory["app_usage"] = dict(ordered[:20])
+            apps = self.store.memory["app_usage"]
+
+        # 到阈值了，作为一条「环境」类记忆写下来
+        if entry["count"] == threshold:
+            try:
+                from .memory import MemoryBook
+
+                # MemoryBook.add_fact 自己会 save，所以上面只更新计数、
+                # 不单独存一次盘 —— 切个窗口写两次盘是没必要的开销。
+                MemoryBook(self.store).add_fact(
+                    f"常用程序：{keyword}", category="environment",
+                    confidence=2, source="observed")
+                return
+            except Exception:  # noqa: BLE001 - 观察失败绝不能影响正在做的事
+                pass
+
+        self.store.save()
+
+    def frequent_apps(self, limit: int = 5) -> list[tuple[str, int]]:
+        """最常用的程序，(名字, 次数) 列表。"""
+        apps = self.store.memory.get("app_usage")
+        if not isinstance(apps, dict):
+            return []
+        items = []
+        for entry in apps.values():
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("label") or "").strip()
+            if label:
+                items.append((label, int(entry.get("count") or 0)))
+        items.sort(key=lambda pair: pair[1], reverse=True)
+        return items[:limit]
 
     def _do_write_clipboard(self, args: dict):
         ok = self.actions.set_clipboard(str(args.get("text") or ""))
@@ -819,6 +950,105 @@ class ToolContext:
             })
             self.store.save()
         return True, f"已存入便签「{title}」", None
+
+    # ------------------------------------------------------------ 跨会话记忆
+    def _memory_book(self):
+        from .memory import MemoryBook
+
+        return MemoryBook(self.store)
+
+    def _do_remember(self, args: dict):
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return False, "要记的内容不能为空", None
+
+        category = str(args.get("category") or "other").strip().lower()
+        try:
+            confidence = int(args.get("confidence") or 2)
+        except (TypeError, ValueError):
+            confidence = 2
+
+        try:
+            fact, created = self._memory_book().add_fact(
+                text, category, confidence, source="ai")
+        except ValueError as exc:
+            return False, str(exc), None
+
+        if created:
+            message = f"已记住：{fact.text}"
+        else:
+            message = f"这条之前记过，已更新：{fact.text}"
+        if fact.confidence >= 3:
+            message += "\n（标记为「确定」，以后会直接按这个来）"
+        elif fact.confidence <= 1:
+            message += "\n（标记为「不确定」，用的时候我会再确认）"
+        return True, message, None
+
+    def _do_forget_memory(self, args: dict):
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return False, "要忘掉什么？给一段内容片段", None
+
+        removed = self._memory_book().forget(text)
+        if removed is None:
+            return True, (f"没有找到和「{text}」匹配的记忆，可能本来就没记过。"
+                          "可以用 recall_memory 看看现在都记了什么。"), None
+        return True, f"已忘掉：{removed.text}", None
+
+    def _do_recall_memory(self, args: dict):
+        from .memory import CATEGORY_LABELS, describe
+
+        book = self._memory_book()
+        memory = book.load()
+        if memory.is_empty():
+            return True, "现在还没有任何记忆。", None
+
+        keyword = str(args.get("keyword") or "").strip()
+        if not keyword:
+            return True, describe(memory), None
+
+        from .memory import normalize
+
+        needle = normalize(keyword)
+        hits = [f for f in memory.facts if needle in f.key]
+        aliases = [a for a in memory.aliases if needle in a.key
+                   or needle in normalize(a.actual)]
+        tasks = [t for t in memory.tasks if needle in t.key]
+
+        if not (hits or aliases or tasks):
+            return True, (f"没有和「{keyword}」相关的记忆。"
+                          "可以用 remember 记下来。"), None
+
+        lines = [f"和「{keyword}」相关的记忆：", ""]
+        for fact in hits:
+            label = CATEGORY_LABELS.get(fact.category, "其他")
+            lines.append(f"  [{label}] {fact.text}")
+        for alias in aliases:
+            lines.append(f"  叫法：「{alias.spoken}」→「{alias.actual}」")
+        for task in tasks:
+            lines.append(f"  任务：[{task.status}] {task.text}")
+        return True, "\n".join(lines), None
+
+    def _do_note_task_state(self, args: dict):
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return False, "任务描述不能为空", None
+
+        status = str(args.get("status") or "open").strip().lower()
+        next_step = str(args.get("next_step") or "").strip()
+        if status not in ("open", "done", "blocked"):
+            status = "open"
+
+        task = self._memory_book().note_task(text, status, next_step)
+        if status == "done":
+            return True, f"已把「{task.text}」标记为完成，不再挂在待办里。", None
+        if status == "blocked":
+            return True, (f"已记下「{task.text}」卡住了。"
+                          "下次会提醒你先解决这个。"), None
+        message = f"已记下进度：「{task.text}」"
+        if task.next_step:
+            message += f"\n下次接着做：{task.next_step}"
+        return True, message, None
 
     # ---------------------------------------------------------------- 系统
     def _do_open_app(self, args: dict):

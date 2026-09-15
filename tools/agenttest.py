@@ -571,6 +571,157 @@ def main() -> int:
             controller.shutdown()
             store.save()
 
+        # ============================================ 场景八：跨会话记忆
+        print("\n=== 场景八：跨会话记忆 ===")
+
+        from pawpet.ai.memory import Memory, MemoryBook, format_for_prompt
+
+        # 先塞一条「上次会话」留下的记忆
+        book = MemoryBook(store)
+        book.add_fact("他一直用 WPS，不要给他推荐 Office", "workflow", 3)
+
+        # 第一轮：模型记住一件新事
+        mem_model = FakeModel([
+            tool_call("m1", "remember", {
+                "text": "他喜欢回答控制在三行以内",
+                "category": "preference",
+                "confidence": 3,
+            }),
+            {"content": "好，我记住了。"},
+        ])
+        mem_server, mem_url = make_server(mem_model)
+        try:
+            mem_client = AIClient(api_key="sk-fake-key", model="fake-vision-model",
+                                  base_url=mem_url, timeout=20)
+            mem_actions = DesktopActions(AuditLog())
+            mem_actions.level = LEVEL_CONFIRM
+            mem_context = ToolContext(ScreenCapture(), mem_actions, store)
+
+            mem_events: list[StepEvent] = []
+
+            class MemRecorder:
+                def on_status(self, text): pass
+                def on_event(self, event): mem_events.append(event)
+                def on_image(self, png, note): pass
+                def on_finished(self, text): pass
+                def on_error(self, text): mem_events.append(StepEvent(kind="error", text=text))
+                def request_approval(self, request): return True
+
+            runner_m = AgentRunner(mem_client, mem_context, mem_actions, MemRecorder(),
+                                   max_steps=5, memory_text=format_for_prompt(book.load()))
+            runner_m.run("以后回答短一点")
+
+            remembered = Memory.from_dict(store.memory)
+            check("模型通过 remember 记下了新东西",
+                  any("三行以内" in f.text for f in remembered.facts),
+                  str([f.text for f in remembered.facts]))
+            check("记住的内容带上了置信度",
+                  any("三行以内" in f.text and f.confidence == 3
+                      for f in remembered.facts),
+                  str([(f.text, f.confidence) for f in remembered.facts]))
+            check("分类也存下来了",
+                  any("三行以内" in f.text and f.category == "preference"
+                      for f in remembered.facts),
+                  str([(f.text, f.category) for f in remembered.facts]))
+
+            # 关键：第一次请求的系统提示词里就该有「上一次」的记忆
+            first_prompt = mem_model.requests[0]["messages"][0]["content"]
+            check("上一次会话的记忆进了系统提示词",
+                  "WPS" in first_prompt, first_prompt[-200:])
+            check("提示词里带上了使用记忆的规矩",
+                  "remember" in first_prompt and "跨会话记忆" in first_prompt)
+            check("记忆放在 system 消息里而不是历史里",
+                  mem_model.requests[0]["messages"][0]["role"] == "system")
+
+            # 记忆工具是只读风险，不该弹审批
+            remember_events = [e for e in mem_events
+                               if e.kind == "tool" and e.tool == "remember"]
+            check("remember 不需要审批（只读写自己的数据）",
+                  len(remember_events) == 1 and remember_events[0].ok,
+                  str([(e.tool, e.ok) for e in mem_events]))
+        finally:
+            mem_server.shutdown()
+
+        # 第二轮：新开的 runner 必须看到上一轮记住的内容（跨会话的核心）
+        again = format_for_prompt(MemoryBook(store).load())
+        check("新一轮渲染出的记忆包含刚记住的内容",
+              "三行以内" in again, again[:200])
+        check("也还包含更早的那条", "WPS" in again, again[:200])
+
+        # 忘掉
+        forget_model = FakeModel([
+            tool_call("f1", "forget_memory", {"text": "三行以内"}),
+            {"content": "已经忘掉了。"},
+        ])
+        forget_server, forget_url = make_server(forget_model)
+        try:
+            forget_client = AIClient(api_key="sk-fake-key", model="fake-vision-model",
+                                     base_url=forget_url, timeout=20)
+            forget_actions = DesktopActions(AuditLog())
+            forget_actions.level = LEVEL_CONFIRM
+            forget_context = ToolContext(ScreenCapture(), forget_actions, store)
+
+            class ForgetRecorder:
+                def on_status(self, text): pass
+                def on_event(self, event): pass
+                def on_image(self, png, note): pass
+                def on_finished(self, text): pass
+                def on_error(self, text): pass
+                def request_approval(self, request): return True
+
+            runner_f = AgentRunner(forget_client, forget_context, forget_actions,
+                                   ForgetRecorder(), max_steps=5,
+                                   memory_text=format_for_prompt(book.load()))
+            runner_f.run("别记着那条了")
+            after_forget = Memory.from_dict(store.memory)
+            check("forget_memory 真的删掉了",
+                  not any("三行以内" in f.text for f in after_forget.facts),
+                  str([f.text for f in after_forget.facts]))
+            check("别的记忆没被误删",
+                  any("WPS" in f.text for f in after_forget.facts),
+                  str([f.text for f in after_forget.facts]))
+        finally:
+            forget_server.shutdown()
+
+        # 任务进度：写进去、读出来
+        task_model = FakeModel([
+            tool_call("t1", "note_task_state", {
+                "text": "给客户做报价单", "status": "open", "next_step": "先确认税率",
+            }),
+            {"content": "记下了，下次接着做。"},
+        ])
+        task_server, task_url = make_server(task_model)
+        try:
+            task_client = AIClient(api_key="sk-fake-key", model="fake-vision-model",
+                                   base_url=task_url, timeout=20)
+            task_actions = DesktopActions(AuditLog())
+            task_actions.level = LEVEL_CONFIRM
+            task_context = ToolContext(ScreenCapture(), task_actions, store)
+
+            class TaskRecorder:
+                def on_status(self, text): pass
+                def on_event(self, event): pass
+                def on_image(self, png, note): pass
+                def on_finished(self, text): pass
+                def on_error(self, text): pass
+                def request_approval(self, request): return True
+
+            runner_t = AgentRunner(task_client, task_context, task_actions,
+                                   TaskRecorder(), max_steps=5, memory_text="")
+            runner_t.run("这个报价单先放着，回头弄")
+
+            progress = format_for_prompt(MemoryBook(store).load())
+            check("任务进度进了下次的提示词",
+                  "报价单" in progress and "税率" in progress, progress[:300])
+            check("提示词里说明了这是没做完的事",
+                  "没做完" in progress, progress[:300])
+        finally:
+            task_server.shutdown()
+
+        # 关掉记忆之后，一个字都不该进提示词
+        silent = format_for_prompt(Memory())
+        check("空记忆渲染成空串（不注入空壳）", silent == "", repr(silent))
+
     finally:
         server.shutdown()
         try:

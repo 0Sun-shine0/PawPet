@@ -481,6 +481,71 @@ Item {
                         }
                     }
 
+                    // 每轮最多执行步数。这是「一轮任务能干多少活」的总闸门，
+                    // 所以和权限、自动截图放在一起。
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.preferredWidth: 72
+                            text: "执行步数"
+                            color: Theme.textDim
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsSmall
+                        }
+                        ComboBox {
+                            id: stepBox
+                            // QML 的 id 不是 objectName，联调脚本靠这个名字找控件
+                            objectName: "stepBox"
+                            Layout.fillWidth: true
+                            implicitHeight: 32
+                            textRole: "label"
+                            model: backend.aiStepOptions
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsSmall
+
+                            Component.onCompleted: {
+                                var options = backend.aiStepOptions
+                                for (var i = 0; i < options.length; ++i) {
+                                    if (options[i].value === backend.aiMaxSteps) {
+                                        currentIndex = i
+                                        break
+                                    }
+                                }
+                            }
+                            onActivated: function (index) {
+                                var options = backend.aiStepOptions
+                                if (index >= 0 && index < options.length)
+                                    backend.aiMaxSteps = options[index].value
+                            }
+
+                            contentItem: Text {
+                                leftPadding: 10
+                                text: parent.displayText
+                                color: Theme.text
+                                font: parent.font
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            background: Rectangle {
+                                color: Theme.surfaceAlt
+                                radius: Theme.radiusMd
+                                border.width: 1
+                                border.color: Theme.border
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: backend.aiMaxStepsHint
+                        color: Theme.textFaint
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        wrapMode: Text.Wrap
+                        lineHeight: 1.3
+                    }
+
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8

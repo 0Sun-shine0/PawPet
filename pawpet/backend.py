@@ -357,6 +357,25 @@ class Backend(QObject):
     pet_click_action = _setting_property("pet_click_action", str, settingsChanged)
     hotkey_ask = _setting_property("hotkey_ask", str, settingsChanged)
 
+    # 「每轮最多执行步数」的唯一数据源在 AiController 里（它还要夹范围、
+    # 写进提示词、并在界面日志里说一声），所以这里只做转发，别用
+    # _setting_property 另存一份，否则两边会各说各话。
+    @Property(int, notify=settingsChanged)
+    def aiMaxSteps(self) -> int:
+        return self.ai.maxSteps
+
+    @aiMaxSteps.setter
+    def aiMaxSteps(self, value) -> None:
+        self.ai.maxSteps = value
+
+    @Property("QVariantList", notify=settingsChanged)
+    def aiStepOptions(self) -> list:
+        return self.ai.stepOptions
+
+    @Property(str, notify=settingsChanged)
+    def aiMaxStepsHint(self) -> str:
+        return self.ai.maxStepsHint
+
     @Slot()
     def showCommandBar(self) -> None:
         self.commandBarVisible = True

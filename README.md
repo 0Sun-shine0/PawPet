@@ -237,6 +237,23 @@
 3. **审计日志**：每次动作都记下来（谁批准的、几点几分），在 `.cache/ai-actions.log`。
    每一步也都会以卡片形式留在对话里，做过什么一目了然。
 
+### 每轮最多执行步数
+
+AI 页上有个「执行步数」下拉框，默认 **20 步**，可选 10 / 20 / 30 / 50 / 100。
+
+**一步 = 模型看一次结果再决定下一步**，一步里可以同时调好几个工具，
+所以 20 步通常能干不少活，不是只能点 20 下。这个上限是防止两个极端：
+
+* 太小：任务做到一半就停，你得反复说「继续」。
+* 太大：模型可能长时间自己操作下去，交互次数多、费用也高。
+
+顶到上限时它会主动停下来告诉你「我已经执行了 N 步」，而不是闷头死循环。
+想让它一次跑完更长的流程就把这个数调大。
+
+实现上这个值走的是「设置 → `AgentRunner(max_steps=…)` → 提示词里的步数预算」，
+三处用的是同一个数（`clamp_max_steps` 统一夹在 5–100），
+提示词里也会写明本轮预算，模型才知道什么时候该收尾。
+
 ### 关于 MCP
 
 `mcp_servers.json` 里配本地 stdio server，把 `enabled` 改成 `true`，
@@ -340,7 +357,8 @@ tools/
   selftest.py            核心逻辑自测（92 项）
   mdtest.py              Markdown 转换器自测（51 项）
   aitest.py              AI 模块自测（76 项）
-  agenttest.py           Agent 端到端联调，带假模型服务器（40 项）
+  agenttest.py           Agent 端到端联调，带假模型服务器（63 项）
+  steptest.py            步数设置从下拉框到 Agent 的界面联调（17 项）
   smoketest.py           真实启动冒烟，含指令栏交互（41 项）
   uia_test.py            界面元素模块测试（10 项，含位置正确性检验）
   uia_isolate.py         逐个子进程探测哪些 UIA 调用会卡死
@@ -383,7 +401,8 @@ legacy/                  旧 tkinter 实现（保留备查，程序不再引用�
 .venv\Scripts\python.exe tools\selftest.py       # 核心逻辑，92 项
 .venv\Scripts\python.exe tools\mdtest.py         # Markdown 渲染，51 项
 .venv\Scripts\python.exe tools\aitest.py         # AI 模块，76 项
-.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，40 项
+.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，63 项
+.venv\Scripts\python.exe tools\steptest.py       # 步数设置界面联调，17 项
 .venv\Scripts\python.exe tools\smoketest.py      # 真实启动，41 项
 .venv\Scripts\python.exe tools\menudiag.py       # 右键菜单，6 项（会动鼠标）
 .venv\Scripts\python.exe tools\setupui_test.py   # 安装向导布局，17 项
@@ -395,6 +414,9 @@ legacy/                  旧 tkinter 实现（保留备查，程序不再引用�
 
 `agenttest.py` 会起一个**假的 OpenAI 兼容服务**，把「截图 → 决策 → 审批 → 执行 →
 回灌结果 → 再决策」整条链路真跑一遍，不联网、不花钱。
+
+`steptest.py` 会把真实的 `AiPage.qml` 加载起来，点那个「执行步数」下拉框，
+确认设置真的落进了 `settings`、也真的反馈到了界面。
 
 想看界面长什么样：
 

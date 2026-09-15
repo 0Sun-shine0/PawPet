@@ -437,6 +437,140 @@ def main() -> int:
                      "ui_controls", "ui_click", "ui_set_text"):
             check(f"工具 {name} 已注册", name in TOOL_INDEX)
 
+        # ============================================ 场景六：每轮步数上限
+        print("\n=== 场景六：每轮最多执行步数 ===")
+
+        from pawpet.ai.agent import (
+            DEFAULT_MAX_STEPS,
+            MAX_MAX_STEPS,
+            MIN_MAX_STEPS,
+            STEP_PRESETS,
+            clamp_max_steps,
+            system_prompt,
+        )
+
+        check("默认步数是 20", DEFAULT_MAX_STEPS == 20, str(DEFAULT_MAX_STEPS))
+        check("合法值原样返回", clamp_max_steps(30) == 30, str(clamp_max_steps(30)))
+        check("低于下限被抬到 5", clamp_max_steps(1) == MIN_MAX_STEPS,
+              str(clamp_max_steps(1)))
+        check("高于上限被压到 100", clamp_max_steps(9999) == MAX_MAX_STEPS,
+              str(clamp_max_steps(9999)))
+        check("脏值退回默认值",
+              clamp_max_steps(None) == DEFAULT_MAX_STEPS
+              and clamp_max_steps("abc") == DEFAULT_MAX_STEPS
+              and clamp_max_steps(12.7) == 12,
+              str([clamp_max_steps(None), clamp_max_steps("abc"), clamp_max_steps(12.7)]))
+        check("下拉选项都在合法范围内且递增",
+              all(MIN_MAX_STEPS <= v <= MAX_MAX_STEPS for v in STEP_PRESETS)
+              and list(STEP_PRESETS) == sorted(STEP_PRESETS)
+              and DEFAULT_MAX_STEPS in STEP_PRESETS,
+              str(STEP_PRESETS))
+        check("提示词里写明了本轮预算",
+              "7 步" in system_prompt(7), system_prompt(7)[-90:])
+        from pawpet.ai.agent import SYSTEM_PROMPT as BASE_PROMPT
+        check("基础提示词没有被预算句污染", "步数预算" not in BASE_PROMPT)
+
+        # 让假模型永远只回工具调用，逼 agent 顶到上限
+        endless_model = FakeModel([tool_call(f"n{i}", "ui_windows", {})
+                                   for i in range(200)])
+        server4, url4 = make_server(endless_model)
+        try:
+            client4 = AIClient(api_key="sk-fake-key", model="fake-vision-model",
+                               base_url=url4, timeout=20)
+            actions4 = DesktopActions(AuditLog())
+            actions4.level = LEVEL_CONFIRM
+            context4 = ToolContext(ScreenCapture(), actions4, store)
+
+            statuses4: list[str] = []
+            events4: list[StepEvent] = []
+
+            class Recorder4:
+                def on_status(self, text): statuses4.append(text)
+                def on_event(self, event): events4.append(event)
+                def on_image(self, png, note): pass
+                def on_finished(self, text): pass
+                def on_error(self, text): events4.append(StepEvent(kind="error", text=text))
+                def request_approval(self, request): return True
+
+            runner4 = AgentRunner(client4, context4, actions4, Recorder4(), max_steps=5)
+            final4 = runner4.run("一直查窗口列表别停")
+
+            check("runner 记住了设置的上限", runner4.max_steps == 5,
+                  str(runner4.max_steps))
+            check("真的在第 5 步停下（刚好 5 次请求）", len(endless_model.requests) == 5,
+                  f"实际 {len(endless_model.requests)} 次")
+            check("停止原因报的是 5 步而不是写死的 20",
+                  any("5 步" in s for s in statuses4), str(statuses4[-3:]))
+            check("最终回答里带上了真实步数", "5 步" in final4, final4[:80])
+            check("没跑满默认的 20 步", len(endless_model.requests) < DEFAULT_MAX_STEPS,
+                  str(len(endless_model.requests)))
+
+            # 换个大一点的预算，确认上限真的会跟着变
+            endless_model2 = FakeModel([tool_call(f"m{i}", "ui_windows", {})
+                                        for i in range(200)])
+            server5, url5 = make_server(endless_model2)
+            try:
+                client5 = AIClient(api_key="sk-fake-key", model="fake-vision-model",
+                                   base_url=url5, timeout=20)
+
+                class Recorder5b:
+                    def on_status(self, text): pass
+                    def on_event(self, event): pass
+                    def on_image(self, png, note): pass
+                    def on_finished(self, text): pass
+                    def on_error(self, text): pass
+                    def request_approval(self, request): return True
+
+                runner5b = AgentRunner(client5, context4, actions4, Recorder5b(),
+                                       max_steps=50)
+                runner5b.run("一直查窗口列表别停")
+                check("上限调大后确实跑得更远（50 次请求）",
+                      len(endless_model2.requests) == 50,
+                      f"实际 {len(endless_model2.requests)} 次")
+            finally:
+                server5.shutdown()
+        finally:
+            server4.shutdown()
+
+        # ============================================ 场景七：设置链路
+        print("\n=== 场景七：设置从界面到 Agent 是通的 ===")
+
+        check("store 里带了这个设置项",
+              "ai_max_steps" in store.settings, str(sorted(store.settings)[:6]))
+        check("新装用户拿到默认值 20",
+              store.settings.get("ai_max_steps") == DEFAULT_MAX_STEPS,
+              str(store.settings.get("ai_max_steps")))
+
+        from pawpet.ai.controller import AiController
+
+        controller = AiController(store)
+        try:
+            check("控制器暴露了 maxSteps", controller.maxSteps == 20,
+                  str(controller.maxSteps))
+            check("选项列表非空且带 label",
+                  len(controller.stepOptions) >= 3
+                  and all(o.get("label") for o in controller.stepOptions),
+                  str(controller.stepOptions)[:90])
+            check("提示文案里有范围和一步的含义",
+                  "一步" in controller.maxStepsHint and "100" in controller.maxStepsHint,
+                  controller.maxStepsHint[:80])
+
+            controller.maxSteps = 50
+            check("改设置能生效", controller.maxSteps == 50, str(controller.maxSteps))
+            check("改设置会落盘", store.settings.get("ai_max_steps") == 50,
+                  str(store.settings.get("ai_max_steps")))
+            controller.maxSteps = 9999
+            check("越界值会被夹住", controller.maxSteps == MAX_MAX_STEPS,
+                  str(controller.maxSteps))
+
+            check("历史里的系统提示词也带上了预算",
+                  f"{MAX_MAX_STEPS} 步" in controller._build_history()[0]["content"],
+                  controller._build_history()[0]["content"][-60:])
+        finally:
+            controller.maxSteps = DEFAULT_MAX_STEPS
+            controller.shutdown()
+            store.save()
+
     finally:
         server.shutdown()
         try:

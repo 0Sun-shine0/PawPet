@@ -35,7 +35,13 @@ BUILD_DIR = ROOT / "build"
 DIST_DIR = ROOT / "dist"
 SPEC = BUILD_DIR / "pawpet.spec"
 SETUP_SPEC = BUILD_DIR / "setup.spec"
-VERSION = "2.1.0"
+
+# 版本号从代码里读，避免两处各写一份、改一处忘一处
+try:
+    sys.path.insert(0, str(ROOT))
+    from pawpet.config import APP_VERSION as VERSION  # noqa: E402
+except Exception:  # noqa: BLE001 - 读不到就退回硬编码值
+    VERSION = "2.1.0"
 
 
 def log(message: str) -> None:
@@ -134,11 +140,39 @@ def main() -> int:
 
     if not args.skip_tests:
         step("2. 打包前自测")
-        code = run([PYTHON, ROOT / "tools" / "selftest.py"])
-        if code != 0:
-            log("  [XX] 自测没通过，中止打包（--skip-tests 可以跳过）")
+        # 跑**全套**而不是只跑 selftest。
+        #
+        # 只跑 selftest 的话，AI 模块（记忆/自动学习/失败自纠/批量确认/
+        # 文件安全策略）出问题不会被发现 —— 而那些恰恰是最容易悄悄坏掉、
+        # 打出发给别人又不会立刻暴露的部分。
+        suites = [
+            ("核心逻辑", "selftest.py"),
+            ("Markdown 渲染", "mdtest.py"),
+            ("AI 模块", "aitest.py"),
+            ("跨会话记忆", "memtest.py"),
+            ("自动记忆", "autolearntest.py"),
+            ("失败自纠", "advisortest.py"),
+            ("批量与合并确认", "batchtest.py"),
+            ("文件读写安全", "filetest.py"),
+            ("工具消息历史", "historytest.py"),
+        ]
+        failures: list[str] = []
+        for label, script in suites:
+            path = ROOT / "tools" / script
+            if not path.exists():
+                failures.append(f"{label}：找不到 {script}")
+                continue
+            code = run([PYTHON, path], timeout=600)
+            if code != 0:
+                failures.append(f"{label}（{script}）")
+        if failures:
+            log("")
+            log("  [XX] 以下自测没通过，中止打包：")
+            for item in failures:
+                log(f"       · {item}")
+            log("       （--skip-tests 可以跳过，但别拿没测过的包去分发）")
             return 1
-        log("  [ok] 自测通过")
+        log(f"  [ok] {len(suites)} 套自测全部通过")
     else:
         log("\n=== 2. 打包前自测（已跳过）===")
 

@@ -39,7 +39,18 @@ from .actions import (
     DesktopActions,
     Risk,
 )
-from .agent import AgentCallbacks, AgentRunner, ApprovalRequest, StepEvent
+from .agent import (
+    DEFAULT_MAX_STEPS,
+    MAX_MAX_STEPS,
+    MIN_MAX_STEPS,
+    STEP_PRESETS,
+    AgentCallbacks,
+    AgentRunner,
+    ApprovalRequest,
+    StepEvent,
+    clamp_max_steps,
+    system_prompt,
+)
 from .client import AIClient, AiError
 from .mcp import MCPClient
 from .tools import ToolContext, openai_tools
@@ -200,6 +211,45 @@ class AiController(QObject):
         self._settings["ai_auto_screenshot"] = bool(value)
         self._store.save()
         self.settingsChanged.emit()
+
+    # ------------------------------------------------------------ 步数上限
+    @Property(int, notify=settingsChanged)
+    def maxSteps(self) -> int:
+        """一轮任务里最多让模型思考多少步。一步 = 一次模型往返（可含多个工具调用）。"""
+        return clamp_max_steps(self._settings.get("ai_max_steps", DEFAULT_MAX_STEPS))
+
+    @maxSteps.setter
+    def maxSteps(self, value) -> None:
+        steps = clamp_max_steps(value)
+        if steps == self.maxSteps:
+            return
+        self._settings["ai_max_steps"] = steps
+        self._store.save()
+        self.settingsChanged.emit()
+        self._push("info", f"每轮最多执行步数已设为 {steps} 步")
+
+    @Property("QVariantList", notify=settingsChanged)
+    def stepOptions(self) -> list:
+        """给界面下拉框用的选项，附带一句人话解释。"""
+        return [
+            {
+                "value": steps,
+                "label": f"{steps} 步",
+                "hint": "简单任务" if steps <= 10 else
+                        "日常够用（推荐）" if steps <= 20 else
+                        "多步操作" if steps <= 30 else
+                        "长流程" if steps <= 50 else
+                        "不设实际限制，注意费用",
+            }
+            for steps in STEP_PRESETS
+        ]
+
+    @Property(str, notify=settingsChanged)
+    def maxStepsHint(self) -> str:
+        steps = self.maxSteps
+        return (f"当前 {steps} 步。一步 = 模型看一次结果再决定下一步，"
+                f"一步里可以同时做几个动作，所以 {steps} 步通常能完成不少操作。"
+                f"可调范围 {MIN_MAX_STEPS}–{MAX_MAX_STEPS}。")
 
     @Property(bool, notify=settingsChanged)
     def mcpEnabled(self) -> bool:
@@ -401,7 +451,10 @@ class AiController(QObject):
                 self._finishedIn.emit("", "没有配置 API Key")
                 return
 
-            self.runner = AgentRunner(client, self.context, self.actions, self.callbacks)
+            self.runner = AgentRunner(
+                client, self.context, self.actions, self.callbacks,
+                max_steps=self.maxSteps,
+            )
             # 保留之前的对话上下文
             self.runner.messages = self._build_history()
             final = self.runner.run(text)
@@ -417,9 +470,7 @@ class AiController(QObject):
 
         只回放纯文本对话，工具调用的中间过程不回放 —— 那会让历史变得又长又乱。
         """
-        from .agent import SYSTEM_PROMPT
-
-        history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        history: list[dict] = [{"role": "system", "content": system_prompt(self.maxSteps)}]
         for item in self._messages[-12:]:
             role = item.get("role")
             text = (item.get("text") or "").strip()

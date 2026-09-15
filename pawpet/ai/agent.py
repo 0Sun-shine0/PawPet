@@ -31,7 +31,23 @@ from .client import AIClient, AiError
 from .tools import TOOL_INDEX, ToolContext, describe_arguments, openai_tools
 
 DEFAULT_MAX_STEPS = 20
+# 步数上限的可选范围。上限不是越大越好：每一轮都要把上下文发给模型，
+# 步数太多意味着长时间自动操作和更高的费用。
+MIN_MAX_STEPS = 5
+MAX_MAX_STEPS = 100
 MAX_HISTORY_MESSAGES = 60
+
+# 「一步」= 一次模型往返（可以同时调多个工具），所以 20 步通常远多于 20 个动作。
+STEP_PRESETS = (10, 20, 30, 50, 100)
+
+
+def clamp_max_steps(value) -> int:
+    """把界面上传来的步数夹到合法范围，脏值退回默认值。"""
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_STEPS
+    return max(MIN_MAX_STEPS, min(MAX_MAX_STEPS, steps))
 
 SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用户的 Windows 电脑上。
 
@@ -87,6 +103,15 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 完成任务后用一两句话总结你做了什么。"""
 
 
+def system_prompt(max_steps: int = DEFAULT_MAX_STEPS) -> str:
+    """在基础提示后面补一句本轮的步数预算，让模型知道什么时候该收尾。"""
+    return SYSTEM_PROMPT + (
+        f"\n\n本次任务的步数预算：{max_steps} 步"
+        "（一步 = 你思考一次并调用工具一轮）。快到上限时请先总结进度，"
+        "不要在半途突然停下。"
+    )
+
+
 @dataclass
 class ApprovalRequest:
     tool_name: str
@@ -125,12 +150,17 @@ class AgentCallbacks:
 
 class AgentRunner:
     def __init__(self, client: AIClient, context: ToolContext, actions,
-                 callbacks: AgentCallbacks | None = None) -> None:
+                 callbacks: AgentCallbacks | None = None,
+                 max_steps: int | None = None) -> None:
         self.client = client
         self.context = context
         self.actions = actions
         self.callbacks = callbacks or AgentCallbacks()
-        self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # 步数上限由用户设置决定（默认 20）。见 clamp_max_steps。
+        self.max_steps = clamp_max_steps(
+            DEFAULT_MAX_STEPS if max_steps is None else max_steps
+        )
+        self.messages: list[dict] = [{"role": "system", "content": system_prompt(self.max_steps)}]
         self._stop = False
         self.last_error = ""
 
@@ -140,7 +170,7 @@ class AgentRunner:
         self.actions.request_stop()
 
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": system_prompt(self.max_steps)}]
         self._stop = False
 
     # -------------------------------------------------------------- 历史管理
@@ -190,7 +220,7 @@ class AgentRunner:
         final_text = ""
 
         try:
-            for step in range(1, DEFAULT_MAX_STEPS + 1):
+            for step in range(1, self.max_steps + 1):
                 if self._stop:
                     self.callbacks.on_status("已停止")
                     break
@@ -254,9 +284,12 @@ class AgentRunner:
                     self.callbacks.on_status("已被用户停止")
                     break
             else:
-                self.callbacks.on_status(f"已达到 {DEFAULT_MAX_STEPS} 步上限，先停在这里")
+                self.callbacks.on_status(f"已达到 {self.max_steps} 步上限，先停在这里")
                 if not final_text:
-                    final_text = "任务比较复杂，我已经执行了 20 步先停下来。你可以让我继续。"
+                    final_text = (
+                        f"任务比较复杂，我已经执行了 {self.max_steps} 步先停下来。"
+                        "你可以让我继续，或者在工作台把「每轮最多执行步数」调大一点。"
+                    )
 
         except Exception as exc:  # noqa: BLE001 - 兜底，别让线程静默死掉
             self.last_error = f"{type(exc).__name__}: {exc}"

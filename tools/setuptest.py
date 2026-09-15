@@ -107,6 +107,9 @@ def test_launch(target: Path) -> None:
     env = dict(os.environ)
     env["PAWPET_HOME"] = str(sandbox_home)
     env["PAWPET_DEBUG"] = "1"
+    # 独立的单实例命名空间：不然会跟用户正在跑的那份小爪撞上，
+    # 装好的程序会立刻以退出码 0 静默退出，看起来像「安装失败」。
+    env["PAWPET_INSTANCE_SUFFIX"] = "setuptest"
     env.pop("OPENAI_API_KEY", None)
 
     kill_pawpet()

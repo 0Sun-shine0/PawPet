@@ -110,6 +110,15 @@ AI_DIR = CACHE_DIR / "ai"
 AUDIT_FILE = CACHE_DIR / "ai-actions.log"
 LIVE_PREVIEW = AI_DIR / "screen.png"
 
+# 单实例互斥体的名字后缀。
+#
+# 默认是 "v2"，也就是「全机器只能开一个小爪」。但自动化测试需要
+# 在**用户已经开着**小爪的情况下另起一个实例（否则新实例会静默退出、
+# 测试看起来像「启动失败」）。设置这个环境变量就能用独立命名空间，
+# 两边互不干扰。顺手也让「同时开两份配置」成为可能。
+INSTANCE_SUFFIX = os.environ.get("PAWPET_INSTANCE_SUFFIX", "").strip() or "v2"
+INSTANCE_NAME = f"Local\\PawPet.SingleInstance.{INSTANCE_SUFFIX}"
+
 # QML 在打包后位于解包目录里，不能再用 PACKAGE_DIR 推
 QML_DIR = RESOURCE_DIR / "pawpet" / "qml"
 if not QML_DIR.exists():          # 开发模式下走这里

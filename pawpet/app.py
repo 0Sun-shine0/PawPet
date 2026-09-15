@@ -285,8 +285,12 @@ def run() -> int:
     ensure_dirs()
     win32.set_process_dpi_awareness()
 
-    # 单实例：已经有小爪在跑，就让那个实例把面板显示出来，然后自己安静退出
-    instance = win32.SingleInstance("Local\\PawPet.SingleInstance.v2")
+    # 单实例：已经有小爪在跑，就让那个实例把面板显示出来，然后自己安静退出。
+    # 互斥体名字可以由 PAWPET_INSTANCE_SUFFIX 改（测试要用独立命名空间，
+    # 否则会跟用户正在跑的那份撞上）。见 config.INSTANCE_NAME。
+    from .config import INSTANCE_NAME
+
+    instance = win32.SingleInstance(INSTANCE_NAME)
     if instance.already_running:
         from .services import activate_existing_window, ping_existing_instance
 

@@ -78,6 +78,12 @@ def main() -> int:
     env = dict(os.environ)
     env["PAWPET_HOME"] = str(sandbox)
     env["PAWPET_DEBUG"] = "1"
+    # 用独立的单实例命名空间。
+    #
+    # 不然会跟**用户正在跑的那份小爪**撞上：新实例检测到已有实例就
+    # 静默退出（退出码 0、什么也不打印），测试看起来像「exe 启动失败」。
+    # 我就在这上面绕过一次弯路 —— 打出来的包其实是好的。
+    env["PAWPET_INSTANCE_SUFFIX"] = "packtest"
     env.pop("OPENAI_API_KEY", None)
 
     kill_leftovers()
@@ -99,9 +105,19 @@ def main() -> int:
     time.sleep(12)
     elapsed = time.time() - started
     alive = process.poll() is None
+    exit_code = process.poll()
 
     check("进程还活着（没有闪退）", alive,
-          f"退出码 {process.poll()}" if not alive else f"存活 {elapsed:.0f}s")
+          f"退出码 {exit_code}" if not alive else f"存活 {elapsed:.0f}s")
+
+    # 快速退出且退出码 0、又没写数据 —— 典型是撞上了「已有实例」。
+    # 这种情况要**说清楚**，不要让它看起来像 exe 坏了。
+    if not alive and exit_code == 0:
+        hint = ("启动后立刻以 0 退出，通常是单实例互斥体被占："
+                "可能还有一个没关干净的小爪在跑。"
+                "本测试已用 PAWPET_INSTANCE_SUFFIX=packtest 隔离，"
+                "若仍如此，检查是否有 taskkill 没清掉的 PawPet.exe。")
+        print(f"  [提示] {hint}")
 
     # 数据文件出现在沙箱目录里 => 配置层、存储层、路径解析都通了
     data_candidates = list(sandbox.rglob("pet_data.json"))

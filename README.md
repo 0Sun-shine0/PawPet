@@ -199,10 +199,32 @@
 
 **边界（工具会如实说明，不会假装成功）：**
 
-- 浏览器、Office、WPS、VS Code 这类程序 → 读得很完整
+- **按坐标反查控件（`ui_element_at`）在实测的所有程序上都好用**，
+  0.01 秒返回，这是最可靠的一条路
+- **读整棵控件树（`ui_controls`）则挑程序**：它走的是
+  `IUIAutomation::ElementFromHandle`，而实测这条调用在
+  记事本、计算器、画图、Edge 上会**永久卡死**（`tools/uia_coverage.py` 可复现）。
+  在 Qt 窗口上能正常返回，只是读不到控件（自绘界面）
 - 用 Tk / Qt 自绘界面的程序 → 读不到控件（界面是一整块画布）。
   小爪自己的工作台就是 Qt Quick 画的，对它也读不到，这是正常的
 - 游戏、部分 Java 程序 → 读不到
+
+> 注意：卡死**不是** vtable 槽位读错（`tools/uia_vtable_scan.py` 逐个扫过，
+> 槽位 6 确实是 `ElementFromHandle`，其它槽位是访问违例），
+> **也不是** COM 线程模型问题（`tools/uia_apartment.py` 试了
+> 「主线程建+主线程用」「主线程建+工作线程用」「工作线程建+同线程用」，
+> 三种都一样卡）。是这些程序自身的 UIA provider 的问题，改不了。
+
+所以实际能力是分层的：
+
+| 能力 | 工具 | 实测速度 | 可靠性 |
+| --- | --- | --- | --- |
+| 按坐标查控件 | `ui_element_at` | 0.01s | 高，全程序可用 |
+| 查焦点在哪 | `ui_focused` | 0.01s | 高 |
+| 列窗口 | `ui_windows` | 1–6ms | 高（Win32，不走 UIA） |
+| 按名字点击 | `ui_click` | 依赖上面 | 读不到控件时自动退回坐标点击 |
+| 列控件清单 | `ui_controls` | 超时才返回 | **挑程序** |
+| 按名字设值 | `ui_set_text` | 依赖上面 | **挑程序** |
 
 **一个重要的工程决定：UIA 会卡死，所以每个调用都有超时保护。**
 
@@ -361,6 +383,9 @@ tools/
   steptest.py            步数设置从下拉框到 Agent 的界面联调（17 项）
   smoketest.py           真实启动冒烟，含指令栏交互（41 项）
   uia_test.py            界面元素模块测试（10 项，含位置正确性检验）
+  uia_coverage.py        实测 UIA 在真实程序上能读到多少控件（自开程序）
+  uia_vtable_scan.py     逐个扫 vtable 槽位，确认 ElementFromHandle 没读错
+  uia_apartment.py       验证卡死与 COM 线程模型无关（三种建法都卡）
   uia_isolate.py         逐个子进程探测哪些 UIA 调用会卡死
   uia_probe.py           探测 UIA 可用通道（comtypes / ctypes）
   auditprops.py          检查 Python 属性名和 QML 访问名是否对得上

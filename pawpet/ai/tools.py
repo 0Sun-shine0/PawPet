@@ -78,12 +78,21 @@ TOOLS: list[ToolSpec] = [
         "ui_controls",
         "读取某个窗口内部的控件列表（控件名、类型、精确位置、可用操作）。"
         "拿到清单后就能按名字定位，不必再靠坐标。"
-        "注意：浏览器、Office、WPS 这类程序支持得很好；"
-        "而用 Tk/Qt 绘制的程序可能读不到（会返回说明而不是卡住）。",
+        "**注意：这个接口挑程序。** 实测记事本、计算器、画图、Edge 读不到"
+        "（会明确告诉你读不到，别反复重试）；浏览器页面、Office、WPS 一般能读到；"
+        "用 Tk/Qt 自绘界面的程序读不到。读不到时改用 ui_element_at + 坐标。",
         _schema({
             "window": {**_STRING, "description": "窗口标题的一部分，不区分大小写"},
             "limit": {**_INT, "description": "最多返回多少个控件，默认 60，上限 150"},
         }, ["window"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "ui_forget_hangs",
+        "清掉「已知读不到控件的窗口」记录。"
+        "如果某个程序你重启过、或者它刚从卡死中恢复，之前被标记读不动，"
+        "用这个清一下再试 ui_controls。平时不需要用。",
+        _schema({}),
         Risk.READ,
     ),
     ToolSpec(
@@ -511,6 +520,23 @@ class ToolContext:
                      "ui_controls / ui_click / ui_set_text。")
         return True, "\n".join(lines), None
 
+    def _do_ui_forget_hangs(self, _args: dict):
+        got, reason = self._uia()
+        if got is None:
+            return False, reason, None
+        _client, uia_mod = got
+
+        known = uia_mod.known_hanging_windows()
+        cleared = uia_mod.forget_hanging_windows()
+        if not cleared:
+            return True, "当前没有被标记为「读不到控件」的窗口。", None
+
+        lines = [f"已清掉 {cleared} 个窗口的记录："]
+        for pid, handle, title in known[:10]:
+            lines.append(f"  · {title or '(无标题)'}（pid={pid}）")
+        lines.append("现在可以重新试 ui_controls 了。")
+        return True, "\n".join(lines), None
+
     def _do_ui_controls(self, args: dict):
         got, reason = self._uia()
         if got is None:
@@ -529,7 +555,8 @@ class ToolContext:
             return False, (f"没找到标题含「{keyword}」的窗口。\n"
                            f"当前打开的窗口有：{'；'.join(available)}"), None
 
-        # 读控件树可能很慢（甚至超时），给足时间但也设上限
+        # 读控件树可能很慢（甚至超时），给足时间但也设上限。
+        # 已知读不动的窗口会在 tree() 里被熔断，立刻返回而不再等超时。
         ok, result = uia.call_with_timeout(
             lambda: client.tree(window, max_elements=limit), timeout=12.0)
         if not ok:
@@ -540,9 +567,7 @@ class ToolContext:
 
         elements, note = result
         if not elements:
-            return True, (f"{note}\n"
-                          "这个窗口没有提供可读的控件信息（界面可能是自绘的）。\n"
-                          "建议改用截图观察，或者用 ui_element_at 逐点确认。"), None
+            return True, note, None
 
         lines = [note, ""]
         for element in elements:

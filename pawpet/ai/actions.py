@@ -219,7 +219,7 @@ class DesktopActions:
                         buffer = ctypes.create_unicode_buffer(length + 1)
                         user32.GetWindowTextW(handle, buffer, length + 1)
                         if title_part.lower() in buffer.value.lower():
-                            found.append(handle)
+                            found.append((handle, buffer.value))
                 return True
 
             from ctypes import wintypes
@@ -229,14 +229,96 @@ class DesktopActions:
             if not found:
                 return ActionResult(False, f"没找到标题包含「{title_part}」的窗口")
 
-            handle = found[0]
+            # 子串匹配很容易撞车：一个 Edge 窗口的**标题**里也可能出现
+            # 「记事本」两个字，而 EnumWindows 的顺序是 Z 序，谁在前面谁被选中。
+            # 所以按「标题里关键字出现的位置」排序：越靠前说明越像
+            # 「这是记事本」而不是「这个页面提到了记事本」。
+            # 完全相等的排最前。
+            needle = title_part.lower()
+
+            def rank(item):
+                text = item[1].lower()
+                if text == needle:
+                    return (0, 0, len(text))
+                return (1, text.find(needle), len(text))
+
+            found.sort(key=rank)
+            handle = found[0][0]
             if user32.IsIconic(handle):
                 user32.ShowWindow(handle, 9)    # SW_RESTORE
-            user32.SetForegroundWindow(handle)
+
+            # SetForegroundWindow 单独调常常**静默失败**：Windows 有个前台锁定，
+            # 后台进程不让抢焦点。以前这里照样返回 ok=True（因为报的是
+            # active_window()，也就是「现在最前面的是谁」而不是「我们切过去了没」），
+            # 于是 AI 以为切好了，其实目标窗口还压在别的窗口后面，
+            # 接下来的坐标点击就全点到别人身上了。
+            #
+            # 标准绕法：把自己的线程输入队列临时挂到目标线程上，再抢前台。
+            # 抢完必须解挂，否则两个线程的输入队列会一直绑在一起。
+            moved = self._force_foreground(handle)
             time.sleep(0.25)
+
+            if not moved:
+                return ActionResult(
+                    False,
+                    f"切不到「{self._window_title(handle)}」：系统前台锁定挡住了。"
+                    f"现在最前面的是「{self.active_window()}」。"
+                    "可以先用 ui_click 点一下它的任务栏图标，或者手动点一下窗口再操作。")
+
             return ActionResult(True, f"已切到窗口：{self.active_window()}")
         except Exception as exc:  # noqa: BLE001
             return ActionResult(False, f"切换窗口失败：{exc}")
+
+    @staticmethod
+    def _window_title(handle) -> str:
+        """按句柄读窗口标题。"""
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        length = user32.GetWindowTextLengthW(handle)
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(handle, buffer, length + 1)
+        return buffer.value or "（无标题）"
+
+    @staticmethod
+    def _force_foreground(handle) -> bool:
+        """把窗口提到前台，返回**是否真的提上去了**。
+
+        用 AttachThreadInput 绕开前台锁定。返回前会校验当前前台窗口
+        确实是目标窗口 —— 不然「成功」两个字就是假的。
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = wintypes.HWND(handle)
+
+        if user32.GetForegroundWindow() == handle:
+            return True
+
+        current_thread = kernel32.GetCurrentThreadId()
+        target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+        foreground = user32.GetForegroundWindow()
+        foreground_thread = (
+            user32.GetWindowThreadProcessId(wintypes.HWND(foreground), None)
+            if foreground else 0
+        )
+
+        attached: list[int] = []
+        for thread_id in {target_thread, foreground_thread}:
+            if thread_id and thread_id != current_thread:
+                if user32.AttachThreadInput(current_thread, thread_id, True):
+                    attached.append(thread_id)
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetFocus(hwnd)
+        finally:
+            for thread_id in attached:
+                user32.AttachThreadInput(current_thread, thread_id, False)
+
+        return user32.GetForegroundWindow() == handle
 
     # -------------------------------------------------------------- 只读动作
     def clipboard_text(self) -> str:

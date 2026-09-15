@@ -348,6 +348,30 @@ class AiController(QObject):
         except Exception as exc:  # noqa: BLE001
             lines.append(f"UI Automation 不可用：{exc}")
 
+        # 文件读写的能力边界：说清楚哪些地方不给碰，
+        # 用户才知道「AI 到底能看到我磁盘上的什么」
+        try:
+            from . import files
+
+            home = str(Path.home())
+            secret = [item.replace("[读写都禁止] ", "")
+                      for item in files.describe_sensitive()
+                      if item.startswith("[读写都禁止]")]
+            readonly = [item.replace("[只允许读]   ", "")
+                        for item in files.describe_sensitive()
+                        if item.startswith("[只允许读]")]
+
+            def shorten(items: list[str], limit: int) -> str:
+                shown = [item.replace(home, "~") for item in items[:limit]]
+                text = "、".join(shown)
+                return text + ("…" if len(items) > limit else "")
+
+            lines.append("文件读写：可用（文本文件可直接读）")
+            lines.append(f"  不读也不写：{shorten(secret, 4)}")
+            lines.append(f"  只读不写：{shorten(readonly, 3)}")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"文件读写不可用：{exc}")
+
         try:
             import pyautogui  # noqa: F401
 

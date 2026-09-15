@@ -283,6 +283,54 @@ TOOLS: list[ToolSpec] = [
         Risk.DANGER,
     ),
 
+    # ------------------------------------------------------------ 本地文件
+    # 有这些工具，用户就不用「打开文件 → 全选 → 复制 → 粘贴」绕一圈了。
+    ToolSpec(
+        "read_file",
+        "**直接读本地文本文件**，不用让用户复制粘贴。"
+        "适合：代码、日志、配置、txt、csv、md、json 等文本文件。"
+        "二进制文件（exe、图片、压缩包）会被拒绝 —— 读出来是乱码，没意义。"
+        "Word/Excel/PDF 这类**文档不是文本**，直接读会得到乱码，"
+        "那种情况请让用户用对应的程序打开，或者用截图看。"
+        "文件很长时会分段返回，用 start_line 翻页。",
+        _schema({
+            "path": {**_STRING, "description":
+                     "文件路径。支持 ~ 和环境变量，比如 "
+                     "%USERPROFILE%\\Desktop\\a.txt 或 ~/notes.md"},
+            "start_line": {**_INT, "description": "从第几行开始读，默认 1（用于翻页）"},
+            "max_lines": {**_INT, "description": "最多读多少行，默认 2000"},
+        }, ["path"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "list_dir",
+        "列出一个目录里有什么（文件名 + 大小）。"
+        "用户说「我桌面上那个文件」「D 盘那个报告」但不记得全名时，"
+        "先用它找出来，再用 read_file 读。",
+        _schema({
+            "path": {**_STRING, "description":
+                     "目录路径。不传就列当前目录。支持 ~ 和环境变量"},
+            "pattern": {**_STRING, "description":
+                        "可选，按文件名通配过滤，比如 *.csv 或 报告*"},
+        }, []),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "write_file",
+        "**把内容写入本地文件**（新建或覆盖）。"
+        "用户说「帮我保存成文件」「写个脚本放到桌面」时用。"
+        "**默认不覆盖已有文件** —— 目标已存在会先报错让你确认，"
+        "确认要覆盖再把 overwrite 设成 true。"
+        "系统目录（Windows、Program Files）只允许读，不允许写。",
+        _schema({
+            "path": {**_STRING, "description": "写到哪个路径"},
+            "content": {**_STRING, "description": "文件内容（纯文本，UTF-8 保存）"},
+            "overwrite": {**_BOOL, "description":
+                          "目标已存在时是否覆盖。默认 false（不覆盖，先报错让你确认）"},
+        }, ["path", "content"]),
+        Risk.CONFIRM,
+    ),
+
     # ------------------------------------------------------------ 跨会话记忆
     # 这些工具让「记住」变成模型能主动做的事。没有它们的话，
     # 每一轮对话都得让用户从头交代一遍。
@@ -425,6 +473,20 @@ class ToolContext:
         handler = getattr(self, f"_do_{name}", None)
         if handler is None:
             return False, f"工具 {name} 还没有实现", None
+
+        # 在工具内部再确认一次权限。
+        #
+        # Agent 主循环里已经拦过一次（_run_one），但工具也可能被别处直接调用
+        # （测试、以后的别的入口），只靠上游那一层守不住 ——
+        # 只读模式下 write_file 实测就能写进去。
+        # 这里挡的是「不可逆且不该发生的」，所以按 blocked() 判，
+        # 而不是 needs_approval()（后者会被用户的确认放行）。
+        level = getattr(self.actions, "level", None)
+        if level is not None and self.actions.blocked(spec.risk):
+            return False, (
+                f"当前是「只读」模式，不允许执行会改变状态的动作（{name}）。"
+                "要写文件请先在工作台把操作权限调高。"
+            ), None
 
         try:
             return handler(arguments or {})
@@ -950,6 +1012,67 @@ class ToolContext:
             })
             self.store.save()
         return True, f"已存入便签「{title}」", None
+
+    # ------------------------------------------------------------ 本地文件
+    def _do_read_file(self, args: dict):
+        from . import files
+
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return False, "要读哪个文件？给个路径", None
+
+        try:
+            start = int(args.get("start_line") or 1)
+        except (TypeError, ValueError):
+            start = 1
+        try:
+            lines = int(args.get("max_lines") or 2000)
+        except (TypeError, ValueError):
+            lines = 2000
+
+        try:
+            result = files.read_text(path, start_line=start, max_lines=lines)
+        except Exception as exc:  # noqa: BLE001 - 读文件不该把整轮搞挂
+            return False, f"读文件出错：{type(exc).__name__}: {exc}", None
+
+        if not result.ok:
+            return False, result.message, None
+        if not result.text.strip():
+            return True, result.message + "\n（文件里没有可显示的文本内容）", None
+        return True, result.message + "\n\n" + result.text, None
+
+    def _do_list_dir(self, args: dict):
+        from . import files
+
+        path = str(args.get("path") or "").strip() or "."
+        pattern = str(args.get("pattern") or "").strip()
+        try:
+            result = files.list_dir(path, pattern=pattern)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"列目录出错：{type(exc).__name__}: {exc}", None
+        if not result.ok:
+            return False, result.message, None
+        return True, result.message + "\n" + result.text, None
+
+    def _do_write_file(self, args: dict):
+        from . import files
+
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return False, "要写到哪个路径？", None
+        content = args.get("content")
+        if content is None:
+            return False, "没有给内容，写个空文件也没意义", None
+        overwrite = bool(args.get("overwrite"))
+
+        try:
+            result = files.write_text(path, str(content), overwrite=overwrite)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"写文件出错：{type(exc).__name__}: {exc}", None
+
+        if not result.ok:
+            return False, result.message, None
+        return True, result.message, None
 
     # ------------------------------------------------------------ 跨会话记忆
     def _memory_book(self):

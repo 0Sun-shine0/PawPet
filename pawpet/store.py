@@ -51,6 +51,7 @@ def default_settings() -> dict:
         # ---- AI 操作模块 ----
         "ai_level": "confirm",          # read_only | confirm | auto | full
         "ai_max_steps": 20,
+        "ai_memory_enabled": True,      # 跨会话记忆：记住习惯和进度
         "ai_auto_screenshot": True,     # 每轮开始自动截一张给模型
         "ai_show_cursor": True,         # 截图时把鼠标位置标出来
         "ai_mcp_enabled": False,
@@ -75,6 +76,10 @@ def default_state() -> dict:
         "notes": [],
         "sessions": [],
         "stats": {},
+        # 跨会话记忆：用户习惯、叫法映射、上次做到哪。
+        # 结构由 pawpet.ai.memory 定义，这里只占位 —— 数据层不认识业务字段，
+        # 这样 memory 模块改结构时不用动 store。
+        "memory": {},
         "settings": default_settings(),
         "focus": {
             "mode": "focus",           # focus | short_break | long_break
@@ -212,6 +217,9 @@ class Store:
                 state[key] = []
         if not isinstance(state.get("stats"), dict):
             state["stats"] = {}
+        # 老版本没有 memory 这个键，补一个空字典让上层自己去解析
+        if not isinstance(state.get("memory"), dict):
+            state["memory"] = {}
         state["schema"] = SCHEMA_VERSION
         return state
 
@@ -274,6 +282,11 @@ class Store:
     @property
     def stats(self) -> dict:
         return self.state["stats"]
+
+    @property
+    def memory(self) -> dict:
+        """跨会话记忆的原始字典。解析和语义都在 pawpet.ai.memory 里。"""
+        return self.state.setdefault("memory", {})
 
 
 # --------------------------------------------------------------------------

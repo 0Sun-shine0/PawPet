@@ -105,13 +105,21 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 完成任务后用一两句话总结你做了什么。"""
 
 
-def system_prompt(max_steps: int = DEFAULT_MAX_STEPS) -> str:
-    """在基础提示后面补一句本轮的步数预算，让模型知道什么时候该收尾。"""
-    return SYSTEM_PROMPT + (
+def system_prompt(max_steps: int = DEFAULT_MAX_STEPS, memory_text: str = "") -> str:
+    """拼出这一轮的系统提示词。
+
+    memory_text 是跨会话记忆渲染出来的那一段（见 ai/memory.py）。
+    没有记忆时它是空字符串，这里就整段跳过 —— 不注入空壳，白烧 token。
+    """
+    parts = [SYSTEM_PROMPT]
+    if memory_text:
+        parts.append(memory_text)
+    parts.append(
         f"\n\n本次任务的步数预算：{max_steps} 步"
         "（一步 = 你思考一次并调用工具一轮）。快到上限时请先总结进度，"
         "不要在半途突然停下。"
     )
+    return "".join(parts)
 
 
 @dataclass
@@ -153,7 +161,8 @@ class AgentCallbacks:
 class AgentRunner:
     def __init__(self, client: AIClient, context: ToolContext, actions,
                  callbacks: AgentCallbacks | None = None,
-                 max_steps: int | None = None) -> None:
+                 max_steps: int | None = None,
+                 memory_text: str = "") -> None:
         self.client = client
         self.context = context
         self.actions = actions
@@ -162,7 +171,15 @@ class AgentRunner:
         self.max_steps = clamp_max_steps(
             DEFAULT_MAX_STEPS if max_steps is None else max_steps
         )
-        self.messages: list[dict] = [{"role": "system", "content": system_prompt(self.max_steps)}]
+        # 跨会话记忆。放在系统提示词里而不是历史里，因为它是
+        # 「长期背景」而不是「对话内容」—— 每轮都要在，且不该被历史裁剪掉。
+        self.memory_text = memory_text or ""
+        # 每轮开始前重新取一次记忆：模型刚用 remember 记下的东西，
+        # 下一步就该看到，而不是等下一个任务才生效。
+        self.memory_provider = None
+        self.messages: list[dict] = [
+            {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
+        ]
         self._stop = False
         self.last_error = ""
 
@@ -172,8 +189,20 @@ class AgentRunner:
         self.actions.request_stop()
 
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": system_prompt(self.max_steps)}]
+        self.messages = [
+            {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
+        ]
         self._stop = False
+
+    def reload_memory(self, memory_text: str) -> None:
+        """换掉记忆并重建系统提示词。
+
+        对话中途模型刚 remember 了新东西，下一轮就该看到它，
+        所以每轮开始前会重新渲染一次。
+        """
+        self.memory_text = memory_text or ""
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = system_prompt(self.max_steps, self.memory_text)
 
     # -------------------------------------------------------------- 历史管理
     def _trim_history(self) -> None:
@@ -226,6 +255,16 @@ class AgentRunner:
                 if self._stop:
                     self.callbacks.on_status("已停止")
                     break
+
+                # 每轮重新取一次记忆：上一步刚 remember 的东西，这一步就该看到。
+                # 取不到就沿用手里这份，绝不能因为记忆出问题把任务卡住。
+                if self.memory_provider is not None:
+                    try:
+                        fresh = self.memory_provider() or ""
+                    except Exception:  # noqa: BLE001
+                        fresh = None
+                    if fresh is not None and fresh != self.memory_text:
+                        self.reload_memory(fresh)
 
                 self.callbacks.on_status(f"思考中…（第 {step} 步）")
                 self._trim_history()

@@ -69,6 +69,7 @@ class AiController(QObject):
     approvalChanged = Signal()
     auditChanged = Signal()
     settingsChanged = Signal()
+    memoryChanged = Signal()
     modelsChanged = Signal()
     toastRequested = Signal(str, str)
 
@@ -250,6 +251,79 @@ class AiController(QObject):
         return (f"当前 {steps} 步。一步 = 模型看一次结果再决定下一步，"
                 f"一步里可以同时做几个动作，所以 {steps} 步通常能完成不少操作。"
                 f"可调范围 {MIN_MAX_STEPS}–{MAX_MAX_STEPS}。")
+
+    # ------------------------------------------------------------ 跨会话记忆
+    def _memory(self):
+        from .memory import Memory
+
+        try:
+            return Memory.from_dict(self._store.memory)
+        except Exception:  # noqa: BLE001 - 记忆坏了不该让 AI 用不了
+            return Memory()
+
+    def _memory_text(self) -> str:
+        """渲染成可以塞进系统提示词的一段。没有记忆就返回空串。"""
+        from .memory import format_for_prompt
+
+        try:
+            return format_for_prompt(self._memory())
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @Property(str, notify=memoryChanged)
+    def memorySummary(self) -> str:
+        """给界面看的可读摘要。"""
+        from .memory import describe
+
+        try:
+            return describe(self._memory())
+        except Exception as exc:  # noqa: BLE001
+            return f"记忆读取失败：{exc}"
+
+    @Property(int, notify=memoryChanged)
+    def memoryCount(self) -> int:
+        memory = self._memory()
+        return len(memory.facts) + len(memory.aliases) + len(memory.tasks)
+
+    @Property(bool, notify=memoryChanged)
+    def memoryEnabled(self) -> bool:
+        return bool(self._settings.get("ai_memory_enabled", True))
+
+    @memoryEnabled.setter
+    def memoryEnabled(self, value: bool) -> None:
+        self._settings["ai_memory_enabled"] = bool(value)
+        self._store.save()
+        self.settingsChanged.emit()
+        self.memoryChanged.emit()
+        self._push("info", "记忆已开启，以后不用重复交代"
+                    if value else "记忆已关闭，之前记住的内容仍然保留（可在设置里清空）")
+
+    @Slot()
+    def clearMemory(self) -> None:
+        from .memory import MemoryBook
+
+        counts = MemoryBook(self._store).clear()
+        total = counts.get("facts", 0) + counts.get("aliases", 0) + counts.get("tasks", 0)
+        self.memoryChanged.emit()
+        self._push("info", f"已清空 {total} 条记忆。" if total else "本来就没有记忆。")
+        self.toastRequested.emit("记忆已清空", f"删掉了 {total} 条")
+
+    @Slot(str)
+    def forgetMemory(self, text: str) -> None:
+        from .memory import MemoryBook
+
+        removed = MemoryBook(self._store).forget(text or "")
+        self.memoryChanged.emit()
+        if removed is None:
+            self.toastRequested.emit("没找到", "没有匹配的记忆")
+        else:
+            self.toastRequested.emit("已忘掉", removed.text[:40])
+            self._push("info", f"已忘掉：{removed.text}")
+
+    @Slot()
+    def refreshMemory(self) -> None:
+        """重新渲染记忆（界面上的刷新按钮，改完数据文件后也能用）。"""
+        self.memoryChanged.emit()
 
     @Property(bool, notify=settingsChanged)
     def mcpEnabled(self) -> bool:
@@ -454,7 +528,10 @@ class AiController(QObject):
             self.runner = AgentRunner(
                 client, self.context, self.actions, self.callbacks,
                 max_steps=self.maxSteps,
+                memory_text=self._memory_text() if self.memoryEnabled else "",
             )
+            if self.memoryEnabled:
+                self.runner.memory_provider = self._memory_text
             # 保留之前的对话上下文
             self.runner.messages = self._build_history()
             final = self.runner.run(text)
@@ -470,7 +547,13 @@ class AiController(QObject):
 
         只回放纯文本对话，工具调用的中间过程不回放 —— 那会让历史变得又长又乱。
         """
-        history: list[dict] = [{"role": "system", "content": system_prompt(self.maxSteps)}]
+        history: list[dict] = [{
+            "role": "system",
+            "content": system_prompt(
+                self.maxSteps,
+                self._memory_text() if self.memoryEnabled else "",
+            ),
+        }]
         for item in self._messages[-12:]:
             role = item.get("role")
             text = (item.get("text") or "").strip()

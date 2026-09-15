@@ -97,6 +97,7 @@ class Backend(QObject):
         self._reminders.changed.connect(self._refresh_upcoming)
         self._tasks.countsChanged.connect(self._on_focus_tick)
         self._ai.toastRequested.connect(self._on_ai_toast)
+        self._ai.memoryChanged.connect(self.memoryChanged)
 
         self._refresh_upcoming()
 
@@ -375,6 +376,44 @@ class Backend(QObject):
     @Property(str, notify=settingsChanged)
     def aiMaxStepsHint(self) -> str:
         return self.ai.maxStepsHint
+
+    # ------------------------------------------------------------ 跨会话记忆
+    memoryChanged = Signal()
+
+    @Property(bool, notify=memoryChanged)
+    def aiMemoryEnabled(self) -> bool:
+        return self.ai.memoryEnabled
+
+    @aiMemoryEnabled.setter
+    def aiMemoryEnabled(self, value: bool) -> None:
+        self.ai.memoryEnabled = value
+
+    @Property(str, notify=memoryChanged)
+    def aiMemorySummary(self) -> str:
+        return self.ai.memorySummary
+
+    @Property(int, notify=memoryChanged)
+    def aiMemoryCount(self) -> int:
+        return self.ai.memoryCount
+
+    @Slot()
+    def aiClearMemory(self) -> None:
+        self.ai.clearMemory()
+
+    @Slot(str)
+    def aiForgetMemory(self, text: str) -> None:
+        self.ai.forgetMemory(text)
+
+    @Slot(result=str)
+    def aiFrequentApps(self) -> str:
+        """最常用的几个程序，一行一个。给设置页展示用。"""
+        try:
+            pairs = self._ai.context.frequent_apps(6)
+        except Exception:  # noqa: BLE001
+            return ""
+        if not pairs:
+            return ""
+        return "\n".join(f"{name}（{count} 次）" for name, count in pairs)
 
     @Slot()
     def showCommandBar(self) -> None:

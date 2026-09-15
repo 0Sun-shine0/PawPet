@@ -415,6 +415,37 @@ class Backend(QObject):
             return ""
         return "\n".join(f"{name}（{count} 次）" for name, count in pairs)
 
+    @Property(str, notify=settingsChanged)
+    def buildInfo(self) -> str:
+        """当前**实际在跑**的代码是什么版本。
+
+        为什么需要这个：改了代码之后如果跑的还是旧进程或旧的打包 exe，
+        界面上完全看不出来 —— 会以为是代码没写对，其实是根本没加载。
+        这个字符串把「跑的是源码还是打包版」「关键设置当前是多少」
+        直接摆出来，一眼就能分辨。
+        """
+        import sys as _sys
+
+        frozen = getattr(_sys, "frozen", False)
+        source = "打包版 exe" if frozen else "源码"
+        try:
+            executable = _sys.executable or ""
+        except Exception:  # noqa: BLE001
+            executable = ""
+
+        lines = [f"版本：{APP_VERSION}（{source}）"]
+        if executable:
+            lines.append(f"解释器：{executable}")
+        lines.append(f"执行步数：{self.ai.maxSteps} 步")
+        lines.append("记忆：" + ("已开启" if self.ai.memoryEnabled else "已关闭"))
+        try:
+            from .ai import uia
+
+            lines.append("界面元素：可用" if uia.available() else "界面元素：不可用")
+        except Exception:  # noqa: BLE001
+            lines.append("界面元素：不可用")
+        return "\n".join(lines)
+
     @Slot()
     def showCommandBar(self) -> None:
         self.commandBarVisible = True

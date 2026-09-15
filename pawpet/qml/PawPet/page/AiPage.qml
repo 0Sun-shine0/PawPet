@@ -835,6 +835,187 @@ Item {
                 }
             }
 
+            // -------------------------------------------------- 合并确认卡片
+            // 同一轮里的多个操作合成**一次**询问。
+            // 关键：减少的是「问几次」，不是「给多少信息」——清单仍然是完整的。
+            Rectangle {
+                id: batchCard
+                Layout.fillWidth: true
+                visible: backend.ai.hasPendingBatch
+                implicitHeight: batchColumn.implicitHeight + 26
+                radius: Theme.radiusLg
+                color: Qt.rgba(Theme.violet.r, Theme.violet.g, Theme.violet.b, 0.10)
+                border.width: 2
+                border.color: Qt.rgba(Theme.violet.r, Theme.violet.g, Theme.violet.b, 0.65)
+
+                // 用户逐条勾选的状态。默认全选 —— 嫌烦就一键全允许，
+                // 想细看就点掉不想做的。
+                property var decisions: ({})
+                property int revision: 0
+
+                function resetDecisions() {
+                    var map = {}
+                    var items = backend.ai.pendingBatch
+                    for (var i = 0; i < items.length; ++i)
+                        map[items[i].index] = true
+                    decisions = map
+                    revision += 1
+                }
+
+                function isChecked(key) {
+                    // revision 只是为了让绑定重新求值
+                    var _ = revision
+                    return decisions[key] !== false
+                }
+
+                function toggle(key) {
+                    var map = {}
+                    for (var k in decisions) map[k] = decisions[k]
+                    map[key] = !isChecked(key)
+                    decisions = map
+                    revision += 1
+                    backend.ai.resolveBatchItem(key, map[key])
+                }
+
+                function checkedCount() {
+                    var n = 0
+                    var items = backend.ai.pendingBatch
+                    for (var i = 0; i < items.length; ++i)
+                        if (isChecked(items[i].index)) n += 1
+                    return n
+                }
+
+                // 批次一出现就把勾选状态复位
+                Connections {
+                    target: backend.ai
+                    function onApprovalChanged() {
+                        if (backend.ai.hasPendingBatch)
+                            batchCard.resetDecisions()
+                    }
+                }
+
+                ColumnLayout {
+                    id: batchColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 14
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            text: "📋"
+                            font.pixelSize: 16
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "小爪想连着做 " + backend.ai.pendingBatch.length + " 个操作"
+                            color: Theme.violet
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsBody
+                            font.bold: true
+                        }
+                    }
+
+                    Repeater {
+                        model: backend.ai.pendingBatch
+                        delegate: Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: 30
+                            radius: Theme.radiusMd
+                            color: batchCard.isChecked(modelData.index)
+                                   ? Qt.rgba(Theme.violet.r, Theme.violet.g, Theme.violet.b, 0.12)
+                                   : Theme.surfaceAlt
+                            border.width: 1
+                            border.color: batchCard.isChecked(modelData.index)
+                                          ? Theme.violet : Theme.borderSoft
+
+                            RowLayout {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.margins: 8
+                                spacing: 8
+
+                                Text {
+                                    Layout.preferredWidth: 18
+                                    text: batchCard.isChecked(modelData.index) ? "☑" : "☐"
+                                    color: batchCard.isChecked(modelData.index)
+                                           ? Theme.violet : Theme.textFaint
+                                    font.pixelSize: Theme.fsBody
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: (index + 1) + ". " + (modelData.summary || modelData.tool)
+                                    color: batchCard.isChecked(modelData.index)
+                                           ? Theme.text : Theme.textFaint
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsSmall
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    text: modelData.risk === "danger" ? "高危" : ""
+                                    visible: modelData.risk === "danger"
+                                    color: Theme.rose
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsTiny
+                                    font.bold: true
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: batchCard.toggle(modelData.index)
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        PawButton {
+                            text: "全部允许"
+                            glyph: "✓"
+                            variant: "primary"
+                            onClicked: {
+                                backend.ai.resolveBatchAll(true)
+                                backend.ai.confirmBatch()
+                            }
+                        }
+                        PawButton {
+                            text: "全部拒绝"
+                            variant: "ghost"
+                            onClicked: {
+                                backend.ai.resolveBatchAll(false)
+                                backend.ai.confirmBatch()
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        PawButton {
+                            small: true
+                            text: "只做勾选的 " + batchCard.checkedCount() + " 个"
+                            variant: "subtle"
+                            enabled: batchCard.checkedCount() > 0
+                            onClicked: backend.ai.confirmBatch()
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "点条目可以取消勾选，没勾的按「不做」处理。"
+                              + "高危操作不会出现在这里 —— 那种会单独问你。"
+                        color: Theme.textFaint
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+
             // -------------------------------------------------- 输入区
             Rectangle {
                 Layout.fillWidth: true

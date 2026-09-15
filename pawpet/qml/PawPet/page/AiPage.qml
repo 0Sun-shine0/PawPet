@@ -582,31 +582,57 @@ Item {
 
                             PawSwitch {
                                 Layout.fillWidth: true
-                                text: "记住我的习惯和进度"
+                                // 说清楚是「自己判断」而不是等用户喊记一下 ——
+                                // 这正是这个功能的价值所在
+                                text: "自动记住我的习惯"
                                 checked: backend.aiMemoryEnabled
                                 onToggled: backend.aiMemoryEnabled = checked
                             }
 
                             Text {
                                 Layout.fillWidth: true
-                                text: backend.aiMemoryCount > 0
-                                      ? "已记住 " + backend.aiMemoryCount + " 条"
-                                      : "还没有记忆，聊几次就有了"
+                                text: {
+                                    if (backend.aiMemoryCount <= 0)
+                                        return "还没有记忆。正常聊几句，它自己会判断该记什么。"
+                                    var base = "已记住 " + backend.aiMemoryCount + " 条"
+                                    if (backend.aiAutoMemoryCount > 0)
+                                        base += "（其中 " + backend.aiAutoMemoryCount + " 条是它自己学的）"
+                                    return base
+                                }
                                 color: Theme.textDim
                                 font.family: Theme.font
                                 font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
                             }
 
                             // 只在展开时才渲染全文，免得挤占左栏空间
-                            Text {
+                            ColumnLayout {
                                 Layout.fillWidth: true
                                 visible: page.showMemory
-                                text: backend.aiMemorySummary
-                                color: Theme.textFaint
-                                font.family: Theme.font
-                                font.pixelSize: Theme.fsTiny
-                                wrapMode: Text.Wrap
-                                lineHeight: 1.35
+                                spacing: 6
+
+                                // 最近一次自动学习的收获，放在最上面 ——
+                                // 用户最想知道的是「它刚刚自己记了什么」
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: backend.aiAutoLearnStatus
+                                    color: Theme.accent
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsTiny
+                                    wrapMode: Text.Wrap
+                                    lineHeight: 1.3
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: backend.aiMemorySummary
+                                    color: Theme.textFaint
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsTiny
+                                    wrapMode: Text.Wrap
+                                    lineHeight: 1.35
+                                }
                             }
 
                             RowLayout {

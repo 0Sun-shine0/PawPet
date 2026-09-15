@@ -62,6 +62,23 @@ CONFIDENCE_HIGH = 3
 CONFIDENCE_NORMAL = 2
 CONFIDENCE_LOW = 1
 
+# 一条记忆是怎么来的。分开记是为了让用户能分清
+# 「它自己学的」和「我让它记的」—— 自动记忆必须可审计、可单独清理。
+KIND_AUTO = "auto"      # 小爪自己判断后记的（自动学习）
+KIND_TOLD = "told"      # 用户明说「记住…」
+KIND_TOOL = "tool"      # 模型在任务中主动调 remember 记的
+KINDS = (KIND_AUTO, KIND_TOLD, KIND_TOOL)
+# 合并两条同义记忆时，来源按这个优先级取高的 —— 只升不降。
+# 理由：用户明说「记住 X」是最强的意愿表达，不能被后来的自动学习
+# 覆盖成「自己学的」；反过来，自动学到的东西如果之前是用户教的，
+# 也不该被降级，否则界面上会显示错，用户找不到自己让它记的东西。
+KIND_RANK = {KIND_TOOL: 0, KIND_AUTO: 1, KIND_TOLD: 2}
+KIND_LABELS = {
+    KIND_AUTO: "自己学的",
+    KIND_TOLD: "你让它记的",
+    KIND_TOOL: "干活时记的",
+}
+
 TASK_OPEN = "open"
 TASK_DONE = "done"
 TASK_BLOCKED = "blocked"
@@ -163,10 +180,17 @@ class Fact:
     updated: float = 0.0
     source: str = ""          # 谁写的：ai（模型主动记）| user（用户说的）
     hits: int = 0             # 被 recall 命中过几次，用于排序
+    # 怎么来的：auto（小爪自己判断后记的）| told（用户明说要记）| tool（模型调了 remember）
+    # 用户需要能分清「它自己学的」和「我让它记的」—— 自动记忆必须可审计
+    kind: str = "tool"
 
     @property
     def key(self) -> str:
         return normalize(self.text)
+
+    @property
+    def is_auto(self) -> bool:
+        return self.kind == KIND_AUTO
 
     def as_dict(self) -> dict:
         return {
@@ -177,6 +201,7 @@ class Fact:
             "updated": float(self.updated),
             "source": self.source,
             "hits": int(self.hits),
+            "kind": self.kind,
         }
 
     @classmethod
@@ -184,6 +209,7 @@ class Fact:
         if not isinstance(raw, dict):
             return cls()
         category = str(raw.get("category") or "other")
+        kind = str(raw.get("kind") or KIND_TOOL)
         return cls(
             text=_clip(raw.get("text") or ""),
             category=category if category in CATEGORIES else "other",
@@ -193,6 +219,7 @@ class Fact:
             updated=_number(raw.get("updated")),
             source=str(raw.get("source") or ""),
             hits=_integer(raw.get("hits", 0), 0, 0),
+            kind=kind if kind in KINDS else KIND_TOOL,
         )
 
 
@@ -333,7 +360,7 @@ class Memory:
     # ------------------------------------------------------------ 用户事实
     def add_fact(self, text: str, category: str = "other",
                  confidence: int = CONFIDENCE_NORMAL,
-                 source: str = "ai") -> tuple[Fact, bool]:
+                 source: str = "ai", kind: str = KIND_TOOL) -> tuple[Fact, bool]:
         """记一条事实。返回 (记录, 是不是新建的)。
 
         判重按规范化文本。命中已有记录时**合并**而不是新增：
@@ -344,6 +371,7 @@ class Memory:
             raise ValueError("记忆内容不能为空")
 
         category = category if category in CATEGORIES else "other"
+        kind = kind if kind in KINDS else KIND_TOOL
         try:
             confidence = int(confidence)
         except (TypeError, ValueError):
@@ -365,11 +393,14 @@ class Memory:
                 existing.updated = now
                 if source:
                     existing.source = source
+                # 来源只升不降，见 KIND_RANK 的说明
+                if KIND_RANK.get(kind, 0) > KIND_RANK.get(existing.kind, 0):
+                    existing.kind = kind
                 self.updated = now
                 return existing, False
 
         fact = Fact(text=text, category=category, confidence=confidence,
-                    created=now, updated=now, source=source)
+                    created=now, updated=now, source=source, kind=kind)
         self.facts.append(fact)
         self._trim_facts()
         self.updated = now
@@ -496,6 +527,11 @@ def _fact_line(fact: Fact) -> str:
     return f"- {text}"
 
 
+def count_auto(memory: Memory) -> int:
+    """有多少条是自动学来的。界面用它提示用户去审阅。"""
+    return sum(1 for fact in memory.facts if fact.is_auto)
+
+
 def format_for_prompt(memory: Memory, budget: int = PROMPT_BUDGET) -> str:
     """把记忆渲染成一段可以塞进系统提示词的文字。
 
@@ -593,9 +629,9 @@ class MemoryBook:
     # 常用的「读-改-写」组合
     def add_fact(self, text: str, category: str = "other",
                  confidence: int = CONFIDENCE_NORMAL,
-                 source: str = "ai") -> tuple[Fact, bool]:
+                 source: str = "ai", kind: str = KIND_TOOL) -> tuple[Fact, bool]:
         memory = self.load()
-        fact, created = memory.add_fact(text, category, confidence, source)
+        fact, created = memory.add_fact(text, category, confidence, source, kind)
         self.save(memory)
         return fact, created
 
@@ -642,7 +678,9 @@ def describe(memory: Memory) -> str:
         for fact in sorted(memory.facts,
                            key=lambda f: (f.confidence, f.updated), reverse=True)[:20]:
             label = CATEGORY_LABELS.get(fact.category, "其他")
-            lines.append(f"  [{label}] {fact.text}")
+            # 标出「自己学的」，用户才知道哪些是它自动判断的、可以放心删
+            origin = "·自己学的" if fact.is_auto else ""
+            lines.append(f"  [{label}{origin}] {fact.text}")
         if len(memory.facts) > 20:
             lines.append(f"  …还有 {len(memory.facts) - 20} 条")
         lines.append("")

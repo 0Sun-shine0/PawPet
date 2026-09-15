@@ -72,6 +72,10 @@ class AiController(QObject):
     memoryChanged = Signal()
     modelsChanged = Signal()
     toastRequested = Signal(str, str)
+    # 自动记忆学到了东西。和 _learnedIn 分开：
+    # _learnedIn 是线程桥（工作线程 → 主线程），这个是主线程上的对外广播，
+    # 界面/托盘/测试都能订阅。
+    learnedSomething = Signal(str, object)
 
     # ------------------------------------------------- 工作线程 → 主线程的桥
     _statusIn = Signal(str)
@@ -79,6 +83,7 @@ class AiController(QObject):
     _finishedIn = Signal(str, str)
     _approvalIn = Signal(str, str, str, str)
     _modelsIn = Signal(bool, object)
+    _learnedIn = Signal(str, object)
 
     def __init__(self, store, parent=None) -> None:
         super().__init__(parent)
@@ -103,6 +108,7 @@ class AiController(QObject):
         self._models: list[str] = []
         self._mcp_clients: list[MCPClient] = []
         self._thread: threading.Thread | None = None
+        self._lastLearned: dict = {}
 
         self.actions.level = str(store.settings.get("ai_level", LEVEL_CONFIRM))
 
@@ -111,6 +117,7 @@ class AiController(QObject):
         self._finishedIn.connect(self._apply_finished)
         self._approvalIn.connect(self._show_approval)
         self._modelsIn.connect(self._apply_models)
+        self._learnedIn.connect(self._apply_learned)
 
         self._load_persisted_preview()
         self._greet()
@@ -284,6 +291,33 @@ class AiController(QObject):
     def memoryCount(self) -> int:
         memory = self._memory()
         return len(memory.facts) + len(memory.aliases) + len(memory.tasks)
+
+    @Property(int, notify=memoryChanged)
+    def autoMemoryCount(self) -> int:
+        """有多少条是小爪自己学来的。让用户知道该去审阅哪些。"""
+        from .memory import count_auto
+
+        try:
+            return count_auto(self._memory())
+        except Exception:  # noqa: BLE001
+            return 0
+
+    @Property(str, notify=memoryChanged)
+    def autoLearnStatus(self) -> str:
+        """最近一次自动学习干了什么。面板上给用户看。"""
+        learned = getattr(self, "_lastLearned", None) or {}
+        if not learned:
+            return "还没有自动学到东西。正常聊几句，它自己会判断。"
+        parts = []
+        for text in learned.get("learned") or []:
+            parts.append(f"· 新记住：{text}")
+        for text in learned.get("updated") or []:
+            parts.append(f"· 更新了：{text}")
+        for text in learned.get("forgotten") or []:
+            parts.append(f"· 删掉了旧记忆：{text}")
+        if not parts:
+            return "最近一轮没有值得记的东西。"
+        return "\n".join(parts[:6])
 
     @Property(bool, notify=memoryChanged)
     def memoryEnabled(self) -> bool:
@@ -534,6 +568,9 @@ class AiController(QObject):
         self._running = True
         self.runningChanged.emit()
         self.actions.clear_stop()
+        # 把这一轮用户的原话交给工具层：remember 要靠它判断
+        # 「这条是用户明说要记的」还是「模型干活时顺手记的」
+        self.context.recent_user_texts = [text]
 
         self._thread = threading.Thread(
             target=self._worker, args=(text,), name="pawpet-ai", daemon=True
@@ -633,6 +670,66 @@ class AiController(QObject):
             self.toastRequested.emit("AI 出错", error[:120])
         elif text:
             self.toastRequested.emit("任务结束", text[:80])
+
+        # 任务结束后，后台判断这一轮有没有值得长期记住的东西。
+        # 放在这里（而不是任务中间）有两个好处：不占用步数预算，
+        # 也不拖慢用户拿到结果的时间 —— 它在后台线程里跑。
+        if self.memoryEnabled:
+            self._start_learning(text)
+
+    # ------------------------------------------------------------ 自动学习
+    def _start_learning(self, assistant_text: str) -> None:
+        """在后台线程里跑一次自动记忆判断。"""
+        user_text = ""
+        for item in reversed(self._messages):
+            if item.get("role") == "user":
+                user_text = (item.get("text") or "").strip()
+                break
+        if not user_text:
+            return
+
+        thread = threading.Thread(
+            target=self._learn_worker, args=(user_text, assistant_text),
+            name="pawpet-ai-learn", daemon=True)
+        thread.start()
+
+    def _learn_worker(self, user_text: str, assistant_text: str) -> None:
+        """自动学习的工作线程。
+
+        **任何异常都吞掉。** 这一层是「顺手多学一点」，
+        学不到最多是记忆少一条 —— 绝不能因为判别请求失败
+        就在对话里冒一个报错出来吓用户。
+        """
+        try:
+            from .autolearn import learn_from_turn
+            from .memory import MemoryBook
+
+            client = self._client()
+            result = learn_from_turn(
+                client, MemoryBook(self._store), user_text, assistant_text)
+            if result.changed:
+                # 切回主线程更新界面（信号是线程安全的）
+                self._learnedIn.emit(result.summary(), result.as_dict())
+        except Exception:  # noqa: BLE001 - 后台链路，静默失败
+            pass
+
+    def _apply_learned(self, summary: str, detail: object) -> None:
+        """自动学习完成后的界面反馈。**这个函数一定在主线程执行。**
+
+        **刻意不往对话流里塞消息。** 每轮都冒一条「我记住了 2 条」
+        会把对话刷得很吵；只在真有收获时给一个轻提示，
+        详细内容让用户自己去记忆面板看。
+        """
+        self._lastLearned = detail if isinstance(detail, dict) else {}
+        self.memoryChanged.emit()
+        # 广播给界面（QML 之外的东西也能订阅，比如托盘提示、测试）
+        self.learnedSomething.emit(summary, self._lastLearned)
+        self.toastRequested.emit("记住了新东西", summary)
+
+    @Property("QVariantMap", notify=memoryChanged)
+    def lastLearned(self) -> dict:
+        """最近一次自动学习的结果。记忆面板用它显示「刚学到什么」。"""
+        return getattr(self, "_lastLearned", {}) or {}
 
     # ------------------------------------------------------------ 审批桥接
     def request_approval_blocking(self, request: ApprovalRequest) -> bool:

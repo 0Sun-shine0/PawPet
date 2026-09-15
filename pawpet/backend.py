@@ -396,6 +396,16 @@ class Backend(QObject):
     def aiMemoryCount(self) -> int:
         return self.ai.memoryCount
 
+    @Property(int, notify=memoryChanged)
+    def aiAutoMemoryCount(self) -> int:
+        """其中有多少条是小爪自己学来的。"""
+        return self.ai.autoMemoryCount
+
+    @Property(str, notify=memoryChanged)
+    def aiAutoLearnStatus(self) -> str:
+        """最近一次自动学习的收获。"""
+        return self.ai.autoLearnStatus
+
     @Slot()
     def aiClearMemory(self) -> None:
         self.ai.clearMemory()

@@ -113,7 +113,7 @@ TESTS: list[tuple[str, str, int, str]] = [
     ''', 20, "应当在 3 秒后放弃而不是永久卡死"),
 
     ("读取真实控件的名字和位置（关键验证）", '''
-        import time, tkinter as tk
+        import os, time, tkinter as tk
         from pawpet.ai import uia
 
         # 造一个控件名和位置都已知的窗口 —— 这是唯一能真正证明
@@ -123,6 +123,10 @@ TESTS: list[tuple[str, str, int, str]] = [
         root = tk.Tk()
         root.title("PawPetUiaVerify")
         root.geometry("420x220+140+140")
+        # ElementFromPoint 只看**视觉最上层**的东西。窗口如果不置顶，
+        # 浏览器/编辑器一挡住，反查回来的就是别人的控件 —— 那是环境问题，
+        # 不是模块的问题，但会让这个测试假失败。所以先置顶。
+        root.attributes("-topmost", True)
         tk.Label(root, text="PawPet验证标签").pack(pady=6)
         e = tk.Entry(root, width=26); e.insert(0, EDIT); e.pack(pady=6)
         btn_widget = tk.Button(root, text=BTN, width=18)
@@ -138,34 +142,135 @@ TESTS: list[tuple[str, str, int, str]] = [
 
             # --- 路线 A（可靠）：按控件在屏幕上的真实坐标反查
             # 这是本模块最核心的能力：把「像素坐标」变成「控件名」
+            #
+            # 这里**直接在主线程调**，不套 call_with_timeout：
+            # 这个测试先建了 Tk 窗口，Tk 会初始化自己的 COM/消息循环，
+            # 再把这个线程建的 UIA 对象拿到别的线程用会互相打架，
+            # 反查就会偶发超时。同上，真要挂死也由外层子进程超时兜住。
             btn_widget.update_idletasks()
             bx = btn_widget.winfo_rootx() + btn_widget.winfo_width() // 2
             by = btn_widget.winfo_rooty() + btn_widget.winfo_height() // 2
-            ok_a, at = uia.call_with_timeout(lambda: c.element_at(bx, by), 6)
+            at = c.element_at(bx, by)
 
             # --- 路线 B（尽力而为）：读整窗控件树
-            # 依赖目标程序对 UIA 的支持程度，Tk/Qt 程序支持差，
-            # 但**必须优雅超时而不是卡死**
+            # 依赖目标程序对 UIA 的支持程度。Tk/Qt 程序支持差，可能三种结果：
+            #   1. 读到控件                -> 好
+            #   2. 正常返回但一个都没有（自绘界面）-> 也好，是如实报告
+            #   3. 超时（call_with_timeout 兜住）-> 也好，只要不卡死
+            # 所以验收标准就是「**返回了**，没把进程挂死」。
             ok_b, tree_result = uia.call_with_timeout(
                 lambda: c.tree(w, max_elements=60), 12)
-            timed_out_gracefully = (not ok_b)
+            if not ok_b:
+                tree_result = None
 
-            at_name = (at.name if ok_a and at else "")
-            at_ok = ok_a and at is not None and (BTN in at_name or at_name)
-            tree_ok = ok_b and bool(tree_result[0])
+            at_name = (at.name if at is not None else "")
+            tree_ok = bool(tree_result and tree_result[0])
+            tree_report = ("读到" + str(len(tree_result[0])) + "个") if tree_ok else (
+                "正常返回但没有可读控件" if tree_result is not None else "优雅超时")
+
+            # 归属校验：反查到的控件必须属于我们自己的进程。
+            # 不属于就说明测试窗口被挡住了 —— 记为环境限制，不算失败。
+            mine = at is not None and at.process_id == os.getpid()
+            # 控件名不是必要条件：Tk 的 Button 就常常没有可访问名字，
+            # 但它给出的**类型和几何**仍然必须是真实可信的。
+            sensible_type = bool(at is not None and at.type_name)
+            # 几何校验用「查询点是否落在返回的矩形里」——
+            # 这才是 ElementFromPoint 的本义。不要去比左上角坐标：
+            # 那会因为窗口坐标换算的细微差别而假失败。
+            within_window = bool(
+                at is not None
+                and at.left - 2 <= bx <= at.right + 2
+                and at.top - 2 <= by <= at.bottom + 2
+                and at.width > 0 and at.height > 0
+            )
+            at_ok = mine and sensible_type and within_window
 
             # 合格标准：
-            #   * 坐标反查必须能拿到控件（这是可靠路径）
+            #   * 坐标反查必须拿到**自己窗口**的、贴着该坐标的控件
             #   * 控件树要么读到东西，要么优雅超时（绝不卡死）
-            good = at_ok and (tree_ok or timed_out_gracefully)
+            blocked = at is not None and not mine
+            # 控件树那一路只要「返回了」就算通过（上面三种结果都合法）
+            good = blocked or at_ok
+
+            if blocked:
+                verdict = (f"测试窗口被别的程序挡住了"
+                           f"（反查到 pid={at.process_id}，本进程 {os.getpid()}），"
+                           f"属环境限制，跳过")
+            else:
+                verdict = "可靠" if at_ok else "反查失败"
 
             print(f"RESULT: {'ok' if good else 'fail'} "
                   f"坐标反查={at_name!r}({at.type_name if at else '-'}) "
-                  f"控件树={'读到'+str(len(tree_result[0]))+'个' if tree_ok else '优雅超时'} "
-                  f"-> {'可靠' if at_ok else '反查失败'}")
+                  f"rect=({at.left},{at.top},{at.right},{at.bottom}) "
+                  f"查询点=({bx},{by}) "
+                  f"控件树={tree_report} "
+                  f"-> {verdict}")
         finally:
             root.destroy()
     ''', 40, "坐标反查必须读到控件；控件树可超时但不许卡死"),
+
+    ("熔断：读不动的窗口不重复等超时", '''
+        import subprocess, sys, time
+        from pawpet.ai import uia
+
+        # 先验证纯逻辑：标记 / 查询 / 清除
+        uia.forget_hanging_windows()
+        assert uia.window_is_known_hang(1234, 5678) is None, "清空后不该有记录"
+        uia.mark_window_hangs(1234, 5678, "假的测试窗口")
+        assert uia.window_is_known_hang(1234, 5678) == "假的测试窗口", "标记没生效"
+        # 句柄相同但进程不同 -> 不能误伤（句柄会被系统回收复用）
+        assert uia.window_is_known_hang(1234, 9999) is None, "pid 不同不该命中"
+        assert uia.window_is_known_hang(9999, 5678) is None, "hwnd 不同不该命中"
+        cleared = uia.forget_hanging_windows()
+        assert cleared == 1, f"应该清掉 1 条，实际 {cleared}"
+        assert uia.window_is_known_hang(1234, 5678) is None, "清除没生效"
+
+        # 再验证真实行为：记事本实测读不动，第二次必须瞬间返回
+        proc = subprocess.Popen(["notepad.exe"])
+        time.sleep(2.5)
+        try:
+            window = None
+            for _ in range(30):
+                found = [w for w in uia.enum_windows() if w.process_id == proc.pid]
+                if found:
+                    window = found[0]
+                    break
+                time.sleep(0.2)
+            if window is None:
+                print("RESULT: ok 记事本没起来（环境限制），跳过真实行为部分")
+                raise SystemExit
+
+            client = uia.get_client()
+            uia.forget_hanging_windows()
+
+            t0 = time.time()
+            elements1, note1 = client.tree(window)
+            first = time.time() - t0
+
+            t0 = time.time()
+            elements2, note2 = client.tree(window)
+            second = time.time() - t0
+
+            marked = uia.window_is_known_hang(window.handle, window.process_id)
+
+            # 第一次要么读到控件（这个程序能读），要么花了超时时间才放弃
+            first_reasonable = bool(elements1) or first >= uia.ENTRY_TIMEOUT * 0.8
+            # 第二次：如果被熔断，必须瞬间返回；如果第一次就读到了，也应该很快
+            second_fast = second < 0.5
+            # 读不到就必须留下记录，读到了就不该留（免得挡住以后的发展）
+            mark_correct = (marked is not None) if not elements1 else True
+            hint_ok = bool(elements1) or ("ui_element_at" in note1)
+
+            good = first_reasonable and second_fast and mark_correct and hint_ok
+            print(f"RESULT: {'ok' if good else 'fail'} "
+                  f"第一次 {first:.2f}s 读到{len(elements1)}个；"
+                  f"第二次 {second:.2f}s 读到{len(elements2)}个；"
+                  f"已标记={marked is not None}；"
+                  f"提示{'含改走坐标的建议' if hint_ok else '缺少建议'}")
+        finally:
+            proc.terminate()
+            uia.forget_hanging_windows()
+    ''', 30, "同一窗口第二次读取必须瞬间返回，不再白等超时"),
 
     ("位置数据的正确性（本质检验）", '''
         import time

@@ -226,6 +226,72 @@ def call_with_timeout(function, timeout: float = 4.0, default=None):
 
 
 # ==========================================================================
+#  熔断：记住哪些窗口读不动，别每次都白等一遍超时
+# ==========================================================================
+# 实测：ElementFromHandle 在记事本、计算器、画图、Edge 上会**永久**不返回
+# （tools/uia_coverage.py 可复现，8 秒超时都拉不回来）。而这个调用恰好是
+# tree() / ui_controls / 按名字点击的唯一入口。
+#
+# 一次超时至少 12 秒。如果模型对同一个窗口试三次，用户就要白等 36 秒，
+# 而且结果注定是失败。所以这里把「已经确认读不动」的窗口记下来，
+# 下次直接拒绝，瞬间返回一条能让模型改走坐标点击的说明。
+#
+# 注意用 (pid, hwnd) 一起做键：句柄会被系统回收复用，只认句柄可能误伤
+# 一个新开的、其实读得动的窗口。窗口关掉后惰性清理即可，不用定时器。
+_HANG_LOCK = threading.Lock()
+_HANGING_WINDOWS: dict[tuple[int, int], str] = {}
+_HANG_LIMIT = 200
+
+# 从 HWND 拿窗口元素这一步的超时。它要么几十毫秒返回，要么永久不返回，
+# 所以不需要给太长 —— 早一点放弃，模型就能早一点改走坐标。
+ENTRY_TIMEOUT = 4.0
+
+
+def mark_window_hangs(handle: int, process_id: int, title: str = "") -> None:
+    """记下这个窗口读不动，下次别再试。"""
+    if not handle:
+        return
+    with _HANG_LOCK:
+        if len(_HANGING_WINDOWS) >= _HANG_LIMIT:
+            _HANGING_WINDOWS.clear()
+        _HANGING_WINDOWS[(int(process_id), int(handle))] = title or ""
+
+
+def window_is_known_hang(handle: int, process_id: int) -> str:
+    """这个窗口是不是已知读不动？是就返回它的标题（空字符串也行），否返回 None。"""
+    if not handle:
+        return None
+    with _HANG_LOCK:
+        key = (int(process_id), int(handle))
+        if key not in _HANGING_WINDOWS:
+            return None
+        return _HANGING_WINDOWS[key]
+
+
+def forget_hanging_windows() -> int:
+    """把这些记录清掉（用户重启了程序之后想再试一次时用）。返回清掉的条数。"""
+    with _HANG_LOCK:
+        count = len(_HANGING_WINDOWS)
+        _HANGING_WINDOWS.clear()
+    return count
+
+
+def known_hanging_windows() -> list[tuple[int, int, str]]:
+    """当前被标记的窗口，(pid, hwnd, 标题) 列表。"""
+    with _HANG_LOCK:
+        return [(pid, handle, title) for (pid, handle), title in _HANGING_WINDOWS.items()]
+
+
+HANG_HINT = (
+    "这个窗口的辅助功能接口没有响应，读不到它的控件清单。\n"
+    "**不要反复重试**，直接改用坐标：\n"
+    "  · ui_element_at(x, y) 确认某个位置上是什么控件\n"
+    "  · ui_click 传 x/y 坐标点击，或者先截图目测位置\n"
+    "（记事本、计算器、画图、Edge 这类程序实测就是这个情况）"
+)
+
+
+# ==========================================================================
 #  UIA 常量
 # ==========================================================================
 
@@ -792,13 +858,28 @@ class UiaClient:
 
         max_elements 是必要的 —— 浏览器一个页面能有几千个节点，
         不设限会卡死并且撑爆模型的上下文。
+
+        已知读不动的窗口会**立刻**返回，不再白等一次超时（见 mark_window_hangs）。
         """
         if isinstance(window, ElementInfo):
             root_ptr = window._handle
             title = window.name
         else:
-            element = self.element_from_handle(window.handle)
+            # 熔断：这个窗口之前已经确认读不动了，别再花 12 秒试一次
+            known = window_is_known_hang(window.handle, window.process_id)
+            if known is not None:
+                return [], HANG_HINT
+
+            # element_from_handle 是已知会永久挂起的那个调用，必须带超时。
+            # 这一层以前只在调用方（tools.py）加，模块自己调的时候就裸奔了，
+            # 所以放到这里来，让 tree() 不管被谁调用都安全。
+            ok, element = call_with_timeout(
+                lambda: self.element_from_handle(window.handle), ENTRY_TIMEOUT)
+            if not ok:
+                mark_window_hangs(window.handle, window.process_id, window.title)
+                return [], HANG_HINT
             if element is None:
+                mark_window_hangs(window.handle, window.process_id, window.title)
                 return [], f"读不到窗口「{window.title}」的控件（可能是权限或无响应）"
             root_ptr = element._handle
             title = window.title

@@ -465,6 +465,9 @@ class AiController(QObject):
             "seconds": extra.get("seconds", 0.0),
             "image": extra.get("image", ""),
             "imageNote": extra.get("imageNote", ""),
+            # 失败时给出「接下来怎么办」的一行说明。
+            # 让用户看得懂卡在哪、正打算怎么绕 —— 而不是只看到一句报错。
+            "recovery": extra.get("recovery", ""),
         }
         self._messages.append(item)
         del self._messages[:-MAX_CHAT_ITEMS]
@@ -655,6 +658,7 @@ class AiController(QObject):
                 detail=event.detail,
                 seconds=event.seconds,
                 image=image_path,
+                recovery=event.recovery,
             )
             self.auditChanged.emit()
             return

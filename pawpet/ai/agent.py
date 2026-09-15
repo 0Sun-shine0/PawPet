@@ -27,6 +27,7 @@ from .actions import (
     LEVEL_READ_ONLY,
     Risk,
 )
+from .advisor import Advisor
 from .client import AIClient, AiError
 from .tools import TOOL_INDEX, ToolContext, describe_arguments, openai_tools
 
@@ -112,6 +113,25 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 3. 如果连续两次尝试都没能让界面发生变化，停下来向用户说明情况，
    不要反复重试同一个动作。
 
+**失败之后怎么办（重要）**
+
+工具失败时会返回一段【恢复建议】，**照着做，不要自己重试同一个动作**。
+判断原则：
+
+* **只有两种情况值得原样重试**：参数写错了（改对再试一次）、
+  界面正忙（等一下再试）。其余统统**换路**。
+* 「读不到控件」「超时」= 这个程序不支持辅助功能，
+  **重试一百次也一样** → 改用截图 + 坐标。
+* 「没找到窗口/控件」= 目标变了 → **先重新确认现状**
+  （`ui_windows` / `screenshot`），不要用同样的参数再来一次。
+* 「被权限拦下」「用户拒绝」= **重试毫无意义** → 停下来跟用户说清楚，
+  让他决定。
+* 完全相同的调用失败 3 次会被**直接拦掉**（不会执行）。
+  看到拦截提示就说明你该换做法了，不是在跟系统较劲。
+
+**绝对不要**：把没做成的事说成做成了。失败就如实说卡在哪、
+你试过什么、需要用户做什么。
+
 安全与边界：
 * 不要删除文件、不要清空回收站、不要改系统设置、不要执行关机重启。
 * 不要输入或读取任何密码、支付信息、身份证号等敏感内容。
@@ -171,6 +191,9 @@ class StepEvent:
     detail: str = ""
     image_png: bytes = b""
     seconds: float = 0.0
+    # 失败时给模型/界面的恢复建议（见 advisor.py）。
+    # 界面上显示成卡片角落的一行「怎么补救」，用户能看懂卡在哪、在怎么绕。
+    recovery: str = ""
 
 
 class AgentCallbacks:
@@ -206,6 +229,8 @@ class AgentRunner:
         # 每轮开始前重新取一次记忆：模型刚用 remember 记下的东西，
         # 下一步就该看到，而不是等下一个任务才生效。
         self.memory_provider = None
+        # 失败跟踪与恢复建议。每个任务一次，reset() 里清空。
+        self.advisor = Advisor()
         self.messages: list[dict] = [
             {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
         ]
@@ -321,6 +346,8 @@ class AgentRunner:
         self._stop = False
         self.actions.clear_stop()
         self.last_error = ""
+        # 上一轮的失败记录不能带进这一轮，否则会误判成「又失败了」
+        self.advisor.reset()
 
         self._append_user(user_text)
         final_text = ""
@@ -414,6 +441,19 @@ class AgentRunner:
             self.last_error = f"{type(exc).__name__}: {exc}"
             self.callbacks.on_error(self.last_error)
 
+        # 这一轮如果一直失败，收尾时提醒用户一下 ——
+        # 免得模型把「没做成」轻描淡写成「已完成」。
+        summary = self.advisor.summary()
+        if summary and self.advisor.failures:
+            hard = [item for item in self.advisor.failures
+                    if item.kind in ("permission", "denied", "missing_dep")]
+            if hard and "卡住" not in final_text:
+                final_text = (final_text + "\n\n" if final_text else "") + (
+                    "有一步被挡住了，需要你来决定："
+                    f"{hard[0].detail[:120]}"
+                )
+            self.callbacks.on_status(summary)
+
         self.callbacks.on_finished(final_text)
         return final_text
 
@@ -425,6 +465,22 @@ class AgentRunner:
             return None
 
         summary = describe_arguments(call.name, call.arguments)
+
+        # ---- 止损：完全相同的调用已经失败太多次，就别再执行了
+        #
+        # 光靠提示词劝不住模型反复试同一个动作（实测它会把步数全花在
+        # 一个注定失败的调用上）。所以这里直接拦掉，并把「换路」的办法
+        # 明确写给它。
+        blocked = self.advisor.before_call(call.name, call.arguments)
+        if blocked is not None:
+            self.callbacks.on_event(StepEvent(
+                kind="error", tool=call.name, risk=spec.risk, ok=False,
+                text="已拦截重复失败的操作",
+                detail=blocked.hint,
+                recovery=blocked.label,
+            ))
+            self._record_tool(call_id, call.name, blocked.hint, ok=False)
+            return None
 
         # ---- 只读模式下的拦截
         if self.actions.blocked(spec.risk):
@@ -466,15 +522,32 @@ class AgentRunner:
         ok, text, bundle = self.context.execute(call.name, call.arguments)
         elapsed = time.time() - started
 
+        # ---- 失败之后给「下一步」。
+        #
+        # 原来只把原始错误回给模型（「UI Automation 查询超时」），
+        # 没有告诉它怎么办，于是它就反复重试同一个动作。
+        # 这里补一句可执行的建议：该换路、该等一下、还是该停下来问用户。
+        advice = None
+        if not ok:
+            advice = self.advisor.after_failure(call.name, call.arguments, text)
+
         preview = (bundle or {}).get("preview") or b""
         self.callbacks.on_event(StepEvent(
             kind="tool", tool=call.name, risk=spec.risk, ok=ok,
             text=self._human_summary(call.name, call.arguments),
             detail=text, image_png=preview if spec.returns_image else b"",
             seconds=elapsed,
+            recovery=advice.label if advice else "",
         ))
 
-        self._record_tool(call_id, call.name, text, ok=ok)
+        if advice is not None:
+            self._record_tool(
+                call_id, call.name,
+                f"失败：{text}\n\n【恢复建议】{advice.hint}{advice.tally}",
+                ok=False,
+            )
+        else:
+            self._record_tool(call_id, call.name, text, ok=ok)
 
         if spec.returns_image and ok and bundle:
             return bundle

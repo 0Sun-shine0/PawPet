@@ -695,6 +695,7 @@ Item {
                         stamp: modelData.time
                         seconds: modelData.seconds
                         imageSource: modelData.image
+                        recovery: modelData.recovery || ""
                     }
                 }
 

@@ -418,6 +418,9 @@ class ToolContext:
         self.backend = backend        # 用来把待办同步给界面
         self.last_shot = None
         self.last_preview_png = b""
+        # 这一轮用户说的原话。界面层每轮开始时写进来，
+        # remember 靠它判断该标 told 还是 tool。
+        self.recent_user_texts: list[str] = []
 
     # ------------------------------------------------------------ 坐标换算
     def to_screen(self, x, y) -> tuple[int, int]:
@@ -1080,6 +1083,21 @@ class ToolContext:
 
         return MemoryBook(self.store)
 
+    # 用户明确要求「记住」的说法。命中就说明这条是用户主动交代的，
+    # 该标成 told 而不是小爪自己学的。
+    _ASKED_TO_REMEMBER = (
+        "记住", "记下来", "记一下", "帮我记", "别忘", "不要忘",
+        "以后都", "以后别", "记住我",
+    )
+
+    def _user_asked_to_remember(self) -> bool:
+        """最近一条用户消息里，用户是不是明确要求记住什么。"""
+        for item in reversed(getattr(self, "recent_user_texts", []) or []):
+            text = str(item or "")
+            if any(marker in text for marker in self._ASKED_TO_REMEMBER):
+                return True
+        return False
+
     def _do_remember(self, args: dict):
         text = str(args.get("text") or "").strip()
         if not text:
@@ -1092,8 +1110,13 @@ class ToolContext:
             confidence = 2
 
         try:
+            from .memory import KIND_TOLD, KIND_TOOL
+
+            # 用户明说「记住…」时，这条要标成 told —— 界面上会区分显示，
+            # 用户才知道哪些是自己要求的、哪些是小爪自己学的
+            kind = KIND_TOLD if self._user_asked_to_remember() else KIND_TOOL
             fact, created = self._memory_book().add_fact(
-                text, category, confidence, source="ai")
+                text, category, confidence, source="ai", kind=kind)
         except ValueError as exc:
             return False, str(exc), None
 

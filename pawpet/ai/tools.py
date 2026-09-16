@@ -470,9 +470,18 @@ TOOLS: list[ToolSpec] = [
 TOOL_INDEX = {tool.name: tool for tool in TOOLS}
 
 
-def openai_tools() -> list[dict]:
-    """转成 chat/completions 的 tools 参数格式。"""
-    return [
+def openai_tools(extra: list[dict] | None = None) -> list[dict]:
+    """转成 chat/completions 的 tools 参数格式。
+
+    extra 是外面接进来的工具（目前是 MCP server 提供的），格式已经是
+    OpenAI 那一套，直接拼上去就行。
+
+    **为什么要这个参数**：内置工具列表是模块级的常量，而 MCP 工具是
+    运行时才连上的、还会变。原来这里没有 extra，结果是
+    `MCPClient.as_openai_tools()` 根本没人调用 —— 界面显示「已连接，
+    3 个工具」，但那 3 个工具模型永远看不到也调不到。等于 MCP 是个假功能。
+    """
+    tools = [
         {
             "type": "function",
             "function": {
@@ -483,6 +492,16 @@ def openai_tools() -> list[dict]:
         }
         for tool in TOOLS
     ]
+    if extra:
+        # 内置工具优先。同名的外部工具直接丢掉，不让它顶掉内置的 ——
+        # 内置工具是安全边界内实现好的，外面来的同名工具不可信。
+        taken = {item["function"]["name"] for item in tools}
+        for item in extra:
+            name = (item.get("function") or {}).get("name")
+            if name and name not in taken:
+                tools.append(item)
+                taken.add(name)
+    return tools
 
 
 class ToolContext:
@@ -548,6 +567,10 @@ class ToolContext:
         """
         spec = TOOL_INDEX.get(name)
         if spec is None:
+            # 不是内置工具 —— 可能是外面接进来的 MCP 工具。
+            # 名字长这样：mcp_{server名}_{工具名}
+            if name.startswith("mcp_"):
+                return self.call_mcp_tool(name, arguments or {})
             return False, f"没有名为 {name} 的工具", None
 
         handler = getattr(self, f"_do_{name}", None)
@@ -572,6 +595,62 @@ class ToolContext:
             return handler(arguments or {})
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成可读文本回给模型
             return False, f"工具 {name} 执行出错：{exc}", None
+
+    # ------------------------------------------------------------------ MCP
+    def mcp_clients(self) -> list:
+        """当前连着的 MCP server。
+
+        从 backend 拿，而不是让工具层持有 MCPClient —— ToolContext 是
+        每轮新建的轻量对象，连接的生命周期归 controller 管。
+        """
+        backend = self.backend
+        controller = getattr(backend, "ai", None) if backend is not None else None
+        clients = getattr(controller, "_mcp_clients", None)
+        return list(clients) if clients else []
+
+    def mcp_tools(self) -> list[dict]:
+        """把所有 MCP server 的工具拼成 OpenAI 格式。
+
+        每轮都重新取 —— 用户在会话中间连上一个 server，下一步就该看见它。
+        """
+        merged: list[dict] = []
+        for client in self.mcp_clients():
+            if not getattr(client, "running", False):
+                continue
+            try:
+                merged.extend(client.as_openai_tools())
+            except Exception:  # noqa: BLE001 - 一个 server 出问题不该拖垮整轮
+                continue
+        return merged
+
+    def call_mcp_tool(self, name: str, arguments: dict):
+        """把 mcp_xxx_yyy 路由给对应的 server。
+
+        名字拆解不能简单 split("_")：server 名和工具名里都可能有下划线。
+        所以拿每个已连接 server 的前缀去比，**取最长的那个匹配** ——
+        否则 server 名叫 `a` 和 `a_b` 时会路由错。
+        """
+        best = None
+        best_tool = ""
+        for client in self.mcp_clients():
+            if not getattr(client, "running", False):
+                continue
+            prefix = f"mcp_{client.name}_"
+            if name.startswith(prefix) and (best is None
+                                            or len(prefix) > len(f"mcp_{best.name}_")):
+                best = client
+                best_tool = name[len(prefix):]
+
+        if best is None or not best_tool:
+            known = ", ".join(c.name for c in self.mcp_clients()) or "（没有）"
+            return False, (f"没有名为 {name} 的工具。"
+                           f"当前连着的 MCP：{known}。"
+                           "可能这个 server 已经断开了。"), None
+
+        ok, text = best.call_tool(best_tool, arguments)
+        if not ok:
+            return False, f"MCP「{best.name}」的 {best_tool} 失败：{text}", None
+        return True, text, None
 
     # -------------------------------------------------------------- 观察实现
     def _do_screenshot(self, args: dict):

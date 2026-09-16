@@ -22,6 +22,9 @@ Item {
     property string toolName: ""
     property string risk: ""
     property string recovery: ""       // 失败时给「接下来怎么办」的一行说明
+    // 「做完有交代」：干了几件事、文件存哪了、能不能撤回。
+    // 由执行层如实统计（模型自己总结容易把「试过但失败」写成「已完成」）。
+    property string report: ""
     property bool ok: true
     property string stamp: ""
     property real seconds: 0
@@ -79,7 +82,8 @@ Item {
         // 那样会形成绑定循环。
         width: Math.min(bubble.width * 0.94,
                         Math.max(200, assistantMeasure.implicitWidth + 36))
-        height: assistantText.implicitHeight + 26
+        height: assistantText.implicitHeight
+                + (bubble.report.length > 0 ? reportText.implicitHeight + 43 : 26)
         radius: Theme.radiusLg
         color: Theme.surfaceHi
         border.width: 1
@@ -106,6 +110,39 @@ Item {
             wrapMode: Text.Wrap
             lineHeight: 1.38
             onLinkActivated: function (link) { Qt.openUrlExternally(link) }
+        }
+
+        // ---------------------------------------------------- 做完的交代
+        // 三个问题一次答完：干了几件事、东西在哪、能不能撤回。
+        // 用一条细分隔线和小字，不抢正文的视线。
+        //
+        // 用 anchors 而不是再套一层 Column：外层高度是手算的，
+        // 嵌套容器的 implicitHeight 和 anchors 混用很容易算出循环绑定。
+        Rectangle {
+            id: reportLine
+            anchors.top: assistantText.bottom
+            anchors.topMargin: 9
+            x: 18
+            width: parent.width - 36
+            height: 1
+            color: Theme.border
+            visible: bubble.report.length > 0
+        }
+
+        Text {
+            id: reportText
+            anchors.top: reportLine.bottom
+            anchors.topMargin: 7
+            x: 18
+            width: parent.width - 36
+            text: bubble.report
+            textFormat: Text.PlainText
+            color: Theme.textFaint
+            font.family: Theme.font
+            font.pixelSize: Theme.fsTiny
+            wrapMode: Text.Wrap
+            lineHeight: 1.4
+            visible: bubble.report.length > 0
         }
     }
 
@@ -188,7 +225,9 @@ Item {
                                        ? Math.min(230, parent.width * 0.6) : 0
                 visible: bubble.imageSource.length > 0
                 radius: Theme.radiusSm
-                color: "#0d0b14"
+                color: Theme.surfaceHi
+                border.width: 1
+                border.color: Theme.border
                 clip: true
 
                 Image {

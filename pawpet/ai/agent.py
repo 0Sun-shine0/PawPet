@@ -27,7 +27,7 @@ from .actions import (
     LEVEL_READ_ONLY,
     Risk,
 )
-from .advisor import Advisor
+from .advisor import Advisor, user_facing_failure
 from .batch import BatchItem, should_merge
 from .client import AIClient, AiError
 from .tools import TOOL_INDEX, ToolContext, describe_arguments, openai_tools
@@ -151,6 +151,35 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 **绝对不要**：把没做成的事说成做成了。失败就如实说卡在哪、
 你试过什么、需要用户做什么。
 
+**拿不准就停一下问（重要）**
+
+模型天生的毛病是「先干了再说」。但在用户的电脑上，猜错的代价是
+他的文件被挪错地方、表被填串行、界面被点乱 —— 返工的成本远大于
+多问一句。所以：
+
+* 要动用户的文件或数据，但**不确定放到哪、叫什么名字** → 先 `ask_user`。
+  典型：「整理「下载」文件夹」—— 建不建子文件夹、按什么分类，
+  你的默认选择和用户心里的预期很可能不是一回事。
+* 屏幕上有**多个看起来都对**的目标 → 先问，或者先用 `ui_element_at`
+  确认。点错了可能改掉别的东西。
+* 用户那句话有**两种以上合理解释**，选错了要重做 → 先问清是哪一种。
+* 这一步**不可撤销**（覆盖文件、删除、提交表单、发送消息）→ 再确认一次。
+
+同时也要克制：能自己看一眼就确定的事（截个图就看清了）不要问。
+用户最烦的是「什么都来问我」。**判断标准：这个信息我能不能自己查到？
+能就别问；查不到而且猜错要返工，就停下来问。**
+
+问的时候要具体：说清你**看到了什么**、需要他**定什么**，
+能列选项就列（`options`，最多 4 个），他点一下就能答。
+
+**做完了要交代**
+
+任务结束后（或者用户中途叫停），用一两句话交代清楚：
+1. **做了几件事**（不要报「我调用了 7 次工具」，说「整理好了 43 个文件」）；
+2. **东西在哪**（写文件的必须给完整路径）；
+3. **能不能撤回**（覆盖和新建是两回事，说清哪个是哪个）。
+至于「做了几个操作」这种计数，界面会自己补一行，你不用重复。
+
 安全与边界：
 * 不要删除文件、不要清空回收站、不要改系统设置、不要执行关机重启。
 * 不要输入或读取任何密码、支付信息、身份证号等敏感内容。
@@ -203,6 +232,12 @@ class ApprovalRequest:
     risk: str
     summary: str
     arguments: dict = field(default_factory=dict)
+    # 「拿不准就停一下问」用的字段。
+    # 普通审批是「允许/拒绝」二选一，而提问需要用户给一段**内容**
+    # （选哪个、填什么）。两者共用同一条阻塞通道（工作线程等 Event），
+    # 但界面上长的是两张不同的卡片。
+    question: bool = False
+    options: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +269,15 @@ class AgentCallbacks:
     def request_approval(self, request: ApprovalRequest) -> bool:
         """默认拒绝。真正实现由界面层提供。"""
         return False
+
+    def ask_user(self, question: str, options: list[str]) -> str:
+        """把一个问题抛给用户，阻塞等他回答。默认返回空（表示没人回答）。
+
+        这是「拿不准就停一下问」的落地方式：模型自己判断信息不够时，
+        调 ask_user 停下来，而不是猜一个再硬干。猜错的代价是它把用户的
+        文件挪错地方或者把表填串行 —— 那比多问一句贵得多。
+        """
+        return ""
 
     def request_approval_batch(self, items: list) -> dict:
         """一次问多个操作，返回 {序号: 是否允许}。
@@ -284,6 +328,15 @@ class AgentRunner:
         # 任务开始时先自动看一眼屏幕（对应界面上那个开关）。
         # 这个开关以前是死的 —— 存了设置但没人读。现在真的生效。
         self.auto_screenshot = False
+        # ---------------------------------------------------- 本轮做了什么
+        # 「做完有交代」需要这些数：干了几件事、文件存哪了。
+        # 光靠模型自己总结不可靠（它经常把「试过但失败」写成「已完成」），
+        # 所以这里由执行层如实计数，收尾时拼成一句人话。
+        self.actions_ok = 0
+        self.actions_failed = 0
+        self.touched_paths: list[str] = []
+        self.wrote_files = False
+        self.last_summary = ""
         self.messages: list[dict] = [
             {"role": "system",
              "content": system_prompt(self.max_steps, self.memory_text,
@@ -304,6 +357,11 @@ class AgentRunner:
                                       self.kb_text)}
         ]
         self._stop = False
+        self.actions_ok = 0
+        self.actions_failed = 0
+        self.touched_paths = []
+        self.wrote_files = False
+        self.last_summary = ""
 
     def reload_memory(self, memory_text: str) -> None:
         """换掉记忆并重建系统提示词。
@@ -417,6 +475,12 @@ class AgentRunner:
         self.last_error = ""
         # 上一轮的失败记录不能带进这一轮，否则会误判成「又失败了」
         self.advisor.reset()
+        # 上一轮的「做了几件事」同理：不清零的话收尾交代会把两轮加在一起
+        self.actions_ok = 0
+        self.actions_failed = 0
+        self.touched_paths = []
+        self.wrote_files = False
+        self.last_summary = ""
 
         self._append_user(user_text)
         final_text = ""
@@ -553,11 +617,19 @@ class AgentRunner:
             hard = [item for item in self.advisor.failures
                     if item.kind in ("permission", "denied", "missing_dep")]
             if hard and "卡住" not in final_text:
+                # 说人话：不甩错误码，只说「卡在哪、你做什么我就能接着干」
                 final_text = (final_text + "\n\n" if final_text else "") + (
-                    "有一步被挡住了，需要你来决定："
-                    f"{hard[0].detail[:120]}"
+                    user_facing_failure(hard[0].kind, hard[0].detail)
                 )
             self.callbacks.on_status(summary)
+
+        # 收尾交代：干了几件事、文件存哪了、能不能撤回。
+        # 只在这轮**真的动过手**时才加 —— 纯问答（「这段报错什么意思」）
+        # 后面跟一句「这一轮做了 0 个操作」就很怪。
+        report = self.completion_report()
+        if report and "这一轮做了" in report:
+            self.last_summary = report
+            final_text = (final_text + "\n\n" if final_text.strip() else "") + report
 
         self.callbacks.on_finished(final_text)
         return final_text
@@ -699,6 +771,13 @@ class AgentRunner:
             self._record_tool(call_id, call.name, f"未知工具：{call.name}", ok=False)
             return None
 
+        # ---- 停下来问用户。
+        #
+        # 放在最前面：它不需要审批（问问题本身不改变任何东西），
+        # 也不该被「只读模式」拦下 —— 恰恰相反，模式越保守越该多问。
+        if call.name == "ask_user":
+            return self._ask_user(call, call_id)
+
         # 只算人话版的描述。原来这里还同时算了原始 JSON（describe_arguments），
         # 结果两处混用，审批卡片上冒出过 {"x": 640, "y": 360} 这种
         # 用户没法判断的东西。审计日志要细节时直接用 call.arguments。
@@ -772,6 +851,54 @@ class AgentRunner:
         self.actions.audit.add(call.name, human, spec.risk, "auto")
         return self._execute_one(call, call_id, spec, human)
 
+    def _ask_user(self, call, call_id: str):
+        """把模型的问题抛给用户，等他的回答再继续。
+
+        返回 None（不产生图片包），回答本身通过 _record_tool 回到模型手里。
+        """
+        args = call.arguments if isinstance(call.arguments, dict) else {}
+        question = str(args.get("question") or "").strip()
+        raw_options = args.get("options") or []
+        if isinstance(raw_options, str):
+            raw_options = [raw_options]
+        options = [str(item).strip() for item in raw_options
+                   if str(item).strip()][:4]
+
+        if not question:
+            self._record_tool(call_id, "ask_user",
+                              "问题内容为空，没问出去。请把问题写清楚再调一次。",
+                              ok=False)
+            return None
+
+        self.callbacks.on_event(StepEvent(
+            kind="info", text="❓ " + question, tool="ask_user",
+        ))
+        self.callbacks.on_status("在等你回答…")
+
+        answer = ""
+        try:
+            answer = str(self.callbacks.ask_user(question, options) or "").strip()
+        except Exception as exc:  # noqa: BLE001 - 界面出问题不能把任务带崩
+            answer = ""
+            self.last_error = f"{type(exc).__name__}: {exc}"
+
+        if not answer:
+            # 用户没答（走开了、或者直接点了停止）。
+            # 明确告诉模型「没答」，别让它把沉默当成默认同意。
+            note = ("用户没有回答（可能走开了或者跳过了）。"
+                    "**不要假设他同意了任何事。** 如果这一步不做也能给个结果，"
+                    "就先给出你能给的部分，把需要他决定的地方标出来；"
+                    "否则直接停下来，说明卡在哪。")
+            self._record_tool(call_id, "ask_user", note, ok=False)
+            return None
+
+        self.callbacks.on_event(StepEvent(
+            kind="info", text="你回答：" + answer, tool="ask_user",
+        ))
+        self._record_tool(call_id, "ask_user", f"用户回答：{answer}", ok=True)
+        self.actions_ok += 1
+        return None
+
     def _execute_one(self, call, call_id: str, spec, summary: str):
         """真正执行一个工具，并把结果整理成回给模型的内容。"""
         # ---- 真正执行
@@ -788,6 +915,17 @@ class AgentRunner:
         advice = None
         if not ok:
             advice = self.advisor.after_failure(call.name, call.arguments, text)
+
+        # 记一笔「这一轮到底做了几件事」。
+        #
+        # 看屏幕/等待这类不算「干活」—— 不然收尾时会说「我做了 12 件事」，
+        # 用户一数发现 9 件是截图，反而觉得在糊弄。
+        if call.name not in ("screenshot", "screen_info", "wait"):
+            if ok:
+                self.actions_ok += 1
+            else:
+                self.actions_failed += 1
+        self._note_path(call.name, call.arguments, text, ok)
 
         preview = (bundle or {}).get("preview") or b""
         self.callbacks.on_event(StepEvent(
@@ -820,6 +958,69 @@ class AgentRunner:
             "content": payload[:6000],
         })
 
+    # ------------------------------------------------------ 收尾：干完交代一下
+    _PATH_TOOLS = {
+        "write_file": True,      # 真的写了东西
+        "read_file": False,
+        "list_dir": False,
+        "import_knowledge": False,
+    }
+
+    def _note_path(self, tool: str, arguments, text: str, ok: bool) -> None:
+        """记下这次动到了哪个文件。
+
+        分析用户「做完有交代：干了几件事、文件存哪了、能不能撤回」这一条。
+        路径只有真的写成功了才算「产出」，读文件不算 —— 交代里说
+        「我看过 D:\\x.txt」没有意义，说「我存到了 D:\\x.txt」才有意义。
+        """
+        if not ok or tool not in self._PATH_TOOLS:
+            return
+        path = ""
+        if isinstance(arguments, dict):
+            for key in ("path", "file", "target", "source"):
+                value = arguments.get(key)
+                if isinstance(value, str) and value.strip():
+                    path = value.strip()
+                    break
+        if not path:
+            return
+        if self._PATH_TOOLS[tool]:
+            self.wrote_files = True
+        if path not in self.touched_paths:
+            self.touched_paths.append(path)
+
+    def completion_report(self) -> str:
+        """把这一轮的结果说成人话：做了几件事、文件在哪、能不能撤回。
+
+        为什么要执行层来算而不是让模型自己总结：
+        模型倾向于把「试过但失败」写成「已完成」。这里用的是实际执行的
+        计数，做没做成不会说谎。
+        """
+        parts: list[str] = []
+        if self.actions_ok or self.actions_failed:
+            done = f"这一轮做了 {self.actions_ok} 个操作"
+            if self.actions_failed:
+                done += f"，另有 {self.actions_failed} 个没成功"
+            parts.append(done + "。")
+
+        if self.touched_paths:
+            shown = self.touched_paths[:3]
+            where = "、".join(shown)
+            if len(self.touched_paths) > 3:
+                where += f" 等 {len(self.touched_paths)} 处"
+            parts.append(f"文件位置：{where}。")
+
+        if self.wrote_files:
+            parts.append(
+                "文件是新建或者整个覆盖的，撤回的办法是：到那个文件夹里把它删掉，"
+                "或者从「回收站」恢复上一版。"
+                "小爪没有自动备份，所以这一步得你自己来。"
+            )
+        elif self.touched_paths:
+            parts.append("只是读取，没有改动任何文件。")
+
+        return "".join(parts)
+
     # ------------------------------------------------------------ 界面用文案
     HUMAN_NAMES = {
         "screenshot": "看屏幕",
@@ -840,6 +1041,10 @@ class AgentRunner:
         "save_note": "保存便签",
         "open_app": "启动程序",
         "run_command": "执行命令",
+        "ask_user": "问你一句",
+        "write_file": "写文件",
+        "read_file": "读文件",
+        "list_dir": "看文件夹",
     }
 
     def _human_summary(self, name: str, arguments: dict) -> str:

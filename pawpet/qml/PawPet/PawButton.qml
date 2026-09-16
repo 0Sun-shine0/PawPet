@@ -28,9 +28,10 @@ Button {
     }
     readonly property color _fg: {
         switch (variant) {
-        case "primary": return "#2a1c16"
+        // 主色按钮（暖粉/玫红）是中间调，深色字会糊、白字才立得住
+        case "primary": return "#ffffff"
         case "accent":  return "#ffffff"
-        case "danger":  return "#2a1218"
+        case "danger":  return "#ffffff"
         case "ghost":   return Theme.textDim
         default:        return Theme.text
         }
@@ -61,18 +62,24 @@ Button {
     background: Rectangle {
         radius: control.small ? Theme.radiusSm : Theme.radiusMd
         color: {
+            // 注意：底色是浅色，所以「禁用/悬停」的覆盖层必须是深色半透明。
+            // 原来写的是 Qt.rgba(1,1,1,...)（白色覆盖层），那是深色主题的写法，
+            // 在粉白底上等于什么都没画。
             if (!control.enabled)
-                return control.variant === "ghost" ? "transparent" : Qt.rgba(1, 1, 1, 0.05)
+                return control.variant === "ghost" ? "transparent"
+                                                   : Qt.rgba(control._bg.r, control._bg.g, control._bg.b, 0.38)
             if (control.pressed)
-                return Qt.darker(control._bg, control.variant === "ghost" ? 1.0 : 1.25)
+                return control.variant === "ghost"
+                       ? Qt.rgba(0, 0, 0, 0.06)
+                       : Qt.darker(control._bg, 1.14)
             if (control.hovered)
                 return control.variant === "ghost"
-                       ? Qt.rgba(1, 1, 1, 0.07)
-                       : Qt.lighter(control._bg, 1.12)
+                       ? Theme.surfaceHi
+                       : Qt.darker(control._bg, 1.06)
             return control._bg
         }
         border.width: control.variant === "ghost" ? 0 : 1
-        border.color: Qt.rgba(1, 1, 1, 0.10)
+        border.color: Qt.rgba(0, 0, 0, 0.05)
 
         Behavior on color { ColorAnimation { duration: Theme.animFast } }
     }

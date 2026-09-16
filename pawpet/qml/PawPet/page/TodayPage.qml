@@ -27,10 +27,13 @@ Flickable {
             Layout.rightMargin: Theme.gap
             implicitHeight: head.implicitHeight + 40
             radius: Theme.radiusXl
+            // 问候卡原来是深紫黑渐变（#2b2440 → #1f2b3a），配深色主题还行；
+            // 换成粉白主题后，深底 + 深字（Theme.text）会直接看不见。
+            // 现在是「蜜桃粉 → 淡紫」的浅渐变，配深字柔和又醒目。
             gradient: Gradient {
                 orientation: Gradient.Horizontal
-                GradientStop { position: 0.0; color: "#2b2440" }
-                GradientStop { position: 1.0; color: "#1f2b3a" }
+                GradientStop { position: 0.0; color: "#ffe9f0" }
+                GradientStop { position: 1.0; color: "#f6ecfd" }
             }
             border.width: 1
             border.color: Theme.border

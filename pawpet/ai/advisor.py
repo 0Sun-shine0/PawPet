@@ -349,3 +349,72 @@ class Advisor:
         parts = [f"{tool}×{n}" for tool, n in
                  sorted(counts.items(), key=lambda kv: kv[1], reverse=True)]
         return f"本轮失败 {len(self.failures)} 次：" + "、".join(parts[:5])
+
+
+# ==========================================================================
+#  给用户看的话
+# ==========================================================================
+# _HINTS 是写给**模型**的（带 Markdown 强调、带「调用什么工具」的具体指令），
+# 直接甩给用户既看不懂也没法执行。这里另外写一套：
+#   不报错误码 → 说清是什么情况
+#   不甩技术名词 → 说清用户现在该做什么
+#   不说「失败了」→ 说「你做完这一步我就接着干」
+_USER_MESSAGES = {
+    KIND_PERMISSION: (
+        "有一件事被权限挡住了 —— 现在的「操作权限」级别不允许动你的键鼠。"
+        "你去工作台把权限调高一点，或者直接跟我说「允许」，我就接着做。"
+    ),
+    KIND_DENIED: (
+        "你拒绝的那一步我跳过了，后面能做的都做完了。"
+        "要是想换个方式做，跟我说一句就行。"
+    ),
+    KIND_MISSING_DEP: (
+        "有个功能需要的组件没装上，我这边做不了这一步。"
+        "要我告诉你是哪个组件、怎么装吗？"
+    ),
+    KIND_TIMEOUT: (
+        "有个程序一直没响应，读不到它里面的内容。"
+        "我换成「看截图认位置」的办法了 —— 如果那也不行，"
+        "多半是这个软件不让别的程序读它，那就得你自己点一下。"
+    ),
+    KIND_NOT_FOUND: (
+        "要找的东西不在了 —— 窗口可能被关掉或者改过名字。"
+        "你把那个窗口重新打开，我接着做。"
+    ),
+    KIND_TRANSIENT: (
+        "刚才界面正在变化，没抓准时机。"
+        "等它稳定下来我再试一次就行。"
+    ),
+    KIND_BAD_ARGUMENT: (
+        "有个操作我用错了方式，已经换了个写法。"
+        "如果还是不行，你告诉我正确的做法。"
+    ),
+    KIND_UNKNOWN: (
+        "有一件事我没做成，卡住了。"
+        "要我再说清楚是卡在哪一步吗？"
+    ),
+}
+
+
+def user_facing_failure(kind: str, detail: str = "") -> str:
+    """把一次失败翻成用户能看懂、并且知道下一步做什么的一句话。
+
+    这是「失败说人话」的实现：界面上**不出现**错误码、异常类名、
+    工具名这些东西。用户关心的是「现在轮到我做什么」。
+    """
+    message = _USER_MESSAGES.get(kind) or _USER_MESSAGES[KIND_UNKNOWN]
+
+    # 缺依赖是个例外：具体缺什么对用户是有用信息，但要把英文包名
+    # 从一堆异常文本里挑出来，不能整段贴给用户。
+    if kind == KIND_MISSING_DEP:
+        name = ""
+        match = re.search(r"No module named ['\"]([^'\"]+)['\"]", str(detail or ""))
+        if match:
+            name = match.group(1)
+        else:
+            match = re.search(r"没有安装[：: ]*([^\s，。]+)", str(detail or ""))
+            if match:
+                name = match.group(1)
+        if name:
+            return f"少了「{name}」这个组件，我这边装不了这一步。要我告诉你怎么装吗？"
+    return message

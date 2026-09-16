@@ -16,6 +16,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from . import win32
 from .ai.controller import AiController
+from .ai.markdown import to_plain
 from .config import APP_NAME, APP_VERSION, ROOT
 from .focus import FocusEngine
 from .models import NoteModel, ReminderModel, SessionModel, TaskModel, WeekModel
@@ -169,9 +170,30 @@ class Backend(QObject):
     def notifier(self) -> Notifier:
         return self._notifier
 
+    @staticmethod
+    def _bubble_text(text: str, limit: int = 260) -> str:
+        """把要显示在气泡/系统通知里的文字压成纯文本单段。
+
+        气泡和通知都是「一句话交代」，不是文档渲染区：
+        * Markdown 记号（**、#、`、- ）必须去干净 —— 用户看到这些只会
+          觉得界面没做完；
+        * 换行也去掉，气泡高度固定，多行会把宠物顶歪。
+        两行以上时用「；」接起来，读着还是连贯的。"""
+        plain = to_plain(text or "")
+        if not plain:
+            return ""
+        lines = [ln.strip() for ln in plain.split("\n") if ln.strip()]
+        joined = "；".join(lines) if len(lines) > 1 else (lines[0] if lines else "")
+        joined = " ".join(joined.split())
+        if len(joined) > limit:
+            joined = joined[: limit - 1].rstrip() + "…"
+        return joined
+
     def _notify(self, kind: str, title: str, body: str = "", sound: str | None = None) -> None:
         if sound and self._store.settings.get("sound_enabled", True):
             self._sound.play(sound)
+        # 标题里的 emoji 留着（它承担情绪），正文一律转纯文本单段
+        body = self._bubble_text(body)
         self.bubbleRequested.emit(kind, title, body)
         if self._store.settings.get("notify_enabled", True):
             self._notifier.post(kind, title, body)

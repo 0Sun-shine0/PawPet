@@ -424,6 +424,8 @@ class AgentRunner:
         # 不能只发一条状态提示 —— 用户看到的是「任务跑了一堆步骤然后没了，
         # 也不知道为什么停」。这是用户实际报过的问题。
         hit_limit = False
+        steps_used = 0
+        actions_used = 0
 
         # 任务开始时先看一眼屏幕。
         #
@@ -458,6 +460,7 @@ class AgentRunner:
                     if fresh_kb is not None and fresh_kb != self.kb_text:
                         self.reload_knowledge(fresh_kb)
 
+                steps_used = step
                 self.callbacks.on_status(f"思考中…（第 {step} 步）")
                 self._trim_history()
                 # 发出去之前最后兜一次：宁可少一条工具结果，
@@ -496,6 +499,7 @@ class AgentRunner:
                 # 一轮里的多个调用一起处理：先跑不用确认的，
                 # 再把要确认的合成一次询问（见 _run_round）
                 images = self._run_round(reply.tool_calls, step)
+                actions_used += len(reply.tool_calls)
 
                 # 截图单独作为一条 user 消息补进去。
                 # 说明文字是截图当时就绑好的，不受后续截图影响。
@@ -526,11 +530,16 @@ class AgentRunner:
         # 「跑了一堆步骤，然后什么都没有了」—— 不知道为什么停、也不知道
         # 还能继续。所以改成拼进 final_text，它会作为一条助手消息留在对话里。
         if hit_limit:
+            # 文案要精确，别让用户对不上号：
+            # 「步」= 模型往返一次（工作台里设的就是这个），
+            # 「操作」= 实际执行了几个工具。一轮可以带好几个操作，
+            # 所以这两个数通常不相等 —— 混着说用户会以为哪里算错了。
+            used = steps_used or self.max_steps
             notice = (
-                f"⚠️ 我已经执行了 {self.max_steps} 步，到了本轮上限，所以先停下。\n"
+                f"⚠️ 我已经执行了 {used} 步（共 {actions_used} 个操作），"
+                f"到了本轮的 {self.max_steps} 步上限，所以先停下。\n"
                 "任务还没做完 —— 你可以直接说「继续」，我会接着往下做；"
-                "或者在工作台把「执行步数」调大一点（当前 "
-                f"{self.max_steps} 步）。"
+                "或者在工作台把「执行步数」调大一点。"
             )
             if final_text.strip():
                 final_text = final_text.strip() + "\n\n" + notice

@@ -162,8 +162,8 @@ class AiController(QObject):
     def _client(self) -> AIClient:
         return AIClient(
             api_key=read_env_value("OPENAI_API_KEY"),
-            model=read_env_value("OPENAI_MODEL", self._settings.get("ai_openai_model", "gpt-4.1-mini")),
-            base_url=read_env_value("OPENAI_BASE_URL", self._settings.get("ai_openai_base", "https://api.openai.com/v1")),
+            model=read_env_value("OPENAI_MODEL", self._settings.get("ai_openai_model", "deepseek-flash")),
+            base_url=read_env_value("OPENAI_BASE_URL", self._settings.get("ai_openai_base", "https://api.deepseek.com/v1")),
             timeout=int(self._settings.get("ai_timeout", 90)),
         )
 
@@ -189,11 +189,11 @@ class AiController(QObject):
 
     @Property(str, notify=settingsChanged)
     def model(self) -> str:
-        return read_env_value("OPENAI_MODEL", self._settings.get("ai_openai_model", "gpt-4.1-mini"))
+        return read_env_value("OPENAI_MODEL", self._settings.get("ai_openai_model", "deepseek-flash"))
 
     @Property(str, notify=settingsChanged)
     def baseUrl(self) -> str:
-        return read_env_value("OPENAI_BASE_URL", self._settings.get("ai_openai_base", "https://api.openai.com/v1"))
+        return read_env_value("OPENAI_BASE_URL", self._settings.get("ai_openai_base", "https://api.deepseek.com/v1"))
 
     @Property(str, notify=statusChanged)
     def status(self) -> str:
@@ -314,6 +314,146 @@ class AiController(QObject):
         # 说明文字也进对话，用户回看时知道这是从模板点出来的
         self._push("info", f"📌 现成任务：{template.label}")
         self.send(template.prompt)
+
+    # ------------------------------------------------------ 模型服务商向导
+    # 泛用户卡在第一步：不知道该去哪拿 API Key、填什么地址、选什么模型。
+    # 这一组属性把「人话名字 + 注册页链接 + 接口地址 + 常用模型」交给界面，
+    # 点一下就自动填好、点一下就跳到注册页。
+    @Property("QVariantList", constant=True)
+    def modelProviders(self) -> list:
+        from .providers import all_providers
+
+        return all_providers()
+
+    @Property("QVariantList", constant=True)
+    def modelProviderGroups(self) -> list:
+        from .providers import groups
+
+        return groups()
+
+    @Property("QVariantMap", constant=True)
+    def primaryProvider(self) -> dict:
+        """默认推荐的那家（DeepSeek）。
+
+        泛用户点开界面就该看到一个「去哪拿 Key」的按钮，而不是先做一道
+        七选一的选择题。其他家收在「想用别的」后面。
+        """
+        from .providers import primary
+
+        return primary()
+
+    @Property("QVariantList", constant=True)
+    def otherProviders(self) -> list:
+        from .providers import alternatives
+
+        return alternatives()
+
+    def _key_page(self) -> tuple[str, str]:
+        """「去哪拿 Key」的 (显示名, 链接)。
+
+        判定顺序有讲究：
+
+        1. **当前接口地址不属于任何已知服务商**（等于用户还没选过）→
+           一律给默认推荐那家（DeepSeek）。
+           不能因为设置里恰好存着 `api.openai.com`（那是安装默认值）就把
+           泛用户引导去 OpenAI —— 那家要绑信用卡、还得能上外网，
+           是国内用户的第一道坎。
+        2. 认得出是哪家 → 用它自己对的那一页。用户点过「想用别的服务商」
+           选了 Moonshot，链接和按钮文案都要跟着换成 Kimi 的。
+        3. 都没有 → 还是给默认那家，总比不给强。
+        """
+        from .providers import find, guess_key_help, primary
+
+        name, url = guess_key_help(self.baseUrl)
+        if url:
+            return name, url
+        item = find(primary().get("key") or "")
+        return (item.name if item else ""), (item.signup_url if item else "")
+
+    @Slot()
+    def openKeyPage(self) -> None:
+        """打开「去哪拿 Key」那一页。
+
+        链接从服务商预设里取。单独做成一个 Slot 而不是让 QML 拼字符串：
+        QML 只需要调一个动作，不需要知道 URL 长什么样。
+        """
+        from PySide6.QtGui import QDesktopServices
+
+        _name, url = self._key_page()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    @Property(str, notify=settingsChanged)
+    def keyPageLabel(self) -> str:
+        """「去拿 Key」按钮上的字，带上服务商名字。"""
+        name, _url = self._key_page()
+        # 「DeepSeek（深度求索）」→ 按钮上只留 DeepSeek
+        short = name.split("（")[0] if name else ""
+        return f"去 {short} 拿 Key" if short else "去拿 Key"
+
+    @Property(str, notify=settingsChanged)
+    def keyPageUrl(self) -> str:
+        _name, url = self._key_page()
+        return url
+
+    @Slot(str)
+    def applyProvider(self, key: str) -> None:
+        """选中一家服务商：把接口地址和模型名填好。
+
+        **刻意不写 key** —— key 只能用户自己粘。这里只把「填什么地址、
+        用什么模型」这种他答不上来的部分准备好。
+        """
+        from .providers import find
+
+        provider = find(key)
+        if provider is None:
+            return
+        self._settings["ai_openai_base"] = provider.base_url
+        if provider.model:
+            self._settings["ai_openai_model"] = provider.model
+        self._store.save()
+        self.settingsChanged.emit()
+        self.toastRequested.emit(
+            "已选好" + provider.name,
+            "接着点「去拿 Key」注册，把 key 粘回来就行" if provider.needs_key
+            else "本地模型不需要 key，装好 Ollama 直接保存",
+        )
+
+    @Property(str, notify=settingsChanged)
+    def keyHelpUrl(self) -> str:
+        """「去哪拿 key」的链接。
+
+        按当前填的接口地址反查服务商；查不到就给一个通用的对比页，
+        总比让用户自己搜强。
+        """
+        from .providers import guess_key_help
+
+        _name, url = guess_key_help(self.baseUrl)
+        return url
+
+    @Property(str, notify=settingsChanged)
+    def keyHelpLabel(self) -> str:
+        from .providers import guess_key_help
+
+        name, url = guess_key_help(self.baseUrl)
+        if not url:
+            return ""
+        return f"去 {name} 拿 Key"
+
+    @Slot(str)
+    def openUrl(self, url: str) -> None:
+        """用系统浏览器打开链接。
+
+        走 QDesktopServices 而不是 QML 的 Qt.openUrlExternally：
+        注册页链接是从 Python 侧（服务商预设）来的，集中在一个地方处理
+        少一层信任边界要操心 —— QML 里只需要传字符串。
+        """
+        from PySide6.QtGui import QDesktopServices
+
+        target = (url or "").strip()
+        if not target.startswith(("http://", "https://")):
+            return
+        QDesktopServices.openUrl(QUrl(target))
 
 
     # ------------------------------------------------------------ 跨会话记忆

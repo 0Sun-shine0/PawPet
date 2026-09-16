@@ -58,8 +58,16 @@ def default_settings() -> dict:
         "ai_auto_screenshot": True,     # 每轮开始自动截一张给模型
         "ai_show_cursor": True,         # 截图时把鼠标位置标出来
         "ai_mcp_enabled": False,
-        "ai_openai_model": "gpt-4.1-mini",
-        "ai_openai_base": "https://api.openai.com/v1",
+        # 默认模型给 DeepSeek，不给 OpenAI。
+        #
+        # 这是**泛用户第一次打开时的值**，而 OpenAI 对国内用户是双重门槛：
+        # 要能上外网、要绑信用卡。DeepSeek 手机号注册就能用、国内直连、
+        # 单价也低 —— 默认值选错了，用户第一步就走不下去。
+        #
+        # 注意 _migrate 是「默认值打底、用户已存的覆盖」，所以改这里
+        # **不会**动到老用户已经配好的地址。
+        "ai_openai_model": "deepseek-flash",
+        "ai_openai_base": "https://api.deepseek.com/v1",
         # ---- 指令栏 ----
         "pet_click_action": "command",  # command（弹指令栏）| dashboard（开工作台）
         "command_bar_anchor": "pet",    # pet（跟着小爪）| bottom（屏幕底部居中）

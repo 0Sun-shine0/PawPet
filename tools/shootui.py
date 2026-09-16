@@ -52,7 +52,7 @@ def main() -> int:
     store.load()
     # 造一点内容，不然截图里全是空状态看不清布局
     store.settings["ai_openai_base"] = "https://api.deepseek.com/v1"
-    store.settings["ai_openai_model"] = "deepseek-chat"
+    store.settings["ai_openai_model"] = "deepseek-flash"
     backend = Backend(store)
 
     engine = QQmlEngine()

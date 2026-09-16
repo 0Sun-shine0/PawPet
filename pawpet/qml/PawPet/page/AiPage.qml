@@ -14,6 +14,9 @@ Item {
     // 记忆全文默认收起：它可能很长，展开会把左边栏撑得没法看
     property bool showMemory: false
     property bool showKnowledge: false
+    // 「想用别的服务商？」默认收起。给七家做选择题是负担不是帮助 ——
+    // 默认那家（DeepSeek）能跑通，用户才有耐心看别的。
+    property bool showProviders: false
 
     // 给自测用的只读探针：两栏的真实宽度
     readonly property real leftColumnWidth: leftColumn.width
@@ -439,7 +442,10 @@ Item {
             // -------------------------------------------------- 模型设置
             Rectangle {
                 Layout.fillWidth: true
-                visible: page.showSettings
+                // **没配好模型时必须自动展开。** 以前只在点了「设置」按钮
+                // 之后才显示，而泛用户根本不知道要点那个按钮 —— 他会对着
+                // 「还没有配置模型」的提示发呆。配好之后才允许收起。
+                visible: page.showSettings || !backend.ai.configured
                 implicitHeight: settingsColumn.implicitHeight + 28
                 radius: Theme.radiusLg
                 color: Theme.surface
@@ -484,7 +490,7 @@ Item {
                             id: baseField
                             Layout.fillWidth: true
                             text: backend.ai.baseUrl
-                            placeholderText: "https://api.openai.com/v1"
+                            placeholderText: "https://api.deepseek.com/v1"
                             font.family: Theme.fontMono
                             font.pixelSize: Theme.fsSmall
                         }
@@ -504,7 +510,10 @@ Item {
                             id: modelField
                             Layout.fillWidth: true
                             text: backend.ai.model
-                            placeholderText: "gpt-4.1-mini / deepseek-chat / qwen-vl-max"
+                            // 默认那家（DeepSeek）当前的模型名放在最前面。
+                            // deepseek-flash 是官方文档给的现役名字，
+                            // 旧的 deepseek-chat 已经下线（仍能调用，但按新模型计费）。
+                            placeholderText: "deepseek-flash / deepseek-v4-pro / gpt-4o-mini"
                             font.family: Theme.fontMono
                             font.pixelSize: Theme.fsSmall
                         }
@@ -513,6 +522,206 @@ Item {
                             text: "拉取列表"
                             variant: "ghost"
                             onClicked: backend.ai.fetchModels()
+                        }
+                    }
+
+                    // -------------------------------------------- 还没配好时的向导
+                    //
+                    // 泛用户卡在第一步：不知道去哪拿 API Key。
+                    // 以前这里只有两个空输入框（接口地址 / 模型名），等于让他
+                    // 自己查文档 —— 他连「OpenAI 兼容接口」是什么都不知道。
+                    //
+                    // 现在**默认就是 DeepSeek**，用户只需要做一件事：
+                    // 点「去 DeepSeek 拿 Key」→ 浏览器打开官方创建页 →
+                    // 复制 → 粘回下面的输入框。接口地址和模型名已经填好了。
+                    //
+                    // 其他服务商收在「想用别的」后面。给七家做选择题是负担，
+                    // 不是帮助 —— 默认那家能跑通，用户才有耐心看别的。
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: !backend.ai.configured
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "第一次用？两步：拿 Key → 粘到下面"
+                            color: Theme.text
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsSmall
+                            font.bold: true
+                            wrapMode: Text.Wrap
+                        }
+
+                        // 第 1 步：一个显眼的外链按钮
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            PawButton {
+                                text: "① " + backend.ai.keyPageLabel
+                                glyph: "↗"
+                                variant: "primary"
+                                implicitWidth: 200
+                                onClicked: backend.ai.openKeyPage()
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: backend.ai.primaryProvider.freeHint || ""
+                                color: Theme.textDim
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "会打开浏览器跳到官方页面。没账号就先注册（手机号即可）。"
+                                  + "页面上点「创建 API Key」，把 sk- 开头那一整串复制下来。"
+                            color: Theme.textFaint
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsTiny
+                            wrapMode: Text.Wrap
+                            lineHeight: 1.35
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "② 粘到下面的「API Key」框里，点「保存并测试」。"
+                            color: Theme.text
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsSmall
+                            wrapMode: Text.Wrap
+                        }
+
+                        // 当前会填什么地址和模型 —— 让用户知道「不用管这两个」
+                        Text {
+                            Layout.fillWidth: true
+                            text: "接口地址和模型名已经按 "
+                                  + (backend.ai.primaryProvider.name || "DeepSeek")
+                                  + " 填好了，不用改。"
+                            color: Theme.textFaint
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsTiny
+                            wrapMode: Text.Wrap
+                            lineHeight: 1.35
+                        }
+
+                        // 其他服务商：默认收起
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            PawButton {
+                                small: true
+                                variant: "ghost"
+                                text: page.showProviders ? "收起其他服务商" : "想用别的服务商？"
+                                onClicked: page.showProviders = !page.showProviders
+                            }
+                            PawButton {
+                                small: true
+                                variant: "ghost"
+                                visible: page.showProviders
+                                text: "看价格"
+                                glyph: "↗"
+                                enabled: backend.ai.primaryProvider.links
+                                         && backend.ai.primaryProvider.links.length > 0
+                                onClicked: {
+                                    var links = backend.ai.primaryProvider.links
+                                    if (links && links.length > 0)
+                                        backend.ai.openUrl(links[0].url)
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: page.showProviders
+                            spacing: 6
+
+                            Repeater {
+                                model: backend.ai.otherProviders
+
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: altCol.implicitHeight + 16
+                                    radius: Theme.radiusMd
+                                    color: altMouse.containsMouse ? Theme.surfaceHi
+                                                                  : Theme.surfaceAlt
+                                    border.width: 1
+                                    border.color: backend.ai.baseUrl === modelData.baseUrl
+                                                  ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                                            Theme.accent.b, 0.55)
+                                                  : Theme.borderSoft
+
+                                    Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                                    ColumnLayout {
+                                        id: altCol
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 3
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: modelData.name
+                                                color: Theme.text
+                                                font.family: Theme.font
+                                                font.pixelSize: Theme.fsSmall
+                                                font.bold: true
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                visible: backend.ai.baseUrl === modelData.baseUrl
+                                                text: "已选"
+                                                color: Theme.accent
+                                                font.family: Theme.font
+                                                font.pixelSize: Theme.fsTiny
+                                                font.bold: true
+                                            }
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.freeHint
+                                            color: Theme.textDim
+                                            font.family: Theme.font
+                                            font.pixelSize: Theme.fsTiny
+                                            wrapMode: Text.Wrap
+                                            lineHeight: 1.3
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: altMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        // 选它只改地址和模型；key 还得用户自己弄，
+                                        // 所以选完要提示他点「去拿 Key」
+                                        onClicked: backend.ai.applyProvider(modelData.key)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Key 只存在你自己电脑上（.env 文件），不会上传到任何地方。"
+                                  + "按用量计费，用多少花多少 —— 具体单价点上面「看价格」。"
+                            color: Theme.textFaint
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsTiny
+                            wrapMode: Text.Wrap
+                            lineHeight: 1.35
                         }
                     }
 
@@ -533,14 +742,23 @@ Item {
                             placeholderText: backend.ai.apiKeyHint
                             font.family: Theme.fontMono
                             font.pixelSize: Theme.fsSmall
+                            // 粘贴之后直接回车保存，省一次点击
+                            onAccepted: {
+                                if (text.length > 0) {
+                                    backend.ai.saveApiKey(text)
+                                    text = ""
+                                }
+                            }
                         }
                         PawButton {
                             small: true
-                            text: "保存"
+                            text: "保存并测试"
                             variant: "primary"
+                            enabled: keyField.text.length > 0
                             onClicked: {
                                 backend.ai.saveApiKey(keyField.text)
                                 keyField.text = ""
+                                backend.ai.testConnection()
                             }
                         }
                     }

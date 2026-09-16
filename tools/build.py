@@ -118,6 +118,37 @@ def check_prerequisites() -> list[str]:
     return problems
 
 
+def clean_stale_dist() -> list[str]:
+    """删掉 dist 里**过期的**安装包/压缩包。
+
+    为什么需要：命名规则改过几次，结果 dist 里同时躺着
+    「小爪助手-安装程序.exe」和旧的「小爪助手-v2.1.0-安装程序.exe」——
+    大小一样、时间不同，用户很可能把旧的那个发出去。
+
+    只删 dist 根目录下、名字以「小爪助手-」开头、但不是本次要产出的那几个。
+    """
+    keep = {
+        f"小爪助手-{VERSION}-绿色版.zip",
+        "小爪助手-安装程序.exe",
+    }
+    removed: list[str] = []
+    if not DIST_DIR.exists():
+        return removed
+    for item in DIST_DIR.iterdir():
+        if not item.is_file():
+            continue
+        if not item.name.startswith("小爪助手-"):
+            continue
+        if item.name in keep:
+            continue
+        try:
+            item.unlink()
+            removed.append(item.name)
+        except OSError:
+            pass
+    return removed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="打包小爪助手")
     parser.add_argument("--installer", action="store_true",
@@ -129,6 +160,13 @@ def main() -> int:
 
     log("小爪助手 打包")
     log(f"项目目录：{ROOT}")
+    log(f"版本    ：{VERSION}")
+
+    stale = clean_stale_dist()
+    if stale:
+        step("0. 清理过期产物")
+        for name in stale:
+            log(f"  已删除旧产物：{name}")
 
     step("1. 环境检查")
     problems = check_prerequisites()

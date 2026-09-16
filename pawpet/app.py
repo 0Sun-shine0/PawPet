@@ -135,7 +135,15 @@ class PawPetApp(QObject):
         tray.setToolTip(f"{APP_NAME} {APP_VERSION}")
 
         menu = QMenu()
-        menu.setFont(QFont("Microsoft YaHei UI", 9))
+        # 托盘菜单是原生控件，用 pointSize 设字号（原生菜单按 pt 走）。
+        # 字体名仍然从 qmlfont 取，别在这里另写一份 —— 托盘和界面用同一套
+        # 字体，看起来才是一个软件而不是两个拼起来的。
+        from .qmlfont import FONT_FAMILY
+
+        tray_font = QFont()
+        tray_font.setFamilies([item.strip() for item in FONT_FAMILY.split(",")])
+        tray_font.setPointSize(9)
+        menu.setFont(tray_font)
 
         def add(text: str, callback) -> QAction:
             action = QAction(text, menu)

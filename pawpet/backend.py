@@ -513,6 +513,30 @@ class Backend(QObject):
         return "\n".join(f"{name}（{count} 次）" for name, count in pairs)
 
     # ------------------------------------------------------------ 界面缩放
+    @Property(str, constant=True)
+    def fontFamily(self) -> str:
+        """主字体族（含中文回退链）。
+
+        **字体名的唯一来源在 pawpet/qmlfont.py**，Theme.qml 通过这里读。
+        以前两边各写一份，改一边就会漂移 —— 而且漂移了不会报错，
+        只是界面上悄悄用回旧字体。
+        """
+        from .qmlfont import FONT_FAMILY
+
+        return FONT_FAMILY
+
+    @Property(str, constant=True)
+    def fontFamilyMono(self) -> str:
+        from .qmlfont import FONT_MONO
+
+        return FONT_MONO
+
+    @Property(str, constant=True)
+    def fontFamilyLatin(self) -> str:
+        from .qmlfont import FONT_LATIN
+
+        return FONT_LATIN
+
     @Property(float, notify=settingsChanged)
     def uiScale(self) -> float:
         """界面整体缩放系数。

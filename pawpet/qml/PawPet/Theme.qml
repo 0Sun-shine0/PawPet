@@ -80,9 +80,25 @@ QtObject {
     readonly property color petBadgeEdge: "#d3a163"
 
     // ---------------------------------------------------------- 排版
-    readonly property string font:      "Microsoft YaHei UI"
-    readonly property string fontMono:  "Consolas"
-    readonly property string fontLatin: "Segoe UI"
+    /* 字体名从 Backend 读，**唯一来源是 pawpet/qmlfont.py**。
+
+       以前这里直接写 "Microsoft YaHei UI" / "Consolas"，Python 那边
+       （markdown.py 转 HTML、测试脚本查字形）也各写一份，三处会漂移 ——
+       而且漂移了不报错，只是界面上悄悄用回旧字体。
+
+       三个都要带回退链，注意逗号分隔：
+       * font       —— 雅黑 UI → 雅黑 → Segoe UI
+       * fontMono   —— Consolas 里**没有汉字**。界面上「45 分钟」
+                       「未配置」这类「数字 + 中文量词」的混排，不写回退
+                       汉字会被 Qt 丢给 SimSun 一类的衬线体，同一行里
+                       两种字形两种基线，看起来就是「字体怪怪的」。
+       * fontLatin  —— Segoe UI 里也没有汉字，而且缺一堆几何符号
+                       （◉ ☑ ✕ ⚙）。按钮上的图标字符会各自回退到
+                       不同字体，字重和大小都不一致。
+       实测补回退链不改变排版宽度（「45 分钟」59px → 59px）。 */
+    readonly property string font:      backend ? backend.fontFamily      : "Microsoft YaHei UI"
+    readonly property string fontMono:  backend ? backend.fontFamilyMono  : "Consolas, Microsoft YaHei UI"
+    readonly property string fontLatin: backend ? backend.fontFamilyLatin : "Segoe UI, Microsoft YaHei UI"
 
     // 字号。基准值按 100% 缩放定，实际用的时候乘 scale。
     // 注意 fsTiny 原来是 10 —— 在高分屏上小到几乎看不清，提到 11。

@@ -21,14 +21,47 @@ from __future__ import annotations
 import html
 import re
 
-# 标题相对基准字号的倍率。直接用 <h1> 在 Qt 里会大得离谱，
-# 所以改成 span + font-size（单位用 %，相对于 Text 自己的字号）。
+# 标题相对基准字号的倍率。
+#
+# **这里踩过一个坑：不能靠 <h1> 也不能靠 font-size:132%。**
+#
+# * 用 <h1>/<h2> 标签：Qt 的富文本会套上它自己的默认倍率（实测 h1 是
+#   正文的 1.8 倍），在 320px 宽的聊天气泡里一行放不下几个字，很难看。
+# * 用 <span style="font-size:132%">：**Qt 根本不认相对单位**。
+#   实测 132%、1.32em 渲染出来的宽高和正文一模一样（44x23），
+#   只有绝对单位 font-size:20px 才生效。
+#
+# 所以「相对倍率」这件事必须由我们来算成绝对像素：
+# 正文基准 14px × 倍率 = 实际的 px 值，见 _heading_size()。
+# 结论：markdown.py 里**只能写绝对字号**，写百分比是静默失效的。
 HEADING_SCALE = {1: 132, 2: 120, 3: 110, 4: 104, 5: 100, 6: 100}
 
-# 行内代码的配色：偏暖的橙，和整体主题一致
-CODE_COLOR = "#ffb98a"
-QUOTE_COLOR = "#a99fc4"
-LINK_COLOR = "#8fb8ff"
+# 正文基准字号（px）。和 QML 的 Theme.fsBody 基准值保持一致，
+# 改一边要记得改另一边 —— featuretest 里有一条断言盯着这个数。
+BASE_FONT_PX = 14
+
+
+def _heading_size(level: int, base_scale: int = 100) -> int:
+    """把标题倍率算成**绝对像素**（Qt 只认绝对字号）。"""
+    scaled = HEADING_SCALE.get(level, 100) * base_scale // 100
+    return max(1, BASE_FONT_PX * scaled // 100)
+
+
+# ---------------------------------------------------------------- 配色
+# 这一组颜色是**深色主题时代**留下的，换粉白之后全部失效了：
+# 代码块的 #d8cfe8 是浅紫，压在粉白气泡上几乎看不见（对比度 1.3:1，
+# 等于把代码块藏起来了）。现在按浅色底重挑一遍，都保证 4.5:1 以上。
+#
+# 为什么写在这里而不是从 QML 的 Theme 取：这一段是 Python 侧拼 HTML 用的，
+# 拿不到 QML 单例。代价是「改主题色要记得同步这里」——
+# 所以值都集中在这四行，别散到字符串里去。
+CODE_COLOR = "#c2410c"      # 行内代码：暖橙，浅底上够深
+QUOTE_COLOR = "#6d5a7a"     # 引用：灰紫，比正文弱但读得清
+LINK_COLOR = "#2563eb"      # 链接：蓝
+CODE_BLOCK_COLOR = "#40325a"  # 代码块正文
+RULE_COLOR = "#e6cfda"      # 分隔线：淡粉，别抢视线
+TABLE_HEAD_BORDER = "#d9bccb"   # 表头下边框
+TABLE_ROW_BORDER = "#f0dde6"    # 行下边框
 
 _ESCAPES = [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;")]
 
@@ -169,7 +202,7 @@ def to_qt_html(text: str, base_scale: int = 100) -> str:
         if code_block:
             body = "<br/>".join(code_block)
             out.append(
-                "<pre style='margin:0 0 6px 0; color:#d8cfe8;'>"
+                f"<pre style='margin:0 0 6px 0; color:{CODE_BLOCK_COLOR};'>"
                 f"{body}</pre>"
             )
             code_block.clear()
@@ -213,7 +246,7 @@ def to_qt_html(text: str, base_scale: int = 100) -> str:
             flush_paragraph()
             close_list()
             flush_quote()
-            out.append("<hr style='color:#3a3352;'/>")
+            out.append(f"<hr style='color:{RULE_COLOR};'/>")
             index += 1
             continue
 
@@ -224,10 +257,10 @@ def to_qt_html(text: str, base_scale: int = 100) -> str:
             close_list()
             flush_quote()
             level, title = heading
-            size = HEADING_SCALE.get(level, 100) * base_scale // 100
+            size = _heading_size(level, base_scale)
             out.append(
                 f"<p style='margin:8px 0 6px 0;'>"
-                f"<span style='font-size:{size}%;'><b>{_inline(escape(title))}</b></span></p>"
+                f"<span style='font-size:{size}px;'><b>{_inline(escape(title))}</b></span></p>"
             )
             index += 1
             continue
@@ -256,7 +289,7 @@ def to_qt_html(text: str, base_scale: int = 100) -> str:
             table.append("<tr>")
             for cell in header:
                 table.append(
-                    "<td style='border-bottom:1px solid #4a4162;'>"
+                    f"<td style='border-bottom:1px solid {TABLE_HEAD_BORDER};'>"
                     f"<b>{_inline(escape(cell))}</b></td>"
                 )
             table.append("</tr>")
@@ -264,7 +297,7 @@ def to_qt_html(text: str, base_scale: int = 100) -> str:
                 table.append("<tr>")
                 for cell in row:
                     table.append(
-                        "<td style='border-bottom:1px solid #2b2540;'>"
+                        f"<td style='border-bottom:1px solid {TABLE_ROW_BORDER};'>"
                         f"{_inline(escape(cell))}</td>"
                     )
                 table.append("</tr>")

@@ -346,6 +346,79 @@ def test_step_timeline() -> None:
           str(fake.stepsChanged.count))
 
 
+def test_fonts() -> None:
+    print("\n=== 字体：唯一来源 + 回退链 ===")
+    from pawpet.qmlfont import ALL_FAMILIES, FONT_FAMILY, FONT_LATIN, FONT_MONO
+
+    # 字体名的唯一来源必须是 qmlfont.py。QML 通过 Backend 读它。
+    # 以前 Theme.qml 和 Python 各写一份，漂移了不报错 —— 只是界面上
+    # 悄悄用回旧字体。
+    for key, value in ALL_FAMILIES.items():
+        check(f"{key} 有值", bool(value), repr(value))
+        # 回退链必须带逗号。少了它就是「只指定一个字体」，
+        # 缺字形时 Qt 会静默挑别的 —— 中文会落到衬线体，
+        # 符号会变成彩色 emoji 或豆腐块。这是用户实际报过的问题。
+        check(f"{key} 是回退链（含逗号）", "," in value, value)
+
+    # 每个族都必须能覆盖中文和界面里的符号图标
+    for key, value in ALL_FAMILIES.items():
+        lowered = value.lower()
+        check(f"{key} 带中文回退", "yahei" in lowered or "雅黑" in lowered, value)
+
+    check("等宽族把中文排在 Consolas 之后（数字仍走等宽）",
+          FONT_MONO.strip().lower().startswith("consolas"), FONT_MONO)
+    check("符号回退显式写了 Segoe UI Symbol（否则会落成彩色 emoji/豆腐块）",
+          "segoe ui symbol" in FONT_MONO.lower()
+          and "segoe ui symbol" in FONT_LATIN.lower()
+          and "segoe ui symbol" in FONT_FAMILY.lower(),
+          f"{FONT_FAMILY} | {FONT_MONO} | {FONT_LATIN}")
+
+    # Theme.qml 必须从 backend 读，不能自己写死
+    theme = (ROOT / "pawpet" / "qml" / "PawPet" / "Theme.qml").read_text(
+        encoding="utf-8")
+    for prop, backend_prop in (("font", "backend.fontFamily"),
+                               ("fontMono", "backend.fontFamilyMono"),
+                               ("fontLatin", "backend.fontFamilyLatin")):
+        check(f"Theme.{prop} 从 backend 读", backend_prop in theme,
+              f"Theme.qml 里没找到 {backend_prop}")
+
+    # markdown.py 的标题字号：**Qt 不认相对单位**，
+    # 132% / 1.32em 实测渲染出来和正文一样大（静默失效）。
+    # 所以只允许绝对的 px。
+    from pawpet.ai.markdown import BASE_FONT_PX, HEADING_SCALE, _heading_size, to_qt_html
+
+    html = to_qt_html("# 一级\n## 二级\n正文")
+    check("Markdown 标题用绝对字号", "font-size:18px" in html, html[:140])
+    check("Markdown 里不再出现百分比字号", "%" not in html.split("<b>")[0],
+          html[:140])
+    check("一级标题比正文大", _heading_size(1) > BASE_FONT_PX,
+          f"{_heading_size(1)} vs {BASE_FONT_PX}")
+    check("二级标题比一级小", _heading_size(2) < _heading_size(1))
+    check("标题倍率和 HEADING_SCALE 对得上",
+          _heading_size(1) == BASE_FONT_PX * HEADING_SCALE[1] // 100)
+    # 基准字号必须和 QML 的 Theme.fsBody 基准一致（都是 14）
+    check("标题基准字号和 Theme.fsBody 基准一致（14）", BASE_FONT_PX == 14,
+          str(BASE_FONT_PX))
+    check("Theme.qml 的 fsBody 基准也是 14", "fsBody:   px(14)" in theme,
+          "Theme.qml 里 fsBody 的基准值变了，markdown.py 的 BASE_FONT_PX 要跟着改")
+
+    # Markdown 的配色必须能在浅色气泡上读出来
+    from pawpet.ai import markdown as md
+
+    def luminance(hex_color: str) -> float:
+        value = hex_color.lstrip("#")
+        r, g, b = (int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    for name in ("CODE_COLOR", "QUOTE_COLOR", "LINK_COLOR", "CODE_BLOCK_COLOR"):
+        color = getattr(md, name)
+        check(f"{name} 是深色（浅底上读得清）", luminance(color) < 0.55,
+              f"{color} 亮度 {luminance(color):.2f} —— 压在粉白气泡上会看不见")
+
+    check("分隔线颜色是浅色（别抢视线）",
+          luminance(md.RULE_COLOR) > 0.7, md.RULE_COLOR)
+
+
 def main() -> int:
     print("小爪新功能回归")
     test_templates()
@@ -355,6 +428,7 @@ def main() -> int:
     test_prompt_sections()
     test_bubble_text()
     test_step_timeline()
+    test_fonts()
 
     print("\n" + "=" * 52)
     if FAILED:

@@ -6,6 +6,8 @@ import PawPet 1.0
 /* 设置页：宠物外观、全局热键、启动项、数据与关于。 */
 Flickable {
     id: page
+    // 自检/截图脚本靠它找到这个滚动区（QML 的 id 不是 objectName）
+    objectName: "settingsScroll"
     contentWidth: width
     contentHeight: column.implicitHeight + 24
     clip: true
@@ -405,6 +407,184 @@ Flickable {
                     text: "恢复自动"
                     enabled: !backend.uiScaleIsAuto
                     onClicked: backend.resetUiScale(true)
+                }
+            }
+        }
+
+        // ------------------------------------------------------ 界面配色
+        //
+        // 「通过对话改主题」的可视版。也可以不跟小爪说、直接在这里点。
+        //
+        // 做成**色块网格**而不是 17 行输入框：泛用户看到 17 个十六进制
+        // 输入框会直接放弃。点一个色块展开输入，改完立刻生效。
+        // 错误色（rose）不在这里出现 —— 它固定不可改，改了用户就看不到
+        // 失败了（见 pawpet/theme.py 的说明）。
+        Card {
+            id: themeCard
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.gap
+            Layout.rightMargin: Theme.gap
+            title: "界面配色"
+            subtitle: "点色块改颜色，改完立刻生效；也能直接跟小爪说「主色调改成蓝的」"
+
+            // 当前展开编辑的那一项（空 = 都没展开）
+            property string editing: ""
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 3
+                columnSpacing: 8
+                rowSpacing: 8
+
+                Repeater {
+                    model: backend.themeRoles
+
+                    delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: swatchRow.implicitHeight + 14
+                        radius: Theme.radiusMd
+                        color: themeCard.editing === modelData.key
+                               ? Theme.surfaceHi : Theme.surfaceAlt
+                        border.width: 1
+                        border.color: themeCard.editing === modelData.key
+                                      ? Theme.accent : Theme.borderSoft
+
+                        Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                        RowLayout {
+                            id: swatchRow
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 7
+
+                            // 色块本身：一眼看到当前颜色
+                            Rectangle {
+                                implicitWidth: 20
+                                implicitHeight: 20
+                                radius: 5
+                                color: backend.themeColors[modelData.key] || modelData.default
+                                border.width: 1
+                                border.color: Theme.border
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.label
+                                    color: Theme.text
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsSmall
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: backend.themeColors[modelData.key] || modelData.default
+                                    color: Theme.textFaint
+                                    font.family: Theme.fontMono
+                                    font.pixelSize: Theme.fsTiny
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                themeCard.editing = (themeCard.editing === modelData.key)
+                                               ? "" : modelData.key
+                                colorField.text = backend.themeColors[modelData.key]
+                                                  || modelData.default
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 展开的编辑行
+            RowLayout {
+                Layout.fillWidth: true
+                visible: themeCard.editing.length > 0
+                spacing: 8
+
+                Text {
+                    Layout.fillWidth: true
+                    text: {
+                        if (themeCard.editing.length === 0)
+                            return ""
+                        var roles = backend.themeRoles
+                        for (var i = 0; i < roles.length; ++i) {
+                            if (roles[i].key === themeCard.editing)
+                                return "改「" + roles[i].label + "」：" + roles[i].hint
+                        }
+                        return ""
+                    }
+                    color: Theme.textDim
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsTiny
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                visible: themeCard.editing.length > 0
+                spacing: 8
+
+                PawField {
+                    id: colorField
+                    Layout.preferredWidth: 140
+                    placeholderText: "#4a90d9"
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fsSmall
+                }
+                PawButton {
+                    small: true
+                    text: "应用"
+                    variant: "primary"
+                    onClicked: {
+                        var map = {}
+                        map[themeCard.editing] = colorField.text.trim()
+                        var rejected = backend.applyTheme(map)
+                        if (rejected.length > 0)
+                            themeHint.text = rejected.join("；")
+                        else
+                            themeHint.text = "改好了，立刻生效"
+                    }
+                }
+                PawButton {
+                    small: true
+                    text: "收起"
+                    variant: "ghost"
+                    onClicked: themeCard.editing = ""
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    id: themeHint
+                    Layout.fillWidth: true
+                    text: backend.themeSummary
+                    color: Theme.textFaint
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsTiny
+                    wrapMode: Text.Wrap
+                }
+                PawButton {
+                    small: true
+                    text: "恢复默认配色"
+                    onClicked: {
+                        backend.resetTheme()
+                        themeHint.text = "已恢复默认的粉白"
+                    }
                 }
             }
         }

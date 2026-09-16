@@ -17,7 +17,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from . import win32
 from .ai.controller import AiController
 from .ai.markdown import to_plain
-from .config import APP_NAME, APP_VERSION, ROOT
+from .config import APP_NAME, APP_VERSION, ROOT, THEME_FILE
 from .focus import FocusEngine
 from .models import NoteModel, ReminderModel, SessionModel, TaskModel, WeekModel
 from .reminders import ReminderEngine
@@ -98,6 +98,8 @@ class Backend(QObject):
     clockChanged = Signal()
     sitChanged = Signal()
     upcomingChanged = Signal()
+    # 用户改了界面配色。QML 的 Theme 单例订阅它，改完立刻生效、不用重启。
+    themeChanged = Signal()
 
     # --------------------------------------------------------------- 构造
     def __init__(self, store, parent=None) -> None:
@@ -106,6 +108,11 @@ class Backend(QObject):
         self._sound = SoundPlayer()
         self._notifier = Notifier(self)
         self._sound.enabled = bool(store.settings.get("sound_enabled", True))
+
+        # 用户定制的界面配色。读不到就是空字典 = 全用默认值。
+        from . import theme as theme_mod
+
+        self._theme_overrides: dict = theme_mod.load(THEME_FILE)
 
         self._tasks = TaskModel(store, self)
         self._reminders = ReminderModel(store, self)
@@ -210,6 +217,66 @@ class Backend(QObject):
 
     def _on_focus_tick(self) -> None:
         self.clockChanged.emit()
+
+    # ------------------------------------------------------------ 界面配色
+    # 「通过对话定制主题」的落地。颜色存在数据目录的 theme.json 里，
+    # Theme.qml 从这里读 —— 不碰任何源码，改完立刻生效（走属性通知），
+    # 打包后也照样能用（资源目录是只读的，数据目录才写得进去）。
+    @Property("QVariantMap", notify=themeChanged)
+    def themeColors(self) -> dict:
+        """当前生效的**完整**配色表（默认值 + 用户覆盖）。
+
+        QML 侧按 key 取用：Theme.qml 里每个颜色都变成
+        `backend.themeColors.bg || "#fdf7f9"` 这种带兜底的读法 ——
+        兜底是必需的，因为 Backend 还没建好的那一瞬间 QML 可能已经在求值。
+        """
+        from . import theme as theme_mod
+
+        try:
+            return theme_mod.resolved(self._theme_overrides)
+        except Exception:  # noqa: BLE001 - 配色坏了不该让界面起不来
+            return theme_mod.default_overrides()
+
+    @Property("QVariantList", constant=True)
+    def themeRoles(self) -> list:
+        """可以改的配色项（给界面/模型看的人话清单）。"""
+        from . import theme as theme_mod
+
+        return theme_mod.editable_roles()
+
+    @Property(str, notify=themeChanged)
+    def themeSummary(self) -> str:
+        from . import theme as theme_mod
+
+        return theme_mod.describe(self._theme_overrides)
+
+    @Slot("QVariantMap", result="QVariantList")
+    def applyTheme(self, overrides) -> list:
+        """改配色。返回被拒绝的原因列表（空列表 = 全部成功）。
+
+        合并而不是替换：用户说「把主色调改成蓝的」，只动 accent 一项，
+        之前改过的别的项要留着。
+        """
+        from . import theme as theme_mod
+
+        clean, rejected = theme_mod.sanitize(overrides)
+        if clean:
+            merged = dict(self._theme_overrides)
+            merged.update(clean)
+            ok, message = theme_mod.save(THEME_FILE, merged)
+            if not ok:
+                return [message]
+            self._theme_overrides = merged
+            self.themeChanged.emit()
+        return rejected
+
+    @Slot()
+    def resetTheme(self) -> None:
+        from . import theme as theme_mod
+
+        theme_mod.reset(THEME_FILE)
+        self._theme_overrides = {}
+        self.themeChanged.emit()
 
     def _on_reminder_fired(self, kind: str, title: str, body: str) -> None:
         self._notify(kind, title, body, "sit" if kind == "sit" else "reminder")

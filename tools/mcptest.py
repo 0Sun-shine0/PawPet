@@ -233,7 +233,11 @@ def main() -> int:
 
     # ---------------------------------------------------------------- 六
     print("\n=== 六、内置工具不受影响 ===")
-    check("内置工具数没变", len(TOOL_INDEX) == 37, str(len(TOOL_INDEX)))
+    # 用「至少」而不是「等于」：工具表是会增长的（加了定制配色那三个之后
+    # 从 37 变成 40）。这条断言要守的是「MCP 的接线没有把内置工具弄丢或弄乱」，
+    # 不是「内置工具永远恰好 N 个」—— 卡死具体数字只会让每次加工具都要改测试。
+    check("内置工具都在（没被 MCP 的接线弄丢）", len(TOOL_INDEX) >= 37,
+          str(len(TOOL_INDEX)))
     ok, text, _bundle = context.execute("screen_info", {})
     check("内置工具照常能调", ok, text[:60])
     ok, text, _bundle = context.execute("根本没有这个工具", {})

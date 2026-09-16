@@ -433,6 +433,45 @@ TOOLS: list[ToolSpec] = [
         }, ["text"]),
         Risk.READ,
     ),
+    # ------------------------------------------------------------ 定制界面
+    # 「通过对话改主题」的落地。
+    #
+    # 为什么走数据而不是改 Theme.qml：Theme.qml 带 pragma Singleton，
+    # 模块解析对同名类型是「先找到的赢」，覆盖它靠碰运气；而且打包后
+    # QML 在 _MEIPASS 里、退出就删，磁盘上根本没有 .qml 可改。
+    # 颜色值存在用户数据目录的 theme.json，改完立刻生效、不用重启。
+    ToolSpec(
+        "set_theme_color",
+        "**改界面配色**。用户说「换个颜色」「主色调改成蓝的」"
+        "「背景太白了我想要米黄」这类需求时用它。\n"
+        "值必须是 #rrggbb 形式的十六进制颜色（比如 #4a90d9）。"
+        "**不要用「蓝色」「red」这种写法** —— 会被拒绝。\n"
+        "拿不准用户想要什么色号时，自己挑一个再让他看效果，"
+        "改错了他说一句就能换回来（再调一次即可）。\n"
+        "`list_theme_colors` 能看到当前所有可改的项和它们的值。",
+        _schema({
+            "colors": {
+                "type": "object",
+                "description": "要改的项和值，形如 {\"accent\": \"#4a90d9\"}。"
+                               "一次可以改多项。",
+                "additionalProperties": {"type": "string"},
+            },
+        }, ["colors"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "list_theme_colors",
+        "列出界面里**可以改的**配色项、它们的中文含义、当前值。"
+        "用户问「界面能改哪些颜色」或者你不确定键名时用它。",
+        _schema({}),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "reset_theme",
+        "把界面配色**恢复成默认的粉白**。用户说「改回来」「恢复原样」时用。",
+        _schema({}),
+        Risk.READ,
+    ),
     # ------------------------------------------------------------ 停下来问人
     # 这一条是「拿不准就停一下问」的落地。
     #
@@ -1446,6 +1485,73 @@ class ToolContext:
         if task.next_step:
             message += f"\n下次接着做：{task.next_step}"
         return True, message, None
+
+    # ------------------------------------------------------------ 定制界面
+    def _do_set_theme_color(self, args: dict):
+        """改界面配色。"""
+        from .. import theme as theme_mod
+
+        raw = args.get("colors")
+        if not isinstance(raw, dict) or not raw:
+            return False, ("要改哪些颜色？形如 {\"accent\": \"#4a90d9\"}。"
+                           "用 list_theme_colors 看可改的项。"), None
+
+        # 这一轮用户的原话 —— 界面要问用户「确认吗」时用不上，
+        # 但收尾交代里要点明「你刚改了界面配色」，所以留个记录。
+        clean, rejected = theme_mod.sanitize(raw)
+        if not clean:
+            return False, ("没有可用的改动。\n" + "\n".join(rejected)
+                           + "\n颜色要写成 #rrggbb，比如 #4a90d9。"), None
+
+        backend = self.backend
+        apply = getattr(backend, "applyTheme", None)
+        if not callable(apply):
+            return False, "界面配色接口不可用（Backend 没接上）", None
+
+        still_rejected = apply(clean)
+        if still_rejected:
+            # Backend 又拒了一次（写文件失败之类）
+            return False, "改配色失败：" + "；".join(still_rejected), None
+
+        lines = []
+        for key, value in clean.items():
+            role = next((r for r in theme_mod.all_roles() if r["key"] == key), None)
+            lines.append(f"{role['label'] if role else key} → {value}")
+        message = "已改好界面配色：" + "、".join(lines) + "\n改完立刻生效，不用重启。"
+        if rejected:
+            message += "\n（这些没改：" + "；".join(rejected) + "）"
+        return True, message, None
+
+    def _do_list_theme_colors(self, args: dict):
+        from .. import theme as theme_mod
+
+        backend = self.backend
+        current = {}
+        try:
+            current = backend.themeColors if backend is not None else {}
+        except Exception:  # noqa: BLE001
+            current = {}
+
+        lines = ["界面里可以改的配色项（键名 / 中文含义 / 当前值）："]
+        for role in theme_mod.editable_roles():
+            value = current.get(role["key"], role["default"])
+            changed = (str(value).lower() != role["default"].lower())
+            mark = "  ← 用户改过" if changed else ""
+            lines.append(f"  {role['key']:12s} {role['label']:12s} {value}{mark}")
+            if role["hint"]:
+                lines.append(f"               {role['hint']}")
+        lines.append("")
+        lines.append("错误色（rose）固定不可改 —— 改成和背景相近用户就看不到报错了。")
+        lines.append("改的时候用 set_theme_color，值要是 #rrggbb 形式。")
+        return True, "\n".join(lines), None
+
+    def _do_reset_theme(self, args: dict):
+        backend = self.backend
+        reset = getattr(backend, "resetTheme", None)
+        if not callable(reset):
+            return False, "界面配色接口不可用（Backend 没接上）", None
+        reset()
+        return True, "界面配色已恢复成默认的粉白。", None
 
     # ---------------------------------------------------------------- 系统
     def _do_open_app(self, args: dict):

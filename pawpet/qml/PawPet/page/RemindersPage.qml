@@ -79,7 +79,7 @@ Flickable {
                         anchors.verticalCenter: parent.verticalCenter
                         text: "▾"
                         color: Theme.textDim
-                        font.pixelSize: 12
+                        font.pixelSize: Theme.px(12)
                     }
                     popup: Popup {
                         y: repeatBox.height + 4
@@ -158,7 +158,7 @@ Flickable {
 
                 Text {
                     text: "⏰"
-                    font.pixelSize: 34
+                    font.pixelSize: Theme.px(34)
                     Layout.alignment: Qt.AlignHCenter
                 }
                 Text {
@@ -202,7 +202,7 @@ Flickable {
                             text: model.time
                             color: model.enabled ? Theme.gold : Theme.textFaint
                             font.family: Theme.fontMono
-                            font.pixelSize: 22
+                            font.pixelSize: Theme.px(22)
                             font.bold: true
                         }
 

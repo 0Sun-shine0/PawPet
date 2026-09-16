@@ -4,6 +4,23 @@ import QtQuick
 /* 设计系统：颜色、字号、圆角、间距。
    集中在这里，改一处全局生效。 */
 QtObject {
+    // ---------------------------------------------------------- 界面缩放
+    /* 整体缩放系数。
+       字号和间距原来写死成 10/11/13，是按小窗口调的 ——
+       在 1920x1080 的笔记本屏（物理约 157 DPI）上看起来会明显偏小，
+       右边还会空出一大片。
+       现在所有尺寸都乘这个系数，用户在设置里能调，默认按屏幕分辨率自动选。
+       Backend.uiScale 是唯一来源（Python 侧算好，QML 只读）。 */
+    readonly property real scale: {
+        var value = backend ? backend.uiScale : 1.0
+        return (value && value > 0.1) ? value : 1.0
+    }
+
+    // 按缩放系数换算尺寸的小工具
+    function px(value) {
+        return Math.round(value * scale)
+    }
+
     // ---------------------------------------------------------- 界面配色
     readonly property color bg:          "#14121c"
     readonly property color surface:     "#1e1b2b"
@@ -48,21 +65,23 @@ QtObject {
     readonly property string fontMono:  "Consolas"
     readonly property string fontLatin: "Segoe UI"
 
-    readonly property int fsTiny:   10
-    readonly property int fsSmall:  11
-    readonly property int fsBody:   13
-    readonly property int fsTitle:  16
-    readonly property int fsH1:     22
-    readonly property int fsClock:  54
+    // 字号。基准值按 100% 缩放定，实际用的时候乘 scale。
+    // 注意 fsTiny 原来是 10 —— 在高分屏上小到几乎看不清，提到 11。
+    readonly property int fsTiny:   px(11)
+    readonly property int fsSmall:  px(12)
+    readonly property int fsBody:   px(14)
+    readonly property int fsTitle:  px(17)
+    readonly property int fsH1:     px(23)
+    readonly property int fsClock:  px(54)
 
     // ---------------------------------------------------------- 形状
-    readonly property int radiusSm: 8
-    readonly property int radiusMd: 12
-    readonly property int radiusLg: 18
-    readonly property int radiusXl: 26
-    readonly property int gap:      12
-    readonly property int gapLg:    18
-    readonly property int pad:      18
+    readonly property int radiusSm: px(8)
+    readonly property int radiusMd: px(12)
+    readonly property int radiusLg: px(18)
+    readonly property int radiusXl: px(26)
+    readonly property int gap:      px(12)
+    readonly property int gapLg:    px(18)
+    readonly property int pad:      px(18)
 
     readonly property int animFast:   120
     readonly property int animNormal: 200

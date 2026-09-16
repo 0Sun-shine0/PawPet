@@ -251,7 +251,7 @@ Item {
             text: root.running ? Math.round(root.ringProgress * 100) + "%" : root.badgeText
             color: "#6B5140"
             font.family: root.running ? Theme.fontMono : Theme.font
-            font.pixelSize: root.running ? 11 : 14
+            font.pixelSize: root.running ? Theme.px(11) : Theme.px(14)
             font.bold: true
         }
 

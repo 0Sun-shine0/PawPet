@@ -164,7 +164,7 @@ Window {
 
                 Text {
                     text: "🐾"
-                    font.pixelSize: 16
+                    font.pixelSize: Theme.px(16)
                 }
 
                 Rectangle {
@@ -275,7 +275,7 @@ Window {
 
                     Text {
                         text: "⚠️"
-                        font.pixelSize: 15
+                        font.pixelSize: Theme.px(15)
                     }
                     ColumnLayout {
                         Layout.fillWidth: true

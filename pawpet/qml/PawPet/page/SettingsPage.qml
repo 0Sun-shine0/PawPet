@@ -349,6 +349,66 @@ Flickable {
             }
         }
 
+        // ------------------------------------------------------ 界面缩放
+        // 高分屏上原来的字号明显偏小（1920x1080 的笔记本屏尤其明显，
+        // 右边还会空出一大片），所以给一个总开关。
+        // 默认按屏幕分辨率自动选，用户觉得小就往右拉。
+        Card {
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.gap
+            Layout.rightMargin: Theme.gap
+            title: "界面大小"
+            subtitle: "字太小、或者右边空太多，就调这里"
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                Text {
+                    Layout.preferredWidth: 72
+                    text: "缩放"
+                    color: Theme.textDim
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsBody
+                }
+                PawSlider {
+                    Layout.fillWidth: true
+                    from: 0.8
+                    to: 2.0
+                    stepSize: 0.05
+                    decimals: 2
+                    value: backend.uiScale
+                    onMoved: backend.uiScale = value
+                }
+                Text {
+                    Layout.preferredWidth: 56
+                    horizontalAlignment: Text.AlignRight
+                    text: Math.round(backend.uiScale * 100) + "%"
+                    color: Theme.text
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fsBody
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    Layout.fillWidth: true
+                    text: backend.uiScaleHint
+                    color: Theme.textFaint
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsTiny
+                    wrapMode: Text.Wrap
+                }
+                PawButton {
+                    small: true
+                    text: "恢复自动"
+                    enabled: !backend.uiScaleIsAuto
+                    onClicked: backend.resetUiScale(true)
+                }
+            }
+        }
+
         // ------------------------------------------------------ 快捷键
         Card {
             Layout.fillWidth: true

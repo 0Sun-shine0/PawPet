@@ -74,7 +74,7 @@ Flickable {
                         text: backend.clockText
                         color: Theme.text
                         font.family: Theme.fontMono
-                        font.pixelSize: 46
+                        font.pixelSize: Theme.px(46)
                         font.bold: true
                     }
                     Text {

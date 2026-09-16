@@ -78,12 +78,14 @@ class AiController(QObject):
     learnedSomething = Signal(str, object)
 
     # ------------------------------------------------- 工作线程 → 主线程的桥
-    _statusIn = Signal(str)
-    _eventIn = Signal(object)
-    _finishedIn = Signal(str, str)
+    # 都带上轮次号，过期的回调（上一轮的后台线程晚回来）会被丢掉 ——
+    # 不然会出现「问了新问题，它把上一轮的结果又输出一遍」。
+    _statusIn = Signal(str, int)
+    _eventIn = Signal(object, int)
+    _finishedIn = Signal(str, str, int)
     _approvalIn = Signal(str, str, str, str)
     _modelsIn = Signal(bool, object)
-    _learnedIn = Signal(str, object)
+    _learnedIn = Signal(str, object, int)
     _batchIn = Signal(object)
 
     def __init__(self, store, parent=None) -> None:
@@ -114,6 +116,12 @@ class AiController(QObject):
         self._mcp_clients: list[MCPClient] = []
         self._thread: threading.Thread | None = None
         self._lastLearned: dict = {}
+        # 轮次号。每次 send 加一；工作线程和自动记忆线程都带着它回来，
+        # 不是当前轮次的一律丢掉（见 _start_worker 里的说明）。
+        self._turn = 0
+        # 当前这一轮用户的原话。自动记忆要用它 —— 不能回头去消息列表里
+        # 找「最后一条用户消息」，那时用户可能已经追问下一句了。
+        self._turn_user_text = ""
 
         self.actions.level = str(store.settings.get("ai_level", LEVEL_CONFIRM))
 
@@ -709,18 +717,35 @@ class AiController(QObject):
         # 「这条是用户明说要记的」还是「模型干活时顺手记的」
         self.context.recent_user_texts = [text]
 
+        # 给这一轮编个号。
+        #
+        # **这是个真实的 bug 修复，不是防御性代码。** 上一轮结束时会起一个
+        # 后台线程做「自动记忆」判断，它比主线程慢；用户马上追问第二句时，
+        # 上一轮的后台线程可能才刚回来，于是「记住了新东西」这条提示
+        # 会**插到新一轮的对话里** —— 看起来就是「我问了问题，它把上一轮的
+        # 结果又输出了一遍，我的问题没有任何回答」。
+        #
+        # 加个轮次号，过期的回调直接丢掉。
+        self._turn += 1
+        turn = self._turn
+        self._turn_user_text = text
+
         self._thread = threading.Thread(
-            target=self._worker, args=(text,), name="pawpet-ai", daemon=True
+            target=self._worker, args=(text, turn), name="pawpet-ai", daemon=True
         )
         self._thread.start()
 
-    def _worker(self, text: str) -> None:
+    def _is_current(self, turn: int) -> bool:
+        """这个回调还属于当前这一轮吗？"""
+        return turn == self._turn
+
+    def _worker(self, text: str, turn: int) -> None:
         error = ""
         final = ""
         try:
             client = self._client()
             if not client.configured:
-                self._finishedIn.emit("", "没有配置 API Key")
+                self._finishedIn.emit("", "没有配置 API Key", turn)
                 return
 
             self.runner = AgentRunner(
@@ -743,7 +768,7 @@ class AiController(QObject):
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
         finally:
-            self._finishedIn.emit(final, error)
+            self._finishedIn.emit(final, error, turn)
 
     def _build_history(self) -> list:
         """把界面上的对话还原成模型消息，让多轮对话有上下文。
@@ -770,11 +795,18 @@ class AiController(QObject):
         return history
 
     # ------------------------------------------------------- 工作线程的回调
-    def _apply_status(self, text: str) -> None:
+    def _apply_status(self, text: str, turn: int = 0) -> None:
+        # 过期的状态更新会覆盖新一轮的「思考中…」，看起来像卡住了
+        if not self._is_current(turn):
+            return
         self._status = text
         self.statusChanged.emit()
 
-    def _apply_event(self, event: StepEvent) -> None:
+    def _apply_event(self, event: StepEvent, turn: int = 0) -> None:
+        # 上一轮的残留事件插进新一轮的对话，就是用户看到的
+        # 「问了新问题却输出上一轮结果」。
+        if not self._is_current(turn):
+            return
         if event.kind == "assistant":
             self._push("assistant", event.text)
             return
@@ -804,7 +836,11 @@ class AiController(QObject):
             return
         self._push("info", event.text)
 
-    def _apply_finished(self, text: str, error: str) -> None:
+    def _apply_finished(self, text: str, error: str, turn: int = 0) -> None:
+        if not self._is_current(turn):
+            # 这一轮早被新一轮取代了：不要再动界面状态，
+            # 更不要起自动记忆线程（那正是「上一轮结果插进新一轮」的来源）
+            return
         self._running = False
         self._status = "空闲"
         self.runningChanged.emit()
@@ -819,25 +855,28 @@ class AiController(QObject):
         # 放在这里（而不是任务中间）有两个好处：不占用步数预算，
         # 也不拖慢用户拿到结果的时间 —— 它在后台线程里跑。
         if self.memoryEnabled:
-            self._start_learning(text)
+            self._start_learning(self._turn_user_text, text, turn)
 
     # ------------------------------------------------------------ 自动学习
-    def _start_learning(self, assistant_text: str) -> None:
-        """在后台线程里跑一次自动记忆判断。"""
-        user_text = ""
-        for item in reversed(self._messages):
-            if item.get("role") == "user":
-                user_text = (item.get("text") or "").strip()
-                break
+    def _start_learning(self, user_text: str, assistant_text: str,
+                        turn: int = 0) -> None:
+        """在后台线程里跑一次自动记忆判断。
+
+        `user_text` **必须由调用方传进来**，不要回头去 self._messages 里找
+        「最后一条用户消息」—— 用户可能已经追问下一句了，那样会把**新问题**
+        当成上一轮的内容去学习，学出来的记忆是错的。
+        （这个 bug 实际发生过：自动记忆拿错了文本。）
+        """
         if not user_text:
             return
 
         thread = threading.Thread(
-            target=self._learn_worker, args=(user_text, assistant_text),
+            target=self._learn_worker, args=(user_text, assistant_text, turn),
             name="pawpet-ai-learn", daemon=True)
         thread.start()
 
-    def _learn_worker(self, user_text: str, assistant_text: str) -> None:
+    def _learn_worker(self, user_text: str, assistant_text: str,
+                      turn: int = 0) -> None:
         """自动学习的工作线程。
 
         **任何异常都吞掉。** 这一层是「顺手多学一点」，
@@ -852,18 +891,26 @@ class AiController(QObject):
             result = learn_from_turn(
                 client, MemoryBook(self._store), user_text, assistant_text)
             if result.changed:
-                # 切回主线程更新界面（信号是线程安全的）
-                self._learnedIn.emit(result.summary(), result.as_dict())
+                # 切回主线程更新界面（信号是线程安全的），带上轮次号
+                self._learnedIn.emit(result.summary(), result.as_dict(), turn)
         except Exception:  # noqa: BLE001 - 后台链路，静默失败
             pass
 
-    def _apply_learned(self, summary: str, detail: object) -> None:
+    def _apply_learned(self, summary: str, detail: object,
+                       turn: int = 0) -> None:
         """自动学习完成后的界面反馈。**这个函数一定在主线程执行。**
 
         **刻意不往对话流里塞消息。** 每轮都冒一条「我记住了 2 条」
         会把对话刷得很吵；只在真有收获时给一个轻提示，
         详细内容让用户自己去记忆面板看。
+
+        过期轮次的回调直接丢掉 —— 用户已经开始问下一句了，
+        这时候弹一个「记住了新东西」会让他以为答错了。
+        记忆本身**已经写进存储**了（_learn_worker 里做的），
+        丢掉只是不提示，不会丢数据。
         """
+        if not self._is_current(turn):
+            return
         self._lastLearned = detail if isinstance(detail, dict) else {}
         self.memoryChanged.emit()
         # 广播给界面（QML 之外的东西也能订阅，比如托盘提示、测试）
@@ -1026,13 +1073,16 @@ class AiController(QObject):
         self.statusChanged.emit()
 
         def probe():
+            # 连接测试不占轮次：把它算作「当前轮次」，
+            # 这样它的回显不会被 _is_current 丢掉。
+            turn = self._turn
             ok, message = self._client().test_connection()
-            self._finishedIn.emit("", "" if ok else message)
-            self._statusIn.emit("空闲")
+            self._finishedIn.emit("", "" if ok else message, turn)
+            self._statusIn.emit("空闲", turn)
             self._eventIn.emit(StepEvent(
                 kind="info" if ok else "error",
                 text=("连接正常：" + message) if ok else ("连接失败：" + message),
-            ))
+            ), turn)
 
         threading.Thread(target=probe, name="pawpet-ai-test", daemon=True).start()
 
@@ -1136,16 +1186,25 @@ class AiController(QObject):
 
 
 class _QtCallbacks(AgentCallbacks):
-    """把 Agent 的回调转成 Qt 信号（自动跨线程排队到主线程）。"""
+    """把 Agent 的回调转成 Qt 信号（自动跨线程排队到主线程）。
+
+    每个回调都带上**轮次号**：这些回调是在工作线程里触发的，而用户可能
+    已经发了下一句。不带轮次号的话，上一轮的残留事件会插进新一轮的对话里。
+    轮次号从 controller 现取 —— 回调对象是复用的，不能在构造时定死。
+    """
 
     def __init__(self, controller: AiController) -> None:
         self._c = controller
 
+    @property
+    def _turn(self) -> int:
+        return self._c._turn
+
     def on_status(self, text: str) -> None:
-        self._c._statusIn.emit(text)
+        self._c._statusIn.emit(text, self._turn)
 
     def on_event(self, event: StepEvent) -> None:
-        self._c._eventIn.emit(event)
+        self._c._eventIn.emit(event, self._turn)
 
     def on_image(self, png: bytes, note: str) -> None:
         pass    # 图片随 tool 事件一起送出去，这里不需要单独处理
@@ -1154,7 +1213,7 @@ class _QtCallbacks(AgentCallbacks):
         pass    # 收尾统一由 _worker 的 finally 处理
 
     def on_error(self, text: str) -> None:
-        self._c._eventIn.emit(StepEvent(kind="error", text=text))
+        self._c._eventIn.emit(StepEvent(kind="error", text=text), self._turn)
 
     def request_approval(self, request: ApprovalRequest) -> bool:
         return self._c.request_approval_blocking(request)

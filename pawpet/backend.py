@@ -406,6 +406,36 @@ class Backend(QObject):
         """最近一次自动学习的收获。"""
         return self.ai.autoLearnStatus
 
+    # ------------------------------------------------------------ 知识库
+    @Property(int, notify=settingsChanged)
+    def aiKnowledgeCount(self) -> int:
+        return self.ai.knowledgeCount
+
+    @Property(int, notify=settingsChanged)
+    def aiKnowledgeChunks(self) -> int:
+        return self.ai.knowledgeChunks
+
+    @Property(str, notify=settingsChanged)
+    def aiKnowledgeSummary(self) -> str:
+        return self.ai.knowledgeSummary
+
+    @Slot(str, bool)
+    def aiImportKnowledge(self, path: str, recursive: bool = False) -> None:
+        self.ai.importKnowledge(path, recursive)
+
+    @Slot()
+    def aiClearKnowledge(self) -> None:
+        self.ai.clearKnowledge()
+
+    @Slot(str)
+    def aiForgetKnowledge(self, name: str) -> None:
+        self.ai.forgetKnowledge(name)
+
+    @Slot(str, result=str)
+    def aiSearchKnowledge(self, query: str) -> str:
+        """界面上的试查框。让用户自己验证检索效果。"""
+        return self.ai.searchKnowledge(query)
+
     @Slot()
     def aiClearMemory(self) -> None:
         self.ai.clearMemory()

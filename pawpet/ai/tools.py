@@ -283,6 +283,51 @@ TOOLS: list[ToolSpec] = [
         Risk.DANGER,
     ),
 
+    # ------------------------------------------------------------ 知识库
+    ToolSpec(
+        "import_knowledge",
+        "**把用户的资料导入知识库**，以后回答时就能引用。"
+        "传一个文件或一个文件夹的路径。"
+        "导入的是**文本类**资料（md/txt/代码/csv/json/日志…）。"
+        "PDF、Word、Excel **不支持直接导入** —— 会明确告诉用户"
+        "先另存为 txt/md。"
+        "同一个文件重新导入会覆盖旧的，不会攒出两份。"
+        "导入后正文**不会**全塞进对话，而是按需检索，所以可以导很多。",
+        _schema({
+            "path": {**_STRING, "description": "文件或文件夹路径，支持 ~ 和环境变量"},
+            "recursive": {**_BOOL, "description":
+                          "传文件夹时是否连子目录一起导入，默认 false"},
+        }, ["path"]),
+        Risk.CONFIRM,
+    ),
+    ToolSpec(
+        "search_knowledge",
+        "**在知识库里检索**，拿出和问题相关的原文片段。"
+        "用户问的事情可能写在导入的资料里时，**先检索再回答**，"
+        "不要凭印象编。返回的是原文片段，引用时按里面的出处说明。",
+        _schema({
+            "query": {**_STRING, "description": "要查什么，用自然语言描述即可"},
+            "limit": {**_INT, "description": "返回几块，默认 4，最多 8"},
+        }, ["query"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "list_knowledge",
+        "列出知识库里已经导入了哪些资料（文件名 + 块数）。"
+        "不确定用户有没有导入过某份资料时用它。",
+        _schema({}),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "forget_knowledge",
+        "**从知识库里移除**某份资料（导错了、或者内容过期了）。"
+        "传文件名的一部分即可。",
+        _schema({
+            "name": {**_STRING, "description": "要移除的资料名（可以是其中一部分）"},
+        }, ["name"]),
+        Risk.CONFIRM,
+    ),
+
     # ------------------------------------------------------------ 本地文件
     # 有这些工具，用户就不用「打开文件 → 全选 → 复制 → 粘贴」绕一圈了。
     ToolSpec(
@@ -1015,6 +1060,101 @@ class ToolContext:
             })
             self.store.save()
         return True, f"已存入便签「{title}」", None
+
+    # ------------------------------------------------------------ 知识库
+    def _kb(self):
+        from .kb import KnowledgeBase
+
+        return KnowledgeBase(self.store)
+
+    def _do_import_knowledge(self, args: dict):
+        from . import files, kb
+
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return False, "要导入哪个文件或文件夹？给个路径", None
+        recursive = bool(args.get("recursive"))
+
+        try:
+            target = files.expand(path)
+        except files.FileDenied as exc:
+            return False, str(exc), None
+
+        book = self._kb()
+        existing = book.load()
+
+        if target.is_dir():
+            incoming, notes = kb.import_folder(str(target), existing,
+                                               recursive=recursive)
+            if not incoming:
+                detail = "；".join(notes[:3]) if notes else "这个目录里没有可导入的文本文件"
+                return False, f"没能导入任何资料：{detail}", None
+            merged = book.add(incoming)
+            total_chunks = sum(doc.chunk_count for doc in incoming)
+            lines = [f"已导入 {len(incoming)} 份资料，共 {total_chunks} 块。",
+                     f"知识库现在有 {len([d for d in merged if d.chunks])} 份资料。",
+                     "这些内容**不会**全部塞进对话，需要时用 search_knowledge 检索。"]
+            if notes:
+                lines.append("")
+                lines.extend(f"· {note}" for note in notes[:5])
+            return True, "\n".join(lines), None
+
+        doc, message = kb.import_file(str(target), existing)
+        if doc is None:
+            return False, message, None
+        merged = book.add([doc])
+        return True, (f"{message}\n"
+                      f"知识库现在有 {len([d for d in merged if d.chunks])} 份资料。"
+                      "需要时用 search_knowledge 检索里面的内容。"), None
+
+    def _do_search_knowledge(self, args: dict):
+        from . import kb
+
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return False, "要查什么？", None
+        try:
+            limit = int(args.get("limit") or kb.DEFAULT_HITS)
+        except (TypeError, ValueError):
+            limit = kb.DEFAULT_HITS
+
+        docs = self._kb().load()
+        if not any(doc.chunks for doc in docs):
+            return True, ("知识库还是空的。"
+                          "可以让我把某个文件夹导入知识库 —— "
+                          "用户说「把这个文件夹导入知识库」并给出路径即可。"), None
+
+        hits = kb.search(docs, query, limit=limit)
+        if not hits:
+            names = "、".join(doc.name for doc in docs if doc.chunks)[:200]
+            return True, (f"知识库里没有和「{query}」相关的内容。\n"
+                          f"现有资料：{names}\n"
+                          "可以告诉用户没找到，或者问他要不要先导入相关文件。"), None
+
+        # 按块分配预算，总量受控 —— 检索结果是要发出去的，不能太大
+        budget = max(300, kb.MAX_TOTAL_CHARS // max(1, len(hits)))
+        body = "\n\n".join(hit.render(budget) for hit in hits)
+        return True, (f"在知识库里找到 {len(hits)} 段相关内容：\n\n{body}\n\n"
+                      "引用时说明出处（文件名 · 标题）。"
+                      "如果这些还不够，可以换个说法再检索一次。"), None
+
+    def _do_list_knowledge(self, _args: dict):
+        from . import kb
+
+        docs = self._kb().load()
+        if not docs:
+            return True, "知识库是空的，还没有导入任何资料。", None
+        return True, kb.describe(docs), None
+
+    def _do_forget_knowledge(self, args: dict):
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return False, "要移除哪份资料？给个文件名（可以是其中一部分）", None
+        removed = self._kb().remove(name)
+        if removed is None:
+            return True, (f"知识库里没有叫「{name}」的资料。"
+                          "可以用 list_knowledge 看看现在有哪些。"), None
+        return True, f"已从知识库移除「{removed.name}」（{removed.chunk_count} 块）", None
 
     # ------------------------------------------------------------ 本地文件
     def _do_read_file(self, args: dict):

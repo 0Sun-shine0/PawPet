@@ -283,6 +283,129 @@ class AiController(QObject):
         except Exception:  # noqa: BLE001
             return ""
 
+    # ------------------------------------------------------------ 知识库
+    def _kb_docs(self):
+        from .kb import KnowledgeBase
+
+        try:
+            return KnowledgeBase(self._store).load()
+        except Exception:  # noqa: BLE001 - 知识库坏了不该让 AI 用不了
+            return []
+
+    def _kb_text(self) -> str:
+        """知识库**目录**（不是正文）。没有资料就返回空串。"""
+        from .kb import catalog_text
+
+        try:
+            return catalog_text(self._kb_docs())
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @Property(str, notify=settingsChanged)
+    def knowledgeSummary(self) -> str:
+        from .kb import describe
+
+        try:
+            return describe(self._kb_docs())
+        except Exception as exc:  # noqa: BLE001
+            return f"知识库读取失败：{exc}"
+
+    @Property(int, notify=settingsChanged)
+    def knowledgeCount(self) -> int:
+        return len([doc for doc in self._kb_docs() if doc.chunks])
+
+    @Property(int, notify=settingsChanged)
+    def knowledgeChunks(self) -> int:
+        return sum(doc.chunk_count for doc in self._kb_docs())
+
+    @Slot(str, bool)
+    def importKnowledge(self, path: str, recursive: bool = False) -> None:
+        """界面上的「导入资料」按钮。"""
+        from . import files, kb
+
+        path = (path or "").strip()
+        if not path:
+            self.toastRequested.emit("没给路径", "填一个文件或文件夹的路径")
+            return
+        try:
+            target = files.expand(path)
+        except files.FileDenied as exc:
+            self.toastRequested.emit("不能导入", str(exc)[:120])
+            return
+
+        book = kb.KnowledgeBase(self._store)
+        existing = book.load()
+        try:
+            if target.is_dir():
+                incoming, notes = kb.import_folder(str(target), existing,
+                                                   recursive=recursive)
+            else:
+                doc, message = kb.import_file(str(target), existing)
+                incoming = [doc] if doc else []
+                notes = [] if doc else [message]
+        except Exception as exc:  # noqa: BLE001
+            self.toastRequested.emit("导入失败", f"{type(exc).__name__}: {exc}"[:120])
+            return
+
+        if not incoming:
+            detail = "；".join(notes[:2]) if notes else "没有可导入的文本文件"
+            self._push("error", f"没能导入：{detail}")
+            self.toastRequested.emit("导入失败", detail[:100])
+            return
+
+        merged = book.add(incoming)
+        chunks = sum(doc.chunk_count for doc in incoming)
+        self.settingsChanged.emit()
+        self.toastRequested.emit("已导入", f"{len(incoming)} 份资料，{chunks} 块")
+        self._push("info", f"已导入 {len(incoming)} 份资料（{chunks} 块）。"
+                           f"知识库现在有 {len([d for d in merged if d.chunks])} 份。\n"
+                           "正文不会全塞进对话，我回答时会按需检索。")
+        if notes:
+            self._push("info", "；".join(notes[:3]))
+
+    @Slot()
+    def clearKnowledge(self) -> None:
+        from .kb import KnowledgeBase
+
+        count = KnowledgeBase(self._store).clear()
+        self.settingsChanged.emit()
+        self._push("info", f"已清空知识库（{count} 份资料）。")
+        self.toastRequested.emit("知识库已清空", f"移除了 {count} 份资料")
+
+    @Slot(str)
+    def forgetKnowledge(self, name: str) -> None:
+        from .kb import KnowledgeBase
+
+        removed = KnowledgeBase(self._store).remove(name or "")
+        self.settingsChanged.emit()
+        if removed is None:
+            self.toastRequested.emit("没找到", "知识库里没有这份资料")
+        else:
+            self.toastRequested.emit("已移除", removed.name[:40])
+            self._push("info", f"已从知识库移除「{removed.name}」。")
+
+    @Slot(str, result=str)
+    def searchKnowledge(self, query: str) -> str:
+        """界面上的试查框：让用户自己验证检索效果。"""
+        from . import kb
+
+        query = (query or "").strip()
+        if not query:
+            return "输入一个词试试。"
+        docs = self._kb_docs()
+        if not any(doc.chunks for doc in docs):
+            return "知识库是空的。"
+        hits = kb.search(docs, query, limit=5)
+        if not hits:
+            return f"没找到和「{query}」相关的内容。"
+        lines = [f"找到 {len(hits)} 段：", ""]
+        for index, hit in enumerate(hits, 1):
+            head = hit.heading or "（无标题）"
+            preview = hit.text[:110].replace("\n", " ")
+            lines.append(f"{index}. 【{hit.doc} · {head}】")
+            lines.append(f"   {preview}…")
+        return "\n".join(lines)
+
     @Property(str, notify=memoryChanged)
     def memorySummary(self) -> str:
         """给界面看的可读摘要。"""
@@ -604,11 +727,14 @@ class AiController(QObject):
                 client, self.context, self.actions, self.callbacks,
                 max_steps=self.maxSteps,
                 memory_text=self._memory_text() if self.memoryEnabled else "",
+                kb_text=self._kb_text(),
             )
             # 任务开始时先自动看一眼（界面上那个「每轮开始自动看一眼屏幕」）
             self.runner.auto_screenshot = self.autoScreenshot
             if self.memoryEnabled:
                 self.runner.memory_provider = self._memory_text
+            # 用户可能中途导入资料，下一轮就该在目录里看到
+            self.runner.kb_provider = self._kb_text
             # 保留之前的对话上下文
             self.runner.messages = self._build_history()
             final = self.runner.run(text)
@@ -629,6 +755,7 @@ class AiController(QObject):
             "content": system_prompt(
                 self.maxSteps,
                 self._memory_text() if self.memoryEnabled else "",
+                self._kb_text(),
             ),
         }]
         for item in self._messages[-12:]:

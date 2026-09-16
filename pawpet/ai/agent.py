@@ -173,15 +173,22 @@ SYSTEM_PROMPT = """你是「小爪助手」里的 AI 操作模块，运行在用
 完成任务后用一两句话总结你做了什么。"""
 
 
-def system_prompt(max_steps: int = DEFAULT_MAX_STEPS, memory_text: str = "") -> str:
+def system_prompt(max_steps: int = DEFAULT_MAX_STEPS, memory_text: str = "",
+                  kb_text: str = "") -> str:
     """拼出这一轮的系统提示词。
 
-    memory_text 是跨会话记忆渲染出来的那一段（见 ai/memory.py）。
-    没有记忆时它是空字符串，这里就整段跳过 —— 不注入空壳，白烧 token。
+    memory_text / kb_text 分别是跨会话记忆和知识库目录渲染出来的文字
+    （见 ai/memory.py、ai/kb.py）。没有内容时是空字符串，这里整段跳过 ——
+    不注入空壳，白烧 token。
+
+    注意 kb_text 只是**目录**（有哪些资料、各多少块），不是正文 ——
+    正文靠 search_knowledge 按需检索，否则几份文档就能把上下文撑爆。
     """
     parts = [SYSTEM_PROMPT]
     if memory_text:
         parts.append(memory_text)
+    if kb_text:
+        parts.append(kb_text)
     parts.append(
         f"\n\n本次任务的步数预算：{max_steps} 步"
         "（一步 = 你思考一次并调用工具一轮）。快到上限时请先总结进度，"
@@ -248,7 +255,8 @@ class AgentRunner:
     def __init__(self, client: AIClient, context: ToolContext, actions,
                  callbacks: AgentCallbacks | None = None,
                  max_steps: int | None = None,
-                 memory_text: str = "") -> None:
+                 memory_text: str = "",
+                 kb_text: str = "") -> None:
         self.client = client
         self.context = context
         self.actions = actions
@@ -260,9 +268,15 @@ class AgentRunner:
         # 跨会话记忆。放在系统提示词里而不是历史里，因为它是
         # 「长期背景」而不是「对话内容」—— 每轮都要在，且不该被历史裁剪掉。
         self.memory_text = memory_text or ""
+        # 知识库**目录**（只有文件名和块数，不含正文）。
+        # 正文靠 search_knowledge 按需检索 —— 全塞进来的话，
+        # 几份文档就能把上下文撑爆。
+        self.kb_text = kb_text or ""
         # 每轮开始前重新取一次记忆：模型刚用 remember 记下的东西，
         # 下一步就该看到，而不是等下一个任务才生效。
         self.memory_provider = None
+        # 同上：用户中途导入了资料，下一轮的目录里就该有它。
+        self.kb_provider = None
         # 失败跟踪与恢复建议。每个任务一次，reset() 里清空。
         self.advisor = Advisor()
         # 本轮攒下来的待确认操作，回到 _run_round 里合成一次询问
@@ -271,7 +285,9 @@ class AgentRunner:
         # 这个开关以前是死的 —— 存了设置但没人读。现在真的生效。
         self.auto_screenshot = False
         self.messages: list[dict] = [
-            {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
+            {"role": "system",
+             "content": system_prompt(self.max_steps, self.memory_text,
+                                      self.kb_text)}
         ]
         self._stop = False
         self.last_error = ""
@@ -283,7 +299,9 @@ class AgentRunner:
 
     def reset(self) -> None:
         self.messages = [
-            {"role": "system", "content": system_prompt(self.max_steps, self.memory_text)}
+            {"role": "system",
+             "content": system_prompt(self.max_steps, self.memory_text,
+                                      self.kb_text)}
         ]
         self._stop = False
 
@@ -294,8 +312,20 @@ class AgentRunner:
         所以每轮开始前会重新渲染一次。
         """
         self.memory_text = memory_text or ""
+        self._refresh_system_prompt()
+
+    def reload_knowledge(self, kb_text: str) -> None:
+        """换掉知识库目录。
+
+        用户中途导入了新资料，下一轮就该在目录里看到它。
+        """
+        self.kb_text = kb_text or ""
+        self._refresh_system_prompt()
+
+    def _refresh_system_prompt(self) -> None:
         if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = system_prompt(self.max_steps, self.memory_text)
+            self.messages[0]["content"] = system_prompt(
+                self.max_steps, self.memory_text, self.kb_text)
 
     # -------------------------------------------------------------- 历史管理
     def _trim_history(self) -> None:
@@ -414,6 +444,15 @@ class AgentRunner:
                         fresh = None
                     if fresh is not None and fresh != self.memory_text:
                         self.reload_memory(fresh)
+
+                # 知识库目录同理：用户中途导入了资料，这一步就该看见
+                if self.kb_provider is not None:
+                    try:
+                        fresh_kb = self.kb_provider() or ""
+                    except Exception:  # noqa: BLE001
+                        fresh_kb = None
+                    if fresh_kb is not None and fresh_kb != self.kb_text:
+                        self.reload_knowledge(fresh_kb)
 
                 self.callbacks.on_status(f"思考中…（第 {step} 步）")
                 self._trim_history()

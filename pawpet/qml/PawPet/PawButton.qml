@@ -47,7 +47,7 @@ Button {
             text: control.glyph
             color: control._fg
             font.family: Theme.fontLatin
-            font.pixelSize: control.small ? 11 : 13
+            font.pixelSize: control.small ? Theme.px(11) : Theme.px(13)
         }
         Text {
             anchors.verticalCenter: parent.verticalCenter

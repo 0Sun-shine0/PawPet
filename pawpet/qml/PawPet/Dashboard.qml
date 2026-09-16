@@ -94,7 +94,7 @@ Window {
 
                 Text {
                     text: "🐾"
-                    font.pixelSize: 15
+                    font.pixelSize: Theme.px(15)
                 }
                 Text {
                     text: "小爪工作台"
@@ -210,7 +210,7 @@ Window {
                                 Text {
                                     text: modelData.icon
                                     color: stack.currentIndex === index ? Theme.accent : Theme.textDim
-                                    font.pixelSize: 14
+                                    font.pixelSize: Theme.px(14)
                                 }
                                 Text {
                                     Layout.fillWidth: true

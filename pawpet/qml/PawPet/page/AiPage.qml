@@ -113,7 +113,7 @@ Item {
                             Text {
                                 Layout.alignment: Qt.AlignHCenter
                                 text: "🖥"
-                                font.pixelSize: 32
+                                font.pixelSize: Theme.px(32)
                             }
                             Text {
                                 Layout.fillWidth: true
@@ -274,7 +274,7 @@ Item {
 
                     Text {
                         text: backend.ai.configured ? "🤖" : "⚠️"
-                        font.pixelSize: 16
+                        font.pixelSize: Theme.px(16)
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -851,7 +851,7 @@ Item {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         text: "🐾"
-                        font.pixelSize: 44
+                        font.pixelSize: Theme.px(44)
                     }
                     Text {
                         Layout.fillWidth: true
@@ -902,7 +902,7 @@ Item {
                         spacing: 8
                         Text {
                             text: "⚠️"
-                            font.pixelSize: 16
+                            font.pixelSize: Theme.px(16)
                         }
                         Text {
                             Layout.fillWidth: true
@@ -1049,7 +1049,7 @@ Item {
                         spacing: 8
                         Text {
                             text: "📋"
-                            font.pixelSize: 16
+                            font.pixelSize: Theme.px(16)
                         }
                         Text {
                             Layout.fillWidth: true

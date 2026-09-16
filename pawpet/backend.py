@@ -24,6 +24,41 @@ from .services import Notifier, SoundPlayer
 from .store import pretty_day, today_key
 
 
+def _auto_ui_scale(backend) -> float:
+    """按屏幕分辨率挑一个合适的缩放。
+
+    为什么用分辨率而不是 DPI：实测这台机器上 Windows 把显示缩放设成了
+    100%（logicalDotsPerInch 恒为 96、devicePixelRatio 恒为 1.0），
+    所以 DPI 拿不到「该放大多少」的信息 —— 那是用户的系统设置，
+    不是我们能改的。而**逻辑像素总数**是个可靠的信号：
+    逻辑可用高度越大，说明屏幕越宽敞，字体就该相应放大，
+    否则会显得又小又空。
+
+    分档刻意保守：宁可比用户想要的略小，也不要一上来糊一屏。
+    """
+    try:
+        from PySide6.QtGui import QGuiApplication
+
+        app = QGuiApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            return 1.0
+        available = screen.availableGeometry()
+        logical_height = available.height() / max(1.0, screen.devicePixelRatio())
+    except Exception:  # noqa: BLE001 - 拿不到就用默认，绝不能影响启动
+        return 1.0
+
+    if logical_height >= 2000:
+        return 1.4       # 4K / 大屏
+    if logical_height >= 1400:
+        return 1.25      # 2K
+    if logical_height >= 1000:
+        # 1080p 这类「够宽但不高」的屏。阈值定 1000 而不是 1100 ——
+        # 1080 屏扣掉任务栏正好 1032 左右，定 1100 会漏掉它们。
+        return 1.15
+    return 1.0           # 小屏（比如 768p）
+
+
 def _setting_property(key: str, qtype, notify):
     """按设置项生成 Qt Property，让 QML 里的绑定能自动刷新。"""
 
@@ -454,6 +489,50 @@ class Backend(QObject):
         if not pairs:
             return ""
         return "\n".join(f"{name}（{count} 次）" for name, count in pairs)
+
+    # ------------------------------------------------------------ 界面缩放
+    @Property(float, notify=settingsChanged)
+    def uiScale(self) -> float:
+        """界面整体缩放系数。
+
+        为什么需要它：字号原来写死成 10/11/13，是按小窗口调的。
+        在 1920x1080 的笔记本屏（物理约 157 DPI）上，界面物理尺寸明显偏小，
+        右边还会空出一大片。所以让用户能调，默认按屏幕分辨率自动选。
+
+        `ui_scale` 设为 0（或负数）就是「自动」。
+        """
+        try:
+            configured = float(self._store.settings.get("ui_scale", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            configured = 0.0
+
+        if configured > 0:
+            # 手动值夹在合理范围内，免得用户（或手改的 json）把界面搞到没法用
+            return max(0.8, min(2.0, configured))
+
+        return _auto_ui_scale(self)
+
+    @Property(bool, notify=settingsChanged)
+    def uiScaleIsAuto(self) -> bool:
+        try:
+            return float(self._store.settings.get("ui_scale", 0.0) or 0.0) <= 0
+        except (TypeError, ValueError):
+            return True
+
+    @Property(str, notify=settingsChanged)
+    def uiScaleHint(self) -> str:
+        scale = self.uiScale
+        percent = int(round(scale * 100))
+        if self.uiScaleIsAuto:
+            return f"自动（{percent}%）—— 按屏幕分辨率选的，觉得小就手动调大"
+        return f"手动 {percent}%"
+
+    @Slot(bool)
+    def resetUiScale(self, auto: bool = True) -> None:
+        """切回自动。"""
+        self._store.settings["ui_scale"] = 0.0 if auto else self.uiScale
+        self.settingsChanged.emit()
+        self.flush()
 
     @Property(str, notify=settingsChanged)
     def buildInfo(self) -> str:

@@ -263,7 +263,7 @@ Item {
                                 anchors.centerIn: parent
                                 text: "✓"
                                 color: "#12261f"
-                                font.pixelSize: 13
+                                font.pixelSize: Theme.px(13)
                                 font.bold: true
                                 opacity: model.done ? 1 : 0
                                 Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
@@ -401,7 +401,7 @@ Item {
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         text: page.filter === "pending" ? "🎉" : "🗒"
-                        font.pixelSize: 40
+                        font.pixelSize: Theme.px(40)
                     }
                     Text {
                         Layout.alignment: Qt.AlignHCenter

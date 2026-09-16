@@ -35,6 +35,9 @@ def default_settings() -> dict:
         "notify_enabled": True,
         "pet_scale": 1.0,
         "pet_opacity": 1.0,
+        # 界面整体缩放。0 = 自动（按屏幕分辨率选）。
+        # 高分屏上字号原来显得太小，用户能自己调大。
+        "ui_scale": 0.0,
         "always_on_top": True,
         "fade_when_idle": True,
         "autostart": False,

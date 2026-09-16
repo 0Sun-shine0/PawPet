@@ -142,7 +142,7 @@ Item {
                         anchors.centerIn: parent
                         text: bubble.ok ? "✓" : "✕"
                         color: bubble.accent
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.px(11)
                         font.bold: true
                     }
                 }
@@ -168,7 +168,7 @@ Item {
                         text: "高危"
                         color: Theme.rose
                         font.family: Theme.font
-                        font.pixelSize: 9
+                        font.pixelSize: Theme.px(9)
                         font.bold: true
                     }
                 }

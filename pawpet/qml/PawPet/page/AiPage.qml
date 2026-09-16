@@ -248,13 +248,38 @@ Item {
         }
 
         // ============================================================ 右栏
+        //
+        // 右栏包一层 Flickable + Item，**不能**直接把 ColumnLayout 放进
+        // RowLayout。原因：列里有「对话区」这张带 Layout.fillHeight 的卡片，
+        // 它想「填满剩余空间」，而列又想「按内容撑高」—— 循环依赖。
+        // 实测 908x590 的窗口下，列里第一张卡片被撑到 995px 而列只有 562px，
+        // 把其余卡片全顶出去；另一头「对话区」又被压成 0 高。
+        // 这就是用户报的「前端小屏 UI bug」。
+        //
+        // 用 Item 包住列、让 Item 的高度取自列的隐式高度，高度链路就变成
+        // 单向的；内容超出时 Flickable 负责滚动，别的卡片不会被挤没。
+        //
+        // 缩进保持原样（QML 不看缩进），改动集中在首尾两处，减少改坏的机会。
+        Flickable {
+            id: rightScroll
+            objectName: "rightScroll"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumWidth: 380
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            contentWidth: width
+            contentHeight: rightBody.height
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            Item {
+                id: rightBody
+                width: rightScroll.width
+                height: rightColumn.implicitHeight
         ColumnLayout {
             id: rightColumn
             objectName: "aiRightColumn"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            // 给一个下限，配合左栏的 maximumWidth，保证这一侧永远不会被挤没
-            Layout.minimumWidth: 380
+            width: rightBody.width
             spacing: Theme.gap
 
             // -------------------------------------------------- 顶部状态条
@@ -805,7 +830,17 @@ Item {
             // -------------------------------------------------- 对话区
             Rectangle {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
+                // 对话区**不要**用 Layout.fillHeight。
+                //
+                // 放在可滚动的列里时它是个陷阱：fillHeight 想「填满剩余空间」，
+                // 列又想「按内容撑高」，形成循环依赖 —— 实测这张卡片要么被撑到
+                // 995px 把别的卡片顶出去，要么被压成 0 高（对话完全看不见）。
+                //
+                // 改成「给一个合适的高度 + 下限」：高度确定，列就能正确算出
+                // 自己的隐式高度，内容太高时交给外层 Flickable 滚动。
+                // 对话消息本来就在自己的 ListView 里，会自动滚到最新一条。
+                Layout.preferredHeight: 320
+                Layout.minimumHeight: 220
                 radius: Theme.radiusLg
                 color: Theme.surface
                 border.width: 1
@@ -814,6 +849,7 @@ Item {
 
                 ListView {
                     id: chat
+                    objectName: "chat"      // 布局回归测试靠它量对话区高度
                     anchors.fill: parent
                     anchors.margins: 10
                     clip: true
@@ -1237,6 +1273,8 @@ Item {
                         }
                     }
                 }
+            }
+        }
             }
         }
     }

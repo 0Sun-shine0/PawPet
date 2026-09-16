@@ -283,6 +283,34 @@ def set_process_dpi_awareness() -> None:
             pass
 
 
+def set_app_user_model_id(app_id: str) -> bool:
+    """给本进程一个明确的任务栏身份（AppUserModelID）。
+
+    解决的是什么问题
+    ----------------
+    任务栏上显示的是 **Python 的图标**，而且右键「固定到任务栏」会把
+    python.exe 本身固定上去 —— 以后再点就是「用 Python 打开一个脚本」，
+    不是「启动小爪」。
+
+    原因：Windows 从 Win7 起用 AppUserModelID 来给任务栏按钮分组。
+    没显式设过的话，进程会落到宿主解释器（这里是 pythonw.exe）的组里，
+    于是图标、跳转列表、固定行为全跟着 pythonw.exe 走。
+
+    显式设成我们自己的 ID 之后，Windows 就把这个进程当成独立应用：
+    任务栏按窗口自己的图标画，固定下来的也是小爪自己。
+    必须在创建任何窗口**之前**调用。
+    """
+    try:
+        shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [
+            ctypes.c_wchar_p
+        ]
+        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+        result = shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        return result == 0    # S_OK
+    except (AttributeError, OSError):
+        return False
+
+
 def focus_console_if_attached() -> None:
     """调试模式下把控制台窗口拉到前台，方便看日志。"""
     if not os.environ.get("PAWPET_DEBUG"):

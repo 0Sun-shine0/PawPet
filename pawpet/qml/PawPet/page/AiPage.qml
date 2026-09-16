@@ -988,7 +988,8 @@ Item {
                 // QML 的 id 不是 objectName，界面自检脚本靠这个名字找它
                 objectName: "templateCard"
                 Layout.fillWidth: true
-                visible: !backend.ai.running
+                visible: !backend.aiTemplatesHidden
+                         && !backend.ai.running
                          && !backend.ai.hasPendingApproval
                          && !backend.ai.hasPendingBatch
                 implicitHeight: tmplColumn.implicitHeight + 26
@@ -1027,6 +1028,34 @@ Item {
                             color: Theme.textFaint
                             font.family: Theme.font
                             font.pixelSize: Theme.fsTiny
+                        }
+                        // 关闭按钮。用户的原话：「这个点一下就跑要加一个 x
+                        // 来关闭，要不然很占视野」—— 这张卡片有两行标签加
+                        // 四到六个任务块，收起之后对话区能多出 300px。
+                        // 关掉的状态会记住，不用每次都点一遍。
+                        Rectangle {
+                            implicitWidth: 22
+                            implicitHeight: 22
+                            radius: 11
+                            color: closeMouse.containsMouse ? Theme.surfaceHi
+                                                            : "transparent"
+                            Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                            MouseArea {
+                                id: closeMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.aiTemplatesHidden = true
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕"
+                                color: closeMouse.containsMouse ? Theme.text
+                                                                : Theme.textFaint
+                                font.family: Theme.fontLatin
+                                font.pixelSize: Theme.px(12)
+                            }
                         }
                     }
 
@@ -1619,6 +1648,15 @@ Item {
                             onClicked: {
                                 backend.ai.capturePreview()
                             }
+                        }
+                        // 收起「点一下就跑」之后还得能找回来，否则用户
+                        // 手滑点掉 x 就永远见不到那些现成任务了。
+                        PawButton {
+                            visible: backend.aiTemplatesHidden && !backend.ai.running
+                            text: "现成任务"
+                            glyph: "✨"
+                            variant: "ghost"
+                            onClicked: backend.aiTemplatesHidden = false
                         }
 
                         Item { Layout.fillWidth: true }

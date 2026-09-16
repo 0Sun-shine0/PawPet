@@ -292,6 +292,10 @@ class PawPetApp(QObject):
 def run() -> int:
     ensure_dirs()
     win32.set_process_dpi_awareness()
+    # 任务栏身份。**必须在创建任何窗口之前设**，否则 Windows 已经
+    # 把窗口归到 pythonw.exe 那一组里了，图标和「固定到任务栏」的
+    # 行为都跟着解释器走（用户看到的就是任务栏上顶着一个 Python 图标）。
+    win32.set_app_user_model_id("PawPet.DesktopPet")
 
     # 单实例：已经有小爪在跑，就让那个实例把面板显示出来，然后自己安静退出。
     # 互斥体名字可以由 PAWPET_INSTANCE_SUFFIX 改（测试要用独立命名空间，

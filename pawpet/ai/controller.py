@@ -339,7 +339,11 @@ class AiController(QObject):
         from .kb import KnowledgeBase
 
         try:
-            return KnowledgeBase(self._store).load()
+            # load_repaired 而不是 load：老版本导进来的 HTML 资料存的是
+            # `%22%3A` 和 `<div style=...>` 这种垃圾，检索结果没法用。
+            # 它会检查一遍源文件还在不在，在就按新逻辑重解析并写回 ——
+            # 用户什么都不用做，下次搜索就正常了。
+            return KnowledgeBase(self._store).load_repaired()
         except Exception:  # noqa: BLE001 - 知识库坏了不该让 AI 用不了
             return []
 
@@ -385,7 +389,7 @@ class AiController(QObject):
             return
 
         book = kb.KnowledgeBase(self._store)
-        existing = book.load()
+        existing = book.load_repaired()
         try:
             if target.is_dir():
                 incoming, notes = kb.import_folder(str(target), existing,

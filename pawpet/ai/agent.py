@@ -588,6 +588,28 @@ class AgentRunner:
             self.last_error = f"{type(exc).__name__}: {exc}"
             self.callbacks.on_error(self.last_error)
 
+        # ------------------------------------------------------------ 兜底收尾
+        # **用户实际报过的问题：跑了一步然后什么都没有了。**
+        #
+        # 触发条件：模型返回了 tool_calls、但 content 是空的，工具跑完之后
+        # 模型**再也没给出任何正文**就结束了这一轮。结果是对话里只有一条
+        # 动作卡片和一句「这一轮执行了 1 个操作」，用户不知道发生了什么 ——
+        # 看起来就是「任务没有完成就结束了」。
+        #
+        # 模型偶尔会这样（尤其中转/小模型，拿到工具结果后直接空回复）。
+        # 补救分两步：
+        #   1. 再要一次回答，明确告诉它「直接总结，不要调工具」；
+        #   2. 还是要不到，就自己拼一句如实的话，绝不留空。
+        #
+        # **顺序很重要：必须在拼「步数上限」那段说明之前做。**
+        # 否则顶到上限时 final_text 还是空的，会白白多发一次请求
+        # （agenttest 里那条「50 次请求」的断言就是这么抓出来的）。
+        if hit_limit:
+            # 已经知道为什么停了（下面会写进 final_text），不用再问一遍
+            pass
+        elif not final_text.strip() and not self._stop and not self.last_error:
+            final_text = self._force_answer()
+
         # 因为步数上限停下时，**必须把原因写进最终回答**。
         #
         # 原来这里只调了 on_status（界面上的瞬时状态），用户看到的是
@@ -624,12 +646,17 @@ class AgentRunner:
             self.callbacks.on_status(summary)
 
         # 收尾交代：干了几件事、文件存哪了、能不能撤回。
-        # 只在这轮**真的动过手**时才加 —— 纯问答（「这段报错什么意思」）
-        # 后面跟一句「这一轮做了 0 个操作」就很怪。
+        #
+        # 两个条件：
+        # * 这一轮**真的动过手** —— 纯问答（「这段报错什么意思」）后面
+        #   跟一句「执行了 0 个操作」很怪；
+        # * 必须有**正文**（上面的模型回答或兜底话术）。否则交代会变成
+        #   整条消息，那就是用户看到的「只显示『这一轮执行了 1 个操作』，
+        #   任务根本没完成」—— 交代只是附注，不能顶替回答。
         report = self.completion_report()
-        if report and "这一轮做了" in report:
+        if report and self.actions_ok and final_text.strip():
             self.last_summary = report
-            final_text = (final_text + "\n\n" if final_text.strip() else "") + report
+            final_text = final_text.rstrip() + "\n\n" + report
 
         self.callbacks.on_finished(final_text)
         return final_text
@@ -851,6 +878,42 @@ class AgentRunner:
         self.actions.audit.add(call.name, human, spec.risk, "auto")
         return self._execute_one(call, call_id, spec, human)
 
+    def _force_answer(self) -> str:
+        """模型整轮没吐出正文时的兜底：再要一次，要不到就自己拼一句。
+
+        为什么不能直接留空：用户看到的会是「跑了一步 → 一条动作卡片 →
+        『这一轮做了 1 个操作』」，完全不知道发生了什么。这是用户报过的
+        「任务没有完成就结束了」。
+
+        两次机会：
+        1. 明确要求它总结、并且**不要再调工具**（很多情况下它只是忘了说话）；
+        2. 还不行就如实拼一句 —— 说清做了什么、为什么没有结论，
+           让用户能接着追问，而不是面对一片空白。
+        """
+        try:
+            self._append_user(
+                "[系统] 你刚才调用了工具但**没有给出任何回答**。"
+                "现在请直接用一两句话总结：你做了什么、结果是什么。"
+                "**不要再调用任何工具**，也不要重复工具的输出原文。"
+            )
+            reply = self.client.chat(self.messages, tools=None)
+            text = (reply.text or "").strip()
+            if text:
+                self.callbacks.on_event(StepEvent(kind="assistant", text=text))
+                return text
+        except Exception:  # noqa: BLE001 - 兜底链路，失败就往下走
+            pass
+
+        # 真的要不到了：如实说清楚，别假装成功
+        if self.actions_ok:
+            done = "、".join(self.touched_paths[:2]) if self.touched_paths else ""
+            body = f"我执行了 {self.actions_ok} 个操作，但没能给出结论。"
+            if done:
+                body += f"涉及：{done}。"
+            body += "你可以再问我一句「刚才那个结果是什么」，我再整理一遍。"
+            return body
+        return "这一步没有产生任何结果 —— 我没能做到，也没拿到可用的信息。"
+
     def _ask_user(self, call, call_id: str):
         """把模型的问题抛给用户，等他的回答再继续。
 
@@ -998,7 +1061,10 @@ class AgentRunner:
         """
         parts: list[str] = []
         if self.actions_ok or self.actions_failed:
-            done = f"这一轮做了 {self.actions_ok} 个操作"
+            # 用「执行了」而不是「做了」：动作执行了不等于事情办成了。
+            # 用户报过「说做了 1 个操作，但任务根本没完成」——
+            # 当时汇报的措辞把「调了一次工具」说成了「做了事」。
+            done = f"这一轮执行了 {self.actions_ok} 个操作"
             if self.actions_failed:
                 done += f"，另有 {self.actions_failed} 个没成功"
             parts.append(done + "。")

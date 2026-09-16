@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import files
 
@@ -259,6 +260,99 @@ def _merge_small(chunks: list[Chunk]) -> list[Chunk]:
     return merged
 
 
+def clean_source_text(text: str, suffix: str = "") -> str:
+    """把「源码形态」的资料变成可读正文。目前只处理 HTML/XML 一类。
+
+    为什么必须做这一步
+    ------------------
+    用户导入了一份 `xxx.html`，检索结果里出现的是这样一段：
+
+        tb%22%3Atrue%2C%22id%22%3A%22biAkN%22%2C%22margin%22%3A%7B%22top...
+
+    这不是「模型不会用」，是**资料本身就是这个形态**：HTML 文件里
+    正文被埋在几百 KB 的标签、内联样式和 URL 编码里。直接把文件内容
+    当纯文本切块，检索命中的全是属性值，模型拿到的就是这种乱码 ——
+    它既读不懂也没法引用，等于这次检索白跑了。
+
+    做法：先用标准库的 HTMLParser 把标签剥掉、把 script/style 整段丢掉，
+    再反转义、再把 `%22` 这类 URL 编码解回可读字符，最后压掉多余空行。
+    纯文本类（md/txt/代码）原样返回 —— 它们本来就能读，动它反而有风险
+    （比如代码里的缩进）。
+    """
+    body = (text or "").strip()
+    if not body:
+        return ""
+
+    # 只有这几类是「标签语言」，其余原样返回
+    if suffix.lower() not in (".html", ".htm", ".xml", ".xhtml"):
+        # 后缀未知时，靠内容特征兜底认一下
+        head = body[:1200].lower()
+        if "<html" not in head and "<!doctype html" not in head:
+            return body
+
+    import re
+    import urllib.parse
+    from html import unescape
+    from html.parser import HTMLParser
+
+    class _Stripper(HTMLParser):
+        # script / style / noscript 的内容不是正文，整段丢掉。
+        # 这份 HTML 里那些 %22%3A 的乱码就来自内联的脚本数据。
+        _SKIP = {"script", "style", "noscript", "head", "svg", "template"}
+        # 这些标签之间要补换行，否则段落会粘成一行
+        _BREAK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4",
+                  "h5", "h6", "section", "article", "table", "pre"}
+
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.parts: list[str] = []
+            self.depth = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self._SKIP:
+                self.depth += 1
+            elif tag in self._BREAK:
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in self._SKIP and self.depth:
+                self.depth -= 1
+            elif tag in self._BREAK:
+                self.parts.append("\n")
+
+        def handle_data(self, data):
+            if not self.depth:
+                self.parts.append(data)
+
+    stripper = _Stripper()
+    try:
+        stripper.feed(body)
+        stripper.close()
+    except Exception:  # noqa: BLE001 - HTML 畸形也不该让导入失败
+        return body
+
+    plain = unescape("".join(stripper.parts))
+
+    # URL 编码解一次。只解码「看起来很像编码」的片段，
+    # 避免把正文里正常的 % 号也吃掉。
+    if "%" in plain and re.search(r"%[0-9A-Fa-f]{2}", plain):
+        try:
+            plain = urllib.parse.unquote(plain)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 压掉空白：多空格 → 单空格，多空行 → 一个空行
+    lines = [" ".join(line.split()) for line in plain.splitlines()]
+    cleaned: list[str] = []
+    for line in lines:
+        if not line:
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
 def chunk_text(text: str) -> list[Chunk]:
     """把一份文档切成可检索的块。"""
     text = (text or "").strip()
@@ -411,6 +505,29 @@ class Hit:
         return f"【{self.doc} · {head}】\n{body}"
 
 
+def looks_unparsed(text: str) -> bool:
+    """这段文本看起来还是「没剥过的标签语言」吗？
+
+    用来识别**修复之前**导进来的那些资料 —— 它们的块里塞满了
+    `<div style=...>`、`%22%3A` 这类东西。这种块是没法补救的：
+    原始 HTML 早就丢了，靠剩下的碎片拼不回正文。
+    唯一正确的处理是让用户重新导入一次（重新导入会覆盖同名的）。
+    """
+    body = (text or "")
+    if not body:
+        return False
+    markers = (
+        "%22%3A", "%3A%2F%2F", "%7B%22",      # URL 编码的 JSON 片段
+        "<div", "</div>", "<span", "<script", "<style",
+        "&nbsp;", "&amp;quot;", "&#x",
+        "class=", "style=", "href=",
+    )
+    hits = sum(1 for marker in markers if marker in body)
+    # 命中两个以上基本就能确定是标签语言；单个可能是正常正文里
+    # 恰好提到（比如技术文档里写 style= ），不算
+    return hits >= 2
+
+
 def search(docs: list[Doc], query: str, limit: int = DEFAULT_HITS,
            max_chars: int = MAX_TOTAL_CHARS) -> list[Hit]:
     """在知识库里检索。返回按相关度排序的命中。"""
@@ -540,7 +657,11 @@ def import_file(path_text: str, existing: list[Doc]) -> tuple[Doc | None, str]:
     if not result.ok:
         return None, result.message
 
-    chunks = chunk_text(result.text)
+    # HTML 一类的资料得先剥标签、解编码，否则检索命中的全是属性值和
+    # %22%3A 这种乱码 —— 用户报过「搜出来的东西完全没法用」。
+    body = clean_source_text(result.text, suffix)
+
+    chunks = chunk_text(body)
     if not chunks:
         return None, f"「{expanded.name}」里没有可用的文本内容"
 
@@ -632,6 +753,51 @@ class KnowledgeBase:
             doc = Doc.from_dict(item)
             if doc.name and (doc.chunks or doc.error):
                 docs.append(doc)
+        return docs
+
+    def load_repaired(self) -> list[Doc]:
+        """load() + 自动修掉「老版本导进来的标签语言资料」。
+
+        为什么需要这一步：修好 HTML 剥标签之前导入的资料，块里存的是
+        `<div style=...>` 和 `%22%3A` 这种垃圾，而且**已经没法就地补救** ——
+        原始 HTML 早就丢了。用户不会知道要重新导入一次，他只会觉得
+        「这功能没用」。
+
+        所以加载时顺手检查一遍：只要源文件还在，就按新逻辑重新解析一遍，
+        把结果写回存储。用户什么都没做，下次搜索就正常了。
+        源文件没了（被删/被移走）就留着旧数据，不删他的东西。
+
+        代价：每次加载多一次文件读取和解析。只在**确实有脏资料**时才做，
+        正常情况下就是一次字符串扫描。
+        """
+        docs = self.load()
+        dirty = [
+            doc for doc in docs
+            if doc.chunks and any(looks_unparsed(c.text) for c in doc.chunks)
+        ]
+        if not dirty:
+            return docs
+
+        changed = False
+        for doc in dirty:
+            source = Path(doc.path) if doc.path else None
+            if source is None or not source.exists() or not source.is_file():
+                # 源文件没了：没有可修复的原料，保留原样
+                continue
+            repaired, _message = import_file(str(source), [])
+            if repaired is None or not repaired.chunks:
+                continue
+            # 保留原来的导入时间，用户看到的还是「我什么时候加的」
+            doc.chunks = repaired.chunks
+            doc.size = repaired.size
+            doc.error = ""
+            changed = True
+
+        if changed:
+            try:
+                self.save(docs)
+            except Exception:  # noqa: BLE001 - 修不好也不能影响使用
+                pass
         return docs
 
     def save(self, docs: list[Doc]) -> None:

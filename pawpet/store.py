@@ -80,6 +80,9 @@ def default_state() -> dict:
         # 结构由 pawpet.ai.memory 定义，这里只占位 —— 数据层不认识业务字段，
         # 这样 memory 模块改结构时不用动 store。
         "memory": {},
+        # 知识库：用户导入的资料（切块后的文本）。
+        # 同样只占位，结构在 pawpet.ai.kb 里定义。
+        "knowledge": {},
         "settings": default_settings(),
         "focus": {
             "mode": "focus",           # focus | short_break | long_break
@@ -217,9 +220,11 @@ class Store:
                 state[key] = []
         if not isinstance(state.get("stats"), dict):
             state["stats"] = {}
-        # 老版本没有 memory 这个键，补一个空字典让上层自己去解析
+        # 老版本没有 memory / knowledge 这两个键，补空字典让上层自己去解析
         if not isinstance(state.get("memory"), dict):
             state["memory"] = {}
+        if not isinstance(state.get("knowledge"), dict):
+            state["knowledge"] = {}
         state["schema"] = SCHEMA_VERSION
         return state
 
@@ -287,6 +292,11 @@ class Store:
     def memory(self) -> dict:
         """跨会话记忆的原始字典。解析和语义都在 pawpet.ai.memory 里。"""
         return self.state.setdefault("memory", {})
+
+    @property
+    def knowledge(self) -> dict:
+        """知识库的原始字典。解析和检索都在 pawpet.ai.kb 里。"""
+        return self.state.setdefault("knowledge", {})
 
 
 # --------------------------------------------------------------------------

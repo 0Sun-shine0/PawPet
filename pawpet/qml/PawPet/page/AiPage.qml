@@ -13,12 +13,15 @@ Item {
     property bool showSettings: false
     // 记忆全文默认收起：它可能很长，展开会把左边栏撑得没法看
     property bool showMemory: false
+    property bool showKnowledge: false
 
     // 给自测用的只读探针：两栏的真实宽度
     readonly property real leftColumnWidth: leftColumn.width
     readonly property real rightColumnWidth: rightColumn.width
 
     RowLayout {
+        id: aiRow
+        objectName: "aiRow"          // 联调脚本靠它量布局
         anchors.fill: parent
         anchors.margins: Theme.gap
         spacing: Theme.gap
@@ -26,6 +29,7 @@ Item {
         // ============================================================ 左栏
         ColumnLayout {
             id: leftColumn
+            objectName: "aiLeftColumn"
             // preferredWidth 只是个偏好：一旦右栏的隐式宽度很大（聊天气泡里的
             // 长文本），RowLayout 会把空间让给「更想要宽」的那一侧，右栏就会被
             // 压成 0 宽。所以这里必须同时钉死上下限，让左栏宽度不可协商。
@@ -246,6 +250,7 @@ Item {
         // ============================================================ 右栏
         ColumnLayout {
             id: rightColumn
+            objectName: "aiRightColumn"
             Layout.fillWidth: true
             Layout.fillHeight: true
             // 给一个下限，配合左栏的 maximumWidth，保证这一侧永远不会被挤没
@@ -654,6 +659,143 @@ Item {
                                     enabled: backend.aiMemoryCount > 0
                                     onClicked: backend.aiClearMemory()
                                 }
+                            }
+                        }
+                    }
+
+                    // -------------------------------------------------- 知识库
+                    // 导入自己的资料，AI 回答时能引用。
+                    // 正文**不会**全塞进对话 —— 按需检索，所以可以导很多。
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: kbColumn.implicitHeight + 20
+                        radius: Theme.radiusMd
+                        color: Theme.surfaceAlt
+                        border.width: 1
+                        border.color: Theme.borderSoft
+
+                        ColumnLayout {
+                            id: kbColumn
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.margins: 10
+                            spacing: 8
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "📚 知识库"
+                                color: Theme.text
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsSmall
+                                font.bold: true
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: backend.aiKnowledgeCount > 0
+                                      ? ("已导入 " + backend.aiKnowledgeCount
+                                         + " 份资料、" + backend.aiKnowledgeChunks + " 块")
+                                      : "导入资料后，我回答时能引用里面的内容"
+                                color: Theme.textDim
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                PawField {
+                                    id: kbPathField
+                                    Layout.fillWidth: true
+                                    placeholderText: "文件或文件夹路径"
+                                }
+                                PawButton {
+                                    small: true
+                                    text: "导入"
+                                    variant: "primary"
+                                    onClicked: {
+                                        backend.aiImportKnowledge(kbPathField.text, false)
+                                        kbPathField.text = ""
+                                    }
+                                }
+                            }
+
+                            // 让用户自己验证检索效果 —— 比只显示「导入了 N 块」有用得多
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                PawField {
+                                    id: kbQueryField
+                                    Layout.fillWidth: true
+                                    placeholderText: "试查一句，看能不能找到"
+                                    onAccepted: kbResult.text =
+                                        backend.aiSearchKnowledge(kbQueryField.text)
+                                }
+                                PawButton {
+                                    small: true
+                                    text: "查"
+                                    onClicked: kbResult.text =
+                                        backend.aiSearchKnowledge(kbQueryField.text)
+                                }
+                            }
+
+                            Text {
+                                id: kbResult
+                                Layout.fillWidth: true
+                                visible: text.length > 0
+                                text: ""
+                                color: Theme.textFaint
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
+                                maximumLineCount: 8
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                visible: page.showKnowledge
+                                text: backend.aiKnowledgeSummary
+                                color: Theme.textFaint
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                PawButton {
+                                    small: true
+                                    text: page.showKnowledge ? "收起" : "看看导入了什么"
+                                    onClicked: page.showKnowledge = !page.showKnowledge
+                                }
+                                Item { Layout.fillWidth: true }
+                                PawButton {
+                                    small: true
+                                    text: "清空"
+                                    enabled: backend.aiKnowledgeCount > 0
+                                    onClicked: {
+                                        backend.aiClearKnowledge()
+                                        kbResult.text = ""
+                                    }
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "支持文本类资料（md / txt / 代码 / csv / 日志…）。"
+                                      + "PDF、Word、Excel 请先另存为 txt 或 md。"
+                                color: Theme.textFaint
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.3
                             }
                         }
                     }

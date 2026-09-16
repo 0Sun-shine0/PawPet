@@ -260,6 +260,13 @@ class Backend(QObject):
     hotkey_dashboard = _setting_property("hotkey_dashboard", str, settingsChanged)
     hotkey_focus = _setting_property("hotkey_focus", str, settingsChanged)
     hotkey_task = _setting_property("hotkey_task", str, settingsChanged)
+    # 「点一下就跑」那张卡片被收起过没有。
+    #
+    # 默认展开（用户第一次用最需要它 —— 门槛不是模型能力，是他不知道
+    # 能说什么）。但一旦他点了右上角的 ✕，就记住这个选择：
+    # 那张卡片有 300px 高，每次开面板都挡在那里确实很占视野。
+    # 收起之后输入行会出现「✨ 现成任务」按钮，随时能调回来。
+    aiTemplatesHidden = _setting_property("ai_templates_hidden", bool, settingsChanged)
 
     def _on_setting_changed(self, key: str) -> None:
         if key == "sound_enabled":

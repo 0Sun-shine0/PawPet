@@ -36,7 +36,7 @@ def main() -> int:
     SCRATCH.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    from PySide6.QtCore import QObject, Qt, QUrl
+    from PySide6.QtCore import Q_ARG, QMetaObject, QObject, Qt, QUrl
     from PySide6.QtQml import QQmlComponent, QQmlEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtWidgets import QApplication
@@ -131,6 +131,36 @@ def main() -> int:
     fake_chat()
     pump(40)
     grab("03-ai-有对话")
+
+    # 带「收尾交代」的样子 —— 复现用户截图里那段长交代，
+    # 看它会不会溢出气泡（用户截图里文字被宠物挡住了）
+    fake_chat()
+    pump(30)
+    ai = backend.ai
+    ai._messages.append({
+        "id": "m-report", "role": "assistant",
+        "text": "知识库内容质量看着不错。我再看看之前那份 HTML 手册导入的效果。",
+        "html": "", "plain": "", "time": "12:10:00", "tool": "", "risk": "",
+        "ok": True, "detail": "", "seconds": 0.0, "image": "", "imageNote": "",
+        "recovery": "",
+        "report": "这一轮执行了 18 个操作，另有 1 个没成功。"
+                  "文件位置：~/Desktop、~/Desktop/md 文档阅读、"
+                  "~/Desktop/新建 文本文档.txt 等 9 处。"
+                  "只是读取，没有改动任何文件。",
+    })
+    ai.messagesChanged.emit()
+    pump(30)
+    # 把对话列表滚到底，否则新加的这条落在可视区外，截出来是空的。
+    # 注意 positionViewAtEnd 是 QML 函数，Python 侧要用元对象系统调。
+    from PySide6.QtCore import QMetaObject as _QMO
+    chat = dash.findChild(QObject, "chat", Qt.FindChildrenRecursively)
+    if chat is not None:
+        _QMO.invokeMethod(chat, "positionViewAtEnd")
+        pump(20)
+    grab("10-带长交代")
+    ai._messages.pop()
+    ai.messagesChanged.emit()
+    pump(20)
 
     # 提问卡片
     backend.ai._show_approval(

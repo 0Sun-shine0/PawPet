@@ -929,6 +929,7 @@ Item {
                         role: modelData.role
                         text: modelData.text
                         html: modelData.html || ""
+                        plain: modelData.plain || ""
                         detail: modelData.detail
                         toolName: modelData.tool
                         risk: modelData.risk
@@ -1602,7 +1603,19 @@ Item {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        implicitHeight: Math.min(120, Math.max(40, inputArea.contentHeight + 18))
+                        // 高度必须同时满足两件事：
+                        //   1. 放下 TextArea 的内容 + 它上下各 9 的 margin；
+                        //   2. **至少**放下第一行字。
+                        //
+                        // 原来是 `Math.max(40, contentHeight + 18)`，
+                        // 最小值 40 减掉 18 的 margin 只剩 22px —— 而
+                        // 一行 16px 的字要占 19.2px，加上光标行的额外高度
+                        // 就放不下，placeholder「让小爪做什么？」上半截被切掉。
+                        // 这是用户截图里报的问题。
+                        //
+                        // 46 是实测能稳住的值（比一行文字的 1.2 倍再多留一点）。
+                        // 值变小了就会重新切字，所以 bubshot.py 里钉了一条断言。
+                        implicitHeight: Math.min(120, Math.max(46, inputArea.contentHeight + 22))
                         radius: Theme.radiusMd
                         color: Theme.surfaceAlt
 

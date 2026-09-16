@@ -150,7 +150,6 @@ def test_silent_model() -> None:
           "执行了" in result2 and "1" in result2, result2[:80])
     check("自己拼的话承认没有结论",
           "结论" in result2 or "没能" in result2, result2[:80])
-
     # ---- 确实什么都没做时也不能胡说
     class NoopClient(SilentClient):
         def chat(self, messages, tools=None):
@@ -168,19 +167,27 @@ def test_silent_model() -> None:
 
 
 def test_report_is_footnote() -> None:
-    print("\n=== 二、收尾交代是附注，不能顶替回答 ===")
+    print("\n=== 二、收尾交代是附注，不能顶替回答、也不能重复 ===")
     from pawpet.ai.agent import AgentRunner
 
-    # 有正文：交代附在后面
+    # 有正文：交代**只**进 last_summary，不拼进正文
     client = SilentClient(forced_text="知识库里说鉴权用的是 Bearer Token。")
     sink = Sink()
     runner = AgentRunner(client, StubContext(), StubActions(), sink, max_steps=6)
     result = runner.run("问一下")
-    check("有正文时交代附在后面", "执行了" in result, result[:120])
-    check("正文排在交代前面",
-          result.index("Bearer") < result.index("执行了"), result[:120])
-    check("last_summary 记下了交代", bool(runner.last_summary))
-    check("交代挂在消息上（界面用 report 字段）", bool(sink.finished))
+
+    check("正文里有模型的回答", "Bearer" in result, result[:120])
+    # 用户截图里同一段话出现了两遍：一遍在正文（拼进去的），一遍在底部小字。
+    # 现在分工是 final_text = 要说的话，last_summary = 附注。
+    check("交代**没有**被拼进正文（否则界面会显示两遍）",
+          "执行了" not in result, result[:140])
+    check("交代单独放在 last_summary 里", bool(runner.last_summary),
+          repr(runner.last_summary))
+    check("last_summary 说的是执行了几个操作",
+          "执行了" in runner.last_summary, runner.last_summary)
+    check("on_finished 拿到的是纯正文",
+          sink.finished == result and "执行了" not in sink.finished,
+          sink.finished[:100])
 
     # 没动过手（纯问答）：不该硬凑一句「执行了 0 个操作」
     class ChatOnlyClient:
@@ -199,11 +206,18 @@ def test_report_is_footnote() -> None:
     check("纯问答的 last_summary 是空的（界面不显示那行小字）",
           not runner2.last_summary, repr(runner2.last_summary))
 
+    # 补问也失败：这时候那句话**既是正文也是交代**（刻意重复）
+    client3 = SilentClient(forced_text="")
+    sink3 = Sink()
+    runner3 = AgentRunner(client3, StubContext(), StubActions(), sink3, max_steps=6)
+    result3 = runner3.run("再查一次")
+    check("补问失败时正文有兜底内容", bool(result3.strip()), repr(result3[:60]))
+    check("补问失败时交代也在（两边都有，空着比重复糟）",
+          bool(runner3.last_summary), repr(runner3.last_summary))
+
     # 交代的措辞：说「执行了」而不是「做了」——
     # 调了一次工具不等于事情办成了，用户就是被这个措辞误导的
-    from pawpet.ai.agent import AgentRunner as AR
-
-    probe = AR.__new__(AR)
+    probe = AgentRunner.__new__(AgentRunner)
     probe.actions_ok = 1
     probe.actions_failed = 0
     probe.touched_paths = []

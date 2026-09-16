@@ -43,7 +43,12 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 def kill_pawpet() -> None:
     for name in ("PawPet.exe", "uninstall.exe", "小爪助手-安装程序.exe"):
-        subprocess.run(["taskkill", "/F", "/IM", name], capture_output=True, text=True)
+        # 显式 encoding：不给的话按系统区域设置解码，taskkill 的输出跟着
+        # 控制台代码页走，对不上就抛 UnicodeDecodeError，把一次成功的
+        # 构建报成失败（退出码 1）。输出不看，errors="replace" 更保险。
+        subprocess.run(["taskkill", "/F", "/IM", name],
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     time.sleep(1.0)
 
 

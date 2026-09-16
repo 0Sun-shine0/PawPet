@@ -79,6 +79,11 @@ def get_credential(host: str = "github.com") -> tuple[str, str]:
             [str(helper), "get"],
             input=f"protocol=https\nhost={host}\n\n",
             capture_output=True, text=True, timeout=30, env=env,
+            # 显式 encoding：凭据助手是个 .exe，输出跟着控制台代码页走。
+            # 不给的话按系统区域设置解码，对不上就抛 UnicodeDecodeError ——
+            # 这里读的是密码，崩了就等于拿不到凭据。errors="replace" 保证
+            # 不会因为一个解码问题把整条链路打断。
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return "", ""
@@ -307,6 +312,7 @@ def local_sha(ref: str = "HEAD") -> str:
     result = subprocess.run(
         ["git", "rev-parse", ref], cwd=str(ROOT),
         capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
     )
     return result.stdout.strip()
 
@@ -316,6 +322,7 @@ def local_parents(ref: str = "HEAD") -> list[str]:
     result = subprocess.run(
         ["git", "rev-list", "--parents", "-n", "1", ref], cwd=str(ROOT),
         capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
     )
     parts = result.stdout.strip().split()
     return parts[1:] if len(parts) > 1 else []

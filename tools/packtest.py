@@ -41,8 +41,16 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 def kill_leftovers() -> None:
+    # **必须显式给 encoding。**
+    #
+    # 不给的话 Python 按系统区域设置解码（中文 Windows 上是 GBK），而
+    # taskkill 的输出跟着控制台代码页走 —— 控制台是 UTF-8 时就解不开，
+    # 解码线程抛 UnicodeDecodeError。进程照样跑完，但**脚本退出码变成 1**，
+    # 构建脚本就会把一次成功的打包报成失败。实测踩过。
+    # 输出本来也不看，errors="replace" 保证不会再崩。
     subprocess.run(["taskkill", "/F", "/IM", "PawPet.exe"],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
     time.sleep(1.0)
 
 
@@ -68,6 +76,44 @@ def main() -> int:
     qml_files = list(app_dir.rglob("Main.qml"))
     check("QML 资源已打进包里", len(qml_files) > 0,
           f"找到 {len(qml_files)} 个 Main.qml")
+
+    # ---------------------------------------------------------- 模块自检
+    #
+    # **这一步不能省。** PyInstaller 靠静态分析找模块，而项目里有一批
+    # 「函数内部的 import」（controller 的 `from .providers import ...`、
+    # backend 的 `from . import theme`）。这类导入没被收进包里的话，
+    # 打包阶段完全看不出来，要等用户点到那个功能才炸。
+    #
+    # `PawPet.exe --selfcheck` 会把关键模块真的 import 一遍并逐个打印。
+    print("\n模块自检（--selfcheck）…")
+    probe_env = dict(os.environ)
+    # 让 exe 按 UTF-8 输出，免得中文标签被按系统编码写出来、这边按 UTF-8 读成乱码。
+    # （断言本身用的是 ASCII 标记，这里只是为了让日志好看。）
+    probe_env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        probe = subprocess.run(
+            [str(exe), "--selfcheck"],
+            cwd=str(app_dir), env=probe_env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        probe_out = (probe.stdout or "") + (probe.stderr or "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        probe = None
+        probe_out = f"跑不起来：{exc}"
+
+    if probe_out.strip():
+        print("--- 自检输出 ---")
+        print(probe_out.strip()[:3000])
+        print("--- 输出结束 ---\n")
+
+    check("自检进程正常退出", probe is not None and probe.returncode == 0,
+          f"退出码 {getattr(probe, 'returncode', '?')}")
+    # 认 ASCII 标记而不是中文：见 run_pawpet.selfcheck 里的说明
+    check("关键模块全部就位（没有 [XX]）", "[XX]" not in probe_out,
+          "有模块没被打进包里 —— 见上面的 [XX] 行")
+    check("自检明确报告通过", "SELFCHECK OK" in probe_out,
+          "没看到 SELFCHECK OK 标记")
+    check("没有失败标记", "SELFCHECK FAILED" not in probe_out)
 
     # 用隔离的数据目录，绝不碰真实数据
     sandbox = ROOT / ".cache" / "packtest-home"

@@ -214,8 +214,8 @@ def read_tree(ref: str = "HEAD") -> list[tuple[str, str, bytes]]:
     return entries
 
 
-def local_commit_info() -> dict:
-    """读出本地 HEAD 的完整元信息，用于在远端复现出**完全相同**的提交。
+def local_commit_info(ref: str = "HEAD") -> dict:
+    """读出本地某个提交的完整元信息，用于在远端复现出**完全相同**的提交。
 
     commit SHA 就是 tree + parents + author + committer + message 的哈希，
     所以任何一处的字节差异都会让 SHA 不同 —— 包括**提交信息末尾的换行**。
@@ -223,6 +223,10 @@ def local_commit_info() -> dict:
     这里踩过一个坑：用 `git log --format=%B` 拿到消息后 strip() 了一下，
     尾部换行没了，结果远端算出的 SHA 和本地不一致，以后 push 会冲突。
     正确做法是直接读原始提交对象，把空行之后的字节原样取出来。
+
+    ref 默认 HEAD。有一次上传中途网络断了，中间某个提交没上去，
+    远端停在更早的位置；这时要按顺序补传，先传旧的那个再传 HEAD ——
+    否则 GitHub 会以「父提交不存在」422 拒掉。
     """
     def git_bytes(*args: str) -> bytes:
         return subprocess.run(
@@ -231,7 +235,8 @@ def local_commit_info() -> dict:
 
     # 先拿头部字段（%B 只取消息，但我们要的是精确字节，所以后面单独读原始对象）
     fields = subprocess.run(
-        ["git", "log", "-1", "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%T"],
+        ["git", "log", "-1", ref,
+         "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%T"],
         cwd=str(ROOT), capture_output=True, text=True,
         encoding="utf-8", timeout=30,
     ).stdout.split("\x00")
@@ -239,7 +244,7 @@ def local_commit_info() -> dict:
         raise GitHubError("读不出本地提交信息")
 
     # 原始 commit 对象：头部、空行、然后是消息（含尾部换行）
-    raw = git_bytes("cat-file", "commit", "HEAD")
+    raw = git_bytes("cat-file", "commit", ref)
     _header, separator, message_bytes = raw.partition(b"\n\n")
     if not separator:
         raise GitHubError("提交对象格式异常")
@@ -252,7 +257,7 @@ def local_commit_info() -> dict:
         "committer": {"name": fields[3], "email": fields[4], "date": fields[5].strip()},
         "tree": fields[6].strip(),
         # 父提交也必须带上 —— 它参与哈希，漏了就算不出正确的 SHA
-        "parents": local_parents(),
+        "parents": local_parents(ref),
     }
 
 
@@ -292,10 +297,10 @@ def verify_payload(info: dict) -> tuple[bool, str]:
         return False, result.stderr.decode("utf-8", "replace")[:200]
 
     predicted = result.stdout.decode("utf-8", "replace").strip()
-    actual = local_sha()
+    actual = info.get("sha") or local_sha()
     if predicted == actual:
         return True, predicted
-    return False, f"本地复现得到 {predicted[:10]}，但 HEAD 是 {actual[:10]}"
+    return False, f"本地复现得到 {predicted[:10]}，但目标是 {actual[:10]}"
 
 
 def local_sha(ref: str = "HEAD") -> str:
@@ -348,7 +353,7 @@ def human(size: float) -> str:
 
 
 def upload(owner: str, repo: str, token: str, branch: str,
-           info: dict, dry_run: bool = False) -> int:
+           info: dict, dry_run: bool = False, ref: str = "HEAD") -> int:
     # ---------------------------------------------------------- 1. 确认仓库
     print(f"\n=== 1. 检查仓库 {owner}/{repo} ===")
     status, body = request("GET", f"/repos/{owner}/{repo}", token)
@@ -433,7 +438,11 @@ def upload(owner: str, repo: str, token: str, branch: str,
 
     # ---------------------------------------------------------- 3. 读本地内容
     print(f"\n=== 3. 读取本地提交 ===")
-    entries = read_tree("HEAD")
+    # **必须用和上面同一个 ref。** 原来这里写死 "HEAD"，配上 --ref 补传
+    # 中间提交时就会「元信息取自 ref、文件内容取自 HEAD」——
+    # 本地自检用 info["tree"]（ref 的树）所以能过，但实际传上去的树
+    # 是 HEAD 的，于是远端 SHA 和本地对不上（实测 78bfa80 vs 08c1e50）。
+    entries = read_tree(ref)
     total_bytes = sum(len(content) for _p, _m, content in entries)
     print(f"  {len(entries)} 个文件，合计 {human(total_bytes)}")
 
@@ -642,11 +651,17 @@ def main() -> int:
     parser.add_argument("--repo", default="PawPet", help="仓库名")
     parser.add_argument("--branch", default="main", help="目标分支")
     parser.add_argument("--message", default="", help="提交信息（默认取本地 HEAD 的）")
+    parser.add_argument("--ref", default="HEAD",
+                        help="上传哪个提交（默认 HEAD）。"
+                             "有一次网络中断导致中间某个提交没上传成功时，"
+                             "用它按顺序补传：先 --ref <旧的那个>，再传 HEAD")
     parser.add_argument("--dry-run", action="store_true", help="只显示计划，不上传")
     args = parser.parse_args()
 
     print("GitHub API 上传工具")
     print(f"目标：{args.owner}/{args.repo}  分支 {args.branch}")
+    if args.ref != "HEAD":
+        print(f"上传的提交：{args.ref}（不是 HEAD）")
 
     # ------------------------------------------------------------ 凭据
     username, token = get_credential()
@@ -670,13 +685,14 @@ def main() -> int:
         return 1
     print(f"身份：{body.get('login')}（{body.get('name')}）")
 
-    info = local_commit_info()
+    info = local_commit_info(args.ref)
+    info["sha"] = local_sha(args.ref)
     if args.message:
         info["message"] = args.message
     print(f"提交信息：{info['message'].strip().splitlines()[0]}")
     print(f"作者：{info['author']['name']} <{info['author']['email']}>")
 
-    # 本地自检：确认这套参数能复现出和 HEAD 相同的 SHA
+    # 本地自检：确认这套参数能复现出和本地相同的 SHA
     ok, detail = verify_payload(info)
     if ok:
         print(f"自检：参数能精确复现本地提交 {detail[:10]} —— 远端 SHA 会与本地一致")
@@ -687,7 +703,7 @@ def main() -> int:
 
     try:
         return upload(args.owner, args.repo, token, args.branch,
-                      info, dry_run=args.dry_run)
+                      info, dry_run=args.dry_run, ref=args.ref)
     except GitHubError as exc:
         print(f"\n[XX] 网络错误：{exc}")
         print("     api.github.com 也连不上的话，只能换网络或开代理了。")

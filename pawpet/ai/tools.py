@@ -13,10 +13,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass
 
 from .actions import LEVEL_READ_ONLY, Risk
+from .extensions import (
+    LEVEL_CODE,
+    LEVEL_NOTE,
+    LEVEL_RECIPE,
+    Extension,
+)
 from .vision import ScreenCapture, downscale_png
 
 # 视觉模型看屏幕时的输出上限，避免一口气吐太多
@@ -433,9 +440,84 @@ TOOLS: list[ToolSpec] = [
         }, ["text"]),
         Risk.READ,
     ),
+    # -------------------------------------------------------- 造新工具
+    # 「二次开发」的落地：用户反复做同一件事时，把它固化成一个工具。
+    #
+    # 为什么值得做：用户现在的做法是把流程写在便签里，每次让小爪读了
+    # 再重新理解。同一条流程跑两次结果不会完全一样。做成工具 = 写死一次。
+    #
+    # 三档能力，默认只开前两档（见 extensions.py）：
+    #   note   固定说法 —— 一段提示词，不碰任何东西
+    #   recipe 固定流程 —— 一串**只读**步骤
+    #   code   自定义代码 —— 默认关闭，开了也要每次运行单独确认
+    ToolSpec(
+        "propose_extension",
+        "**给用户造一个新工具**。用户反复做同一类事、或者明确说"
+        "「以后都这么做」「帮我记成一个固定的做法」时用它。\n"
+        "这个工具只生成**草稿**，不生效 —— 还要调 install_extension "
+        "让用户确认之后才算装上。\n"
+        "三档能力，从安全到强大：\n"
+        f"  · {LEVEL_NOTE}：固定说法。给一段固定指令，不碰文件不联网\n"
+        f"  · {LEVEL_RECIPE}：固定流程。一串**只读**步骤"
+        "（read_file / list_dir / regex_find / pick_lines / template / "
+        "join / truncate / count）\n"
+        f"  · {LEVEL_CODE}：自定义代码。默认关着，别主动提\n"
+        "**优先用 recipe**，它够用而且一定安全。\n"
+        "参数要声明清楚：用户需要提供什么（比如文件路径、工单内容）。",
+        _schema({
+            "name": {**_STRING, "description":
+                     "工具名：小写字母开头，只能小写字母数字下划线，3~41 位"},
+            "title": {**_STRING, "description": "中文名，界面上显示这个"},
+            "description": {**_STRING, "description":
+                            "什么时候该用这个工具。要具体到「用户说什么的时候」，"
+                            "模型靠这句话决定要不要调它"},
+            "level": {**_STRING, "description":
+                      f"{LEVEL_NOTE} / {LEVEL_RECIPE} / {LEVEL_CODE}，默认 {LEVEL_RECIPE}"},
+            "prompt": {**_STRING, "description":
+                       f"仅 {LEVEL_NOTE} 需要：那段固定指令"},
+            "steps": {
+                "type": "array",
+                "description": f"仅 {LEVEL_RECIPE} 需要：步骤列表，"
+                               "每步形如 {\"op\": \"read_file\", \"path\": \"{path}\"}。"
+                               "可以用 {参数名} 引用参数，用 {text} 引用上一步的输出",
+                "items": {"type": "object"},
+            },
+            "parameters": {
+                "type": "object",
+                "description": "这个工具要问用户拿什么，JSON Schema 形式",
+            },
+        }, ["name", "title", "description"]),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "install_extension",
+        "把 propose_extension 生成的草稿**装上去**。"
+        "这会弹一张卡片让用户确认 —— 卡片上写清楚「会做什么」，"
+        "用户点头之后才生效。\n"
+        "用户说「不用了」「算了」就别调这个。",
+        _schema({
+            "draft": {"type": "object", "description":
+                      "propose_extension 返回的草稿对象，原样传回来"},
+        }, ["draft"]),
+        Risk.CONFIRM,
+    ),
+    ToolSpec(
+        "list_extensions",
+        "列出**已经装好的**自定义工具。用户问「我有哪些自己加的工具」"
+        "「之前那个整理工单的还在吗」时用它。",
+        _schema({}),
+        Risk.READ,
+    ),
+    ToolSpec(
+        "remove_extension",
+        "**卸掉**一个自定义工具。用户说「那个不要了」「删掉」时用它。",
+        _schema({
+            "name": {**_STRING, "description": "要卸掉的工具名"},
+        }, ["name"]),
+        Risk.READ,
+    ),
     # ------------------------------------------------------------ 定制界面
     # 「通过对话改主题」的落地。
-    #
     # 为什么走数据而不是改 Theme.qml：Theme.qml 带 pragma Singleton，
     # 模块解析对同名类型是「先找到的赢」，覆盖它靠碰运气；而且打包后
     # QML 在 _MEIPASS 里、退出就删，磁盘上根本没有 .qml 可改。
@@ -606,7 +688,10 @@ class ToolContext:
         """
         spec = TOOL_INDEX.get(name)
         if spec is None:
-            # 不是内置工具 —— 可能是外面接进来的 MCP 工具。
+            # 不是内置工具 —— 可能是外面接进来的 MCP 工具，
+            # 也可能是用户自己造的扩展工具。
+            if name.startswith("ext_"):
+                return self.call_extension(name, arguments or {})
             # 名字长这样：mcp_{server名}_{工具名}
             if name.startswith("mcp_"):
                 return self.call_mcp_tool(name, arguments or {})
@@ -635,7 +720,124 @@ class ToolContext:
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成可读文本回给模型
             return False, f"工具 {name} 执行出错：{exc}", None
 
-    # ------------------------------------------------------------------ MCP
+    # ---------------------------------------------------------- 自定义工具
+    def extension_tools(self) -> list[dict]:
+        """用户装好的扩展，转成给模型的工具定义。
+
+        每轮重新读 —— 用户会话中间装了一个，下一步就该能用。
+        """
+        from .extensions import as_openai_tools, load_all
+
+        try:
+            path = self.store.path.parent / "extensions.json"
+            return as_openai_tools(load_all(path))
+        except Exception:  # noqa: BLE001 - 扩展坏了不该让整轮用不了
+            return []
+
+    def call_extension(self, name: str, arguments: dict):
+        """执行用户自定义的工具。
+
+        三档的执行方式不同，但有一条共同的规矩：
+        **只有 approved 的才执行。** 没经用户确认的定义不出现在工具清单里，
+        万一手改配置塞进来一个，这里也拦住。
+        """
+        from .extensions import (
+            LEVEL_NOTE,
+            LEVEL_RECIPE,
+            find_by_tool_name,
+            load_all,
+            run_recipe,
+            save_all,
+        )
+
+        try:
+            path = self.store.path.parent / "extensions.json"
+            items = load_all(path)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"读不到自定义工具：{exc}", None
+
+        ext = find_by_tool_name(items, name)
+        if ext is None:
+            known = "、".join(f"ext_{i.name}" for i in items) or "（一个都没有）"
+            return False, f"没有名为 {name} 的自定义工具。现有的：{known}", None
+        if not ext.approved:
+            return False, (f"「{ext.title}」还没经过确认，不能执行。"
+                           "让用户确认一次再装。"), None
+
+        if ext.level == LEVEL_NOTE:
+            # 固定说法：这段指令当成「用户的要求」交给模型，附上参数。
+            # 返回格式刻意做成被填充过的提示词 —— 模型读到就会照着做。
+            filled = ext.prompt
+            for key, value in (arguments or {}).items():
+                filled = filled.replace("{" + key + "}", str(value))
+            ok, text = True, (f"【用户的自定义要求：{ext.title}】\n{filled}\n"
+                              f"（这是用户预先定好的做法，请照它办）")
+        elif ext.level == LEVEL_RECIPE:
+            ok, text = run_recipe(ext, arguments or {})
+        elif ext.level == LEVEL_CODE:
+            ok, text = self._run_extension_code(ext, arguments or {})
+        else:
+            return False, f"「{ext.title}」的类型未知：{ext.level}", None
+
+        # 记一次使用次数。用户问「这个工具到底有没有用」时能看到。
+        if ok:
+            ext.run_count += 1
+            try:
+                save_all(path, items)
+            except Exception:  # noqa: BLE001 - 记不上不影响这次执行
+                pass
+        return ok, text, None
+
+    def _run_extension_code(self, ext, arguments: dict):
+        """code 档：跑用户（或模型）写的 Python。
+
+        **走子进程。** 理由不是「更安全」—— 它当然能在用户机器上干任何事，
+        这一点在审批卡片上已经说清楚了。走子进程是为了：
+        * 卡死/崩溃不带走小爪本身；
+        * 能设超时；
+        * 输出可控（不让它往 stdout 写脏东西影响我们的界面）。
+
+        参数通过环境变量传，结果从 stdout 收。
+        """
+        import subprocess
+
+        code = (ext.code or "").strip()
+        if not code:
+            return False, "这个自定义工具没有代码"
+
+        # 拼一段收尾，把结果打到 stdout
+        wrapper = (
+            code
+            + "\n\nimport json as _json, os as _os\n"
+            "_args = _json.loads(_os.environ.get('PAWPET_EXT_ARGS') or '{}')\n"
+            "if 'run' in dir():\n"
+            "    _out = run(_args)\n"
+            "    print('' if _out is None else _out)\n"
+        )
+        import os as _os
+
+        env = dict(_os.environ)
+        env["PAWPET_EXT_ARGS"] = json.dumps(arguments or {}, ensure_ascii=False)
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", wrapper],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"「{ext.title}」跑了超过 30 秒，先掐掉了。"
+        except OSError as exc:
+            return False, f"跑不起来：{exc}"
+
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip().splitlines()
+            tail = detail[-1] if detail else "（没有错误输出）"
+            return False, f"「{ext.title}」报错了：{tail}"
+        return True, (result.stdout or "").strip() or "（没有输出）"
+
+    # ---------------------------------------------------------- MCP
     def mcp_clients(self) -> list:
         """当前连着的 MCP server。
 
@@ -1486,7 +1688,144 @@ class ToolContext:
             message += f"\n下次接着做：{task.next_step}"
         return True, message, None
 
-    # ------------------------------------------------------------ 定制界面
+    # ------------------------------------------------------------ 造新工具
+    def _ext_book(self):
+        """拿扩展注册表。存在数据目录，和记忆/知识库一个套路。"""
+        from .extensions import load_all, save_all
+
+        path = self.store.path.parent / "extensions.json"
+        return path, load_all(path), save_all
+
+    def _do_propose_extension(self, args: dict):
+        """生成草稿。**不生效** —— 生效要过 install_extension 那一步确认。"""
+        import time as _time
+
+        from .extensions import LEVEL_HINTS, LEVEL_LABELS, Extension
+
+        level = str(args.get("level") or LEVEL_RECIPE).strip().lower()
+        steps = args.get("steps")
+        ext = Extension(
+            name=str(args.get("name") or "").strip().lower(),
+            title=str(args.get("title") or "").strip(),
+            description=str(args.get("description") or "").strip(),
+            level=level,
+            prompt=str(args.get("prompt") or "").strip(),
+            steps=[s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else [],
+            parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else {},
+            created=_time.time(),
+            updated=_time.time(),
+        )
+
+        issues = ext.problems(self._max_extension_level())
+        if issues:
+            return False, ("这个定义还有问题，改一下再来：\n  · "
+                           + "\n  · ".join(issues)), None
+
+        # 同名的已存在 → 算升级，不是新建
+        _path, existing, _save = self._ext_book()
+        old = next((item for item in existing if item.name == ext.name), None)
+        if old is not None:
+            ext.created = old.created or ext.created
+            ext.version = int(old.version or 1) + 1
+
+        action = "更新" if old is not None else "新建"
+        message = (
+            f"草稿做好了（{action}）。**还没有生效**，要给用户看过才算装上。\n\n"
+            f"{ext.summary()}\n\n"
+            f"接下来：跟用户说清楚「会做什么」，他同意之后调 install_extension，"
+            f"把下面这个 draft 原样传回去。\n"
+            f"draft = {json.dumps(ext.as_dict(), ensure_ascii=False)}"
+        )
+        return True, message, None
+
+    def _do_install_extension(self, args: dict):
+        from .extensions import Extension, LEVEL_LABELS, as_openai_tools, save_all
+
+        draft = args.get("draft")
+        if not isinstance(draft, dict):
+            return False, "draft 要传 propose_extension 返回的那个对象", None
+
+        ext = Extension.from_dict(draft)
+        issues = ext.problems(self._max_extension_level())
+        if issues:
+            return False, ("这个定义不能装：\n  · " + "\n  · ".join(issues)), None
+
+        ext.approved = True
+        ext.updated = __import__("time").time()
+        if not ext.created:
+            ext.created = ext.updated
+
+        path, existing, _save = self._ext_book()
+        replaced = False
+        for index, item in enumerate(existing):
+            if item.name == ext.name:
+                existing[index] = ext
+                replaced = True
+                break
+        if not replaced:
+            existing.append(ext)
+
+        ok, message = save_all(path, existing)
+        if not ok:
+            return False, message, None
+
+        total = len(as_openai_tools(existing))
+        return True, (
+            f"装好了：「{ext.title}」（{LEVEL_LABELS.get(ext.level, ext.level)}）。"
+            f"现在一共 {total} 个自定义工具，下一步开始模型就能调用它。\n"
+            "想卸掉随时说一声。"
+        ), None
+
+    def _do_list_extensions(self, args: dict):
+        from .extensions import LEVEL_LABELS
+
+        _path, items, _save = self._ext_book()
+        if not items:
+            return True, ("还没有自定义工具。用户反复做同一件事时，"
+                          "可以用 propose_extension 给他固化一个。"), None
+        lines = [f"已装 {len(items)} 个自定义工具："]
+        for ext in items:
+            mark = "" if ext.approved else "（未确认，不生效）"
+            lines.append(f"  {ext.name}  {ext.title}"
+                         f"  [{LEVEL_LABELS.get(ext.level, ext.level)}]{mark}"
+                         f"  用过 {ext.run_count} 次")
+            if ext.description:
+                lines.append(f"      {ext.description}")
+        lines.append("")
+        lines.append("卸掉用 remove_extension。")
+        return True, "\n".join(lines), None
+
+    def _do_remove_extension(self, args: dict):
+        from .extensions import save_all
+
+        name = str(args.get("name") or "").strip().lower()
+        if not name:
+            return False, "要卸掉哪一个？给我工具名。", None
+        path, items, _save = self._ext_book()
+        kept = [item for item in items if item.name != name]
+        if len(kept) == len(items):
+            names = "、".join(item.name for item in items) or "（一个都没有）"
+            return False, f"没有叫「{name}」的自定义工具。现有的：{names}", None
+        ok, message = save_all(path, kept)
+        if not ok:
+            return False, message, None
+        return True, f"已卸掉「{name}」。", None
+
+    def _max_extension_level(self) -> str:
+        """当前允许造到哪一档。
+
+        `ai_extension_level` 默认是 recipe —— **code 档默认关着**。
+        理由是「用户让 AI 造的东西在用户电脑上执行任意代码」这件事，
+        对泛用户不可接受；给愿意承担的人留开关，但默认不打开。
+        """
+        from .extensions import MAX_LEVEL_DEFAULT
+
+        value = str(self.store.settings.get("ai_extension_level")
+                    or MAX_LEVEL_DEFAULT).strip().lower()
+        if value in (LEVEL_NOTE, LEVEL_RECIPE, LEVEL_CODE):
+            return value
+        return MAX_LEVEL_DEFAULT
+
     def _do_set_theme_color(self, args: dict):
         """改界面配色。"""
         from .. import theme as theme_mod

@@ -110,17 +110,24 @@ def main() -> int:
 
     # 工作台的尺寸范围是 860x560 ~ 任意；页面可用高度大约 = 窗口高 - 100。
     # 用户可能把窗口缩到了最小，那就是最容易暴露布局问题的情况。
+    #
+    # 特别注意 908x590：那是用户截图里的内容区尺寸（窗口 960x680 减掉
+    # 侧边栏和标题栏）。用户报的就是这个尺寸下「前端小屏 UI 依旧 bug」。
     print("\n########## 各种窗口尺寸下，右栏有没有被内容顶爆 ##########")
-    for width, height in ((860, 470), (900, 500), (960, 590),
-                          (1100, 700), (620, 620)):
+    for width, height in ((908, 590), (860, 470), (900, 500), (960, 590),
+                          (1100, 700), (620, 620), (1400, 900)):
         host.setProperty("pw", width)
         host.setProperty("ph", height)
         app.processEvents()
         app.processEvents()
+        left = page.findChild(QObject, "aiLeftColumn", Qt.FindChildrenRecursively)
         right = page.findChild(QObject, "aiRightColumn", Qt.FindChildrenRecursively)
-        if right is None:
+        if right is None or left is None:
             continue
         col_h = right.property("height")
+        left_w = left.property("width")
+        right_w = right.property("width")
+        # 只统计**可见**项 —— ColumnLayout 会跳过隐藏项
         items = []
         for child in right.children():
             try:
@@ -131,18 +138,12 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 continue
         items.sort()
-        bottom = max((y + h for y, h, _ in items), default=0)
-        overflow = bottom - col_h
-        flag = "  [!!] 溢出" if overflow > 2 else ""
-        print(f"  页面 {width}x{height}：右栏高 {col_h:.0f}，"
-              f"内容底边 {bottom:.0f}，溢出 {overflow:.0f}{flag}")
-        # 只把**可见**的项算进去 —— ColumnLayout 会跳过隐藏项，
-        # 我先前把隐藏的电池也算进底边，得出了假的溢出。
-        visible_heights = [h for _, h, v in items if v]
-        vis_total = sum(visible_heights)
-        if vis_total > col_h + 2:
-            print(f"        可见项高度合计 {vis_total:.0f} > 右栏 {col_h:.0f}"
-                  f"  —— 这才是真的挤不下")
+        vis_total = sum(h for _, h, v in items if v)
+        overflow = vis_total - col_h
+        flag = "  [!!] 塞不下" if overflow > 2 else ""
+        print(f"  页面 {width}x{height}：左栏 {left_w:.0f} 右栏 {right_w:.0f}，"
+              f"右栏高 {col_h:.0f}，可见内容合计 {vis_total:.0f}，"
+              f"超出 {overflow:.0f}{flag}")
 
     host.setProperty("pw", 620)
     host.setProperty("ph", 620)

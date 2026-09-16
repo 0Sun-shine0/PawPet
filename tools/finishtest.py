@@ -196,11 +196,21 @@ def main() -> int:
     check("顶到上限时会返回非空文字", bool(result.strip()),
           repr(result[:60]))
     check("收尾文字说明了是步数上限",
-          "步" in result and ("上限" in result or "步" in result),
-          result[:80])
+          "上限" in result, result[:80])
     check("收尾文字告诉用户可以继续",
           "继续" in result, result[:80])
     check("确实只跑了 5 步", len(context.calls) == 5, str(len(context.calls)))
+
+    # 文案要精确：工作台里的「执行步数」= 模型往返次数，
+    # 而「操作」= 实际执行了几个工具。两者通常不相等，必须分开说，
+    # 否则用户拿工作台的设置一对，会以为哪里算错了。
+    check("报的是真实的步数（5）而不是别的数字",
+          "执行了 5 步" in result, result.split("\n")[0][:60])
+    check("同时报出了操作个数",
+          "个操作" in result, result.split("\n")[0][:60])
+    check("没有把两个数混为一谈",
+          result.count("步") >= 2 and "操作" in result,
+          result.split("\n")[0][:70])
 
     # 有中间正文时，收尾文字要附在后面而不是顶掉它
     class ChattyClient(Client):

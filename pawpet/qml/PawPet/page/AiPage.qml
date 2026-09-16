@@ -262,6 +262,41 @@ Item {
         // 单向的；内容超出时 Flickable 负责滚动，别的卡片不会被挤没。
         //
         // 缩进保持原样（QML 不看缩进），改动集中在首尾两处，减少改坏的机会。
+        // ============================================================ 右栏
+        //
+        // 右栏分两块：**上面滚动、下面钉住**。
+        //
+        // 历史教训（三次）：
+        //
+        // 1. 最初直接把 ColumnLayout 放进 RowLayout，列里的「对话区」带
+        //    Layout.fillHeight、列又想按内容撑高 —— 循环依赖。实测 908x590
+        //    下列里第一张卡片被撑到 995px 而列只有 562px，其余卡片全被顶出去，
+        //    另一头对话区被压成 0 高。这是用户报过的「前端小屏 UI bug」。
+        // 2. 整列塞进滚动区：列内容固定 828px、视口只有 612px，输入框被推到
+        //    折叠线以下，得先滚过「点一下就跑」那张 300px 的卡片才能打字。
+        //    用户的原话是「还是这样的」。
+        // 3. 前两版重构把卡片插错了层（QML 语法照样合法、qmlcheck 抓不到，
+        //    跑起来才发现输入框宽度是 0 / 掉到屏幕外）。所以现在改完必须
+        //    用几何再验一次，不能只看语法。
+        //
+        // 结构：输入卡片是右栏 ColumnLayout 的孩子，和滚动区**同级**。
+        //   * 滚动区（Layout.fillHeight）：状态条 / 进度 / 对话 / 卡片 /
+        //     设置 / 现成任务
+        //   * 钉住区（Layout.preferredHeight）：输入卡片，永远贴着底
+        // 对话区仍然留在滚动区里、保持固定高度 —— 它一旦 fillHeight 就会
+        // 和「按内容撑高」的父级形成环（第 1 条那个 bug）。
+        //
+        // 两个孩子的 Layout 属性都是必需的：
+        //   * 滚动区 fillHeight 才吃得到剩余空间；
+        //   * 输入卡片 preferredHeight 才能**先**拿到自己的高度 ——
+        //     只写 implicitHeight 的话实测被挤到 y=716（视口才 696）。
+        ColumnLayout {
+            id: rightPane
+            objectName: "aiRightPane"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumWidth: 380
+            spacing: Theme.gap
         Flickable {
             id: rightScroll
             objectName: "rightScroll"
@@ -1581,11 +1616,21 @@ Item {
                     }
                 }
             }
+        }
+            }
+        }
 
             // -------------------------------------------------- 输入区
             Rectangle {
+                id: inputCard
+                objectName: "inputCard"
                 Layout.fillWidth: true
-                implicitHeight: inputColumn.implicitHeight + 24
+                // 用 Layout.preferredHeight 而不是 implicitHeight：
+                // 滚动区带 fillHeight，只有 preferredHeight 才能保证
+                // 这个卡片**先**拿到自己的高度。实测只写 implicitHeight
+                // 时它被挤到 y=716（视口才 696），整块掉到屏幕外面。
+                Layout.preferredHeight: inputColumn.implicitHeight + 24
+                Layout.minimumHeight: inputColumn.implicitHeight + 24
                 radius: Theme.radiusLg
                 color: Theme.surface
                 border.width: 1
@@ -1621,6 +1666,7 @@ Item {
 
                         TextArea {
                             id: inputArea
+                            objectName: "aiInput"
                             anchors.fill: parent
                             anchors.margins: 9
                             placeholderText: backend.ai.configured
@@ -1682,8 +1728,6 @@ Item {
                         }
                     }
                 }
-            }
-        }
             }
         }
     }

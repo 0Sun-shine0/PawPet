@@ -26,8 +26,11 @@ def read_settings() -> dict:
 
 def kill_all() -> None:
     for name in ("pythonw.exe", "python.exe"):
+        # 显式 encoding：不给的话按系统区域设置解码，taskkill 的输出跟着
+        # 控制台代码页走，对不上会抛 UnicodeDecodeError 把退出码变成 1。
         subprocess.run(["taskkill", "/F", "/IM", name],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     time.sleep(2.0)
 
 

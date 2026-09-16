@@ -39,6 +39,7 @@ def main() -> int:
     probe = subprocess.run(
         [sys.executable, "-c", "import PySide6, sys; print('PySide6 OK', sys.executable)"],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     print(f"\n用 sys.executable 导入 PySide6：rc={probe.returncode}")
     print(f"  stdout: {probe.stdout.strip()}")

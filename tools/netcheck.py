@@ -88,7 +88,8 @@ def main() -> int:
     print()
     print("=== git 全局代理配置 ===")
     result = subprocess.run(["git", "config", "--global", "--get", "http.proxy"],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     configured = result.stdout.strip()
     print(f"  http.proxy = {configured or '(未设置)'}")
     if configured:

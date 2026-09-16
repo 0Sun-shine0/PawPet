@@ -55,6 +55,9 @@ def get_token() -> str:
         result = subprocess.run(
             [GCM, "get"], input="protocol=https\nhost=github.com\n\n",
             capture_output=True, text=True, timeout=30, env=env,
+            # 显式 encoding，理由同 github_upload：凭据助手的输出跟着控制台
+            # 代码页走，按系统区域设置解码会对不上、直接抛异常拿不到 token。
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return ""

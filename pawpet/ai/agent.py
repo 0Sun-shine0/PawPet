@@ -543,19 +543,21 @@ class AgentRunner:
                 self._repair_tool_messages()
 
                 try:
-                    # 每步都重新拼一次工具清单：MCP server 是运行时才连上的，
-                    # 用户在会话中间连一个，下一步就该能用。
+                    # 每步都重新拼一次工具清单：MCP server 和用户自定义工具
+                    # 都是运行时才有的，会话中间装一个，下一步就该能用。
                     #
                     # 用 getattr 取而不是直接调：agent 的测试里塞的是极简的
-                    # 假 context，没有这个方法。测试桩不该为了一个可选能力
+                    # 假 context，没有这些方法。测试桩不该为了可选能力
                     # 被迫补齐接口。
-                    extra = []
-                    probe = getattr(self.context, "mcp_tools", None)
-                    if callable(probe):
+                    extra: list[dict] = []
+                    for probe_name in ("extension_tools", "mcp_tools"):
+                        probe = getattr(self.context, probe_name, None)
+                        if not callable(probe):
+                            continue
                         try:
-                            extra = probe() or []
-                        except Exception:  # noqa: BLE001 - 外部工具取不到不该拖垮整轮
-                            extra = []
+                            extra.extend(probe() or [])
+                        except Exception:  # noqa: BLE001 - 取不到不该拖垮整轮
+                            pass
                     reply = self.client.chat(
                         self.messages, tools=openai_tools(extra))
                 except AiError as exc:

@@ -849,6 +849,24 @@ class AiController(QObject):
             self._push("error", error)
             self.toastRequested.emit("AI 出错", error[:120])
         elif text:
+            # **把最终回答落进对话。**
+            #
+            # 这里原来只发了个「任务结束」的提示，没有 _push —— 于是：
+            # 模型如果整轮都在调工具、没吐过正文（常见于多步任务），
+            # 收尾文字算出来了却**从来不显示**，用户看到的就是
+            # 「跑了一堆步骤然后什么都没有了，任务没完成就结束了」。
+            # 这是用户实际报过的问题。
+            #
+            # 但也不能无脑 push：模型在循环中间吐过正文时，那段已经作为
+            # 助手消息显示过了，再 push 一遍就重复了。所以先看
+            # 「最后一条助手消息」是不是同一段文本，是就跳过。
+            last_assistant = ""
+            for item in reversed(self._messages):
+                if item.get("role") == "assistant":
+                    last_assistant = (item.get("text") or "").strip()
+                    break
+            if last_assistant != text.strip():
+                self._push("assistant", text)
             self.toastRequested.emit("任务结束", text[:80])
 
         # 任务结束后，后台判断这一轮有没有值得长期记住的东西。

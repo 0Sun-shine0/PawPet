@@ -420,6 +420,10 @@ class AgentRunner:
 
         self._append_user(user_text)
         final_text = ""
+        # 是不是被步数上限截断的。收尾时一定要把这件事**留在对话里**，
+        # 不能只发一条状态提示 —— 用户看到的是「任务跑了一堆步骤然后没了，
+        # 也不知道为什么停」。这是用户实际报过的问题。
+        hit_limit = False
 
         # 任务开始时先看一眼屏幕。
         #
@@ -509,16 +513,29 @@ class AgentRunner:
                     self.callbacks.on_status("已被用户停止")
                     break
             else:
+                hit_limit = True
                 self.callbacks.on_status(f"已达到 {self.max_steps} 步上限，先停在这里")
-                if not final_text:
-                    final_text = (
-                        f"任务比较复杂，我已经执行了 {self.max_steps} 步先停下来。"
-                        "你可以让我继续，或者在工作台把「每轮最多执行步数」调大一点。"
-                    )
 
         except Exception as exc:  # noqa: BLE001 - 兜底，别让线程静默死掉
             self.last_error = f"{type(exc).__name__}: {exc}"
             self.callbacks.on_error(self.last_error)
+
+        # 因为步数上限停下时，**必须把原因写进最终回答**。
+        #
+        # 原来这里只调了 on_status（界面上的瞬时状态），用户看到的是
+        # 「跑了一堆步骤，然后什么都没有了」—— 不知道为什么停、也不知道
+        # 还能继续。所以改成拼进 final_text，它会作为一条助手消息留在对话里。
+        if hit_limit:
+            notice = (
+                f"⚠️ 我已经执行了 {self.max_steps} 步，到了本轮上限，所以先停下。\n"
+                "任务还没做完 —— 你可以直接说「继续」，我会接着往下做；"
+                "或者在工作台把「执行步数」调大一点（当前 "
+                f"{self.max_steps} 步）。"
+            )
+            if final_text.strip():
+                final_text = final_text.strip() + "\n\n" + notice
+            else:
+                final_text = notice
 
         # 这一轮如果一直失败，收尾时提醒用户一下 ——
         # 免得模型把「没做成」轻描淡写成「已完成」。

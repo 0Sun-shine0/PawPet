@@ -119,6 +119,36 @@ def main() -> int:
         content_h = scroll.property("contentHeight")
         col_h = right.property("height")
 
+        # ---------------------------------------------------------- 输入框
+        # **输入框必须永远可见。** 用户报过两次：一次是它被「点一下就跑」
+        # 那张 300px 的卡片推到折叠线以下（得先滚一下才能打字），
+        # 一次是它悬在窗口中间、下面一大片空白。
+        #
+        # 根因都是「输入卡片在滚动区里面」。现在它是右栏 ColumnLayout 的
+        # 直接孩子、带 Layout.preferredHeight，而滚动区带 fillHeight。
+        # 这三条断言把这个结构钉住 —— 以后谁再把输入框挪回滚动区就会红。
+        card = page.findChild(QObject, "inputCard", Qt.FindChildrenRecursively)
+        pane = page.findChild(QObject, "aiRightPane", Qt.FindChildrenRecursively)
+        area = page.findChild(QObject, "aiInput", Qt.FindChildrenRecursively)
+        if card is None or pane is None or area is None:
+            check(f"{width}x{height}：找得到输入卡片", False,
+                  "inputCard / aiRightPane / aiInput 缺一个")
+        else:
+            card_y = card.property("y")
+            card_h = card.property("height")
+            card_w = card.property("width")
+            pane_h = pane.property("height")
+            check(f"{width}x{height}：输入框有宽度（没被嵌进滚动区）",
+                  card_w > 100, f"宽度只有 {card_w:.0f}")
+            check(f"{width}x{height}：输入框贴着右栏底部",
+                  pane_h > 0 and abs(card_y + card_h - pane_h) <= 20,
+                  f"输入框底部 {card_y + card_h:.0f} vs 右栏 {pane_h:.0f}"
+                  " —— 悬在中间了")
+            check(f"{width}x{height}：输入框在滚动区之外",
+                  card_y >= scroll.property("y") + viewport_h - 2,
+                  f"输入框 y={card_y:.0f}，滚动区底 {viewport_h:.0f}"
+                  " —— 还在滚动区里面")
+
         # 1. 列的高度必须是「内容决定的」，不能被视口钉死
         #    （钉死就是之前那个 bug：内容被压没、还滚不动）
         check(f"{width}x{height}：列高来自内容而不是视口",

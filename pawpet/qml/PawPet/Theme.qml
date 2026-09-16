@@ -21,46 +21,68 @@ QtObject {
         return Math.round(value * scale)
     }
 
+    // ------------------------------------------------------- 用户定制配色
+    /* 「通过对话定制主题」的读取入口。
+
+       颜色值不再写死在这里，而是从 Backend 拿（存在数据目录的 theme.json）。
+       这样才能做到：不碰任何源码、改完立刻生效（走 Qt 属性通知）、
+       打包后也能用（打包后资源目录是只读的，数据目录才写得进去）。
+
+       为什么不用「用户放一个 Theme.qml 覆盖」那种做法：Theme.qml 带
+       pragma Singleton，模块解析对同名类型是「先找到的赢」，而导入路径
+       顺序不可靠 —— 靠它做覆盖是碰运气。而且打包后根本没有 .qml 文件可改。
+
+       兜底值就是下面那些字面量：Backend 还没建好的那一瞬间 QML 可能
+       已经在求值了，这时候不能返回 undefined，否则界面上会出现
+       「颜色未定义」的一堆警告和黑块。 */
+    function pick(key, fallback) {
+        if (!backend)
+            return fallback
+        var map = backend.themeColors
+        if (!map)
+            return fallback
+        var value = map[key]
+        return (value && String(value).length > 0) ? value : fallback
+    }
+
     // ---------------------------------------------------------- 界面配色
     /* 粉白暖色系。
-       原来是深紫黑（#14121c），偏「开发者工具」的味道；泛用户第一次打开
-       会觉得冷、有距离感。改成粉白之后更像日常小软件，配小爪这个形象也更搭。
+       默认值原来在这里写死；现在作为 pick() 的兜底值保留在调用处。
 
        配色逻辑：
        * 底色是很淡的粉白（不是纯白，纯白看久了刺眼）
        * 文字用暖调的深灰紫，不用纯黑 —— 纯黑压在粉底上显得硬
        * 强调色用暖粉 + 蜜桃，和形象上的腮红、耳朵呼应
        * 每个功能色（专注/休息/提醒）都配一个 soft 版本当浅底，
-         浅底 + 同色系深字，比「深底 + 白字」柔和得多 */
-    readonly property color bg:          "#fdf7f9"   // 页面底：很淡的粉白
-    readonly property color surface:     "#ffffff"   // 卡片：纯白浮在粉底上
-    readonly property color surfaceAlt:  "#fdf1f5"   // 次级块：再淡一点的粉
-    readonly property color surfaceHi:   "#fbe6ee"   // 高亮/悬停
-    readonly property color border:      "#f0d4e0"   // 描边：淡粉
-    readonly property color borderSoft:  "#f7e4ec"   // 更淡的描边
+         浅底 + 同色系深字，比「深底 + 白字」柔和得多
 
-    readonly property color text:        "#4a3b45"   // 正文：暖深灰紫，不是纯黑
-    readonly property color textDim:     "#7d6577"   // 次要文字
-    // 最弱一级：说明、时间戳、收尾交代。
-    // 原来定的是 #b09aa6 —— 深色主题上「弱」是暗下去，浅色主题上「弱」
-    // 是**发灰变淡**，压在白底上只有 2.8:1 的对比度，实机截图里看着发虚。
-    // 提到 #9a8494 之后还有层次感，但读得清了。
-    readonly property color textFaint:   "#9a8494"
+       用户能在设置里改 17 项（见 pawpet/theme.py 的 ROLES）。
+       rose / roseSoft 刻意不开放：错误色如果被改成和背景相近，
+       用户就看不到失败了。 */
+    readonly property color bg:          pick("bg",          "#fdf7f9")
+    readonly property color surface:     pick("surface",     "#ffffff")
+    readonly property color surfaceAlt:  pick("surfaceAlt",  "#fdf1f5")
+    readonly property color surfaceHi:   pick("surfaceHi",   "#fbe6ee")
+    readonly property color border:      pick("border",      "#f0d4e0")
+    readonly property color borderSoft:  pick("borderSoft",  "#f7e4ec")
 
-    readonly property color accent:      "#f4879f"   // 主强调：暖粉
-    readonly property color accentSoft:  "#fde8ee"   // 主强调的浅底
-    readonly property color violet:      "#b48ae0"   // 紫（休息/次要）
-    readonly property color violetSoft:  "#f3eafd"
-    readonly property color mint:        "#5fc4ad"   // 薄荷（完成/成功）
-    readonly property color mintSoft:    "#e6f7f2"
-    readonly property color gold:        "#e8ab4f"   // 琥珀（提醒/警告）
-    readonly property color goldSoft:    "#fdf3e2"
-    readonly property color rose:        "#e8607a"   // 玫红（错误/危险）
+    readonly property color text:        pick("text",        "#4a3b45")
+    readonly property color textDim:     pick("textDim",     "#7d6577")
+    readonly property color textFaint:   pick("textFaint",   "#9a8494")
+    readonly property color accent:      pick("accent",      "#f4879f")
+    readonly property color accentSoft:  pick("accentSoft",  "#fde8ee")
+    readonly property color violet:      pick("violet",      "#b48ae0")
+    readonly property color violetSoft:  pick("violetSoft",  "#f3eafd")
+    readonly property color mint:        pick("mint",        "#5fc4ad")
+    readonly property color mintSoft:    pick("mintSoft",    "#e6f7f2")
+    readonly property color gold:        pick("gold",        "#e8ab4f")
+    readonly property color goldSoft:    pick("goldSoft",    "#fdf3e2")
+    // 错误色固定，不给用户改（见上面说明）
+    readonly property color rose:        "#e8607a"
     readonly property color roseSoft:    "#fdeaee"
-
-    readonly property color focusColor:  "#f4879f"
-    readonly property color shortColor:  "#5fc4ad"
-    readonly property color longColor:   "#b48ae0"
+    readonly property color focusColor:  pick("accent",      "#f4879f")
+    readonly property color shortColor:  pick("mint",        "#5fc4ad")
+    readonly property color longColor:   pick("violet",      "#b48ae0")
 
     // ---------------------------------------------------------- 宠物配色
     // 形象本身是奶白+蜜桃的小猫，配粉白界面正合适，微调一下描边让它

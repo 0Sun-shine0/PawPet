@@ -124,6 +124,13 @@ QML_DIR = RESOURCE_DIR / "pawpet" / "qml"
 if not QML_DIR.exists():          # 开发模式下走这里
     QML_DIR = PACKAGE_DIR / "qml"
 
+# 用户自己的界面配色。
+#
+# 放数据目录而不是资源目录：打包后资源是只读的（解包到 _MEIPASS、
+# 退出就删），只有数据目录能持久写。用户（或模型）通过对话改的主题
+# 存在这里，升级不会覆盖掉。
+THEME_FILE = ROOT / "theme.json"
+
 DEBUG = bool(os.environ.get("PAWPET_DEBUG"))
 
 

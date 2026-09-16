@@ -121,6 +121,35 @@ def main() -> int:
         pump(30)
         grab(f"01-{key}")
 
+    # 设置页滚到「界面配色」那一段单独截一张：它是新加的，
+    # 默认在折叠线以下，整页截图看不到。
+    dash.setProperty("currentPage", "settings")
+    pump(30)
+    settings_scroll = dash.findChild(QObject, "settingsScroll",
+                                     Qt.FindChildrenRecursively)
+    if settings_scroll is None:
+        # 没有 objectName 就退而求其次：把所有 Flickable 里内容最高的那个滚下去
+        for child in dash.findChildren(QObject):
+            if "Flickable" in child.metaObject().className():
+                content = float(child.property("contentHeight") or 0)
+                viewport = float(child.property("height") or 0)
+                if content > viewport * 1.4 and child.property("visible"):
+                    settings_scroll = child
+                    break
+    if settings_scroll is not None:
+        from PySide6.QtCore import QMetaObject as _QMO2
+        _QMO2.invokeMethod(settings_scroll, "positionViewAtEnd")
+        pump(20)
+        _QMO2.invokeMethod(settings_scroll, "positionViewAtBeginning")
+        pump(20)
+        settings_scroll.setProperty(
+            "contentY",
+            float(settings_scroll.property("contentHeight")) * 0.42)
+        pump(20)
+        grab("01-settings-配色")
+    else:
+        print("    找不到设置页的滚动区，跳过配色截图")
+
     # AI 页：空对话（现成任务卡片）
     print("\nAI 页：")
     dash.setProperty("currentPage", "ai")

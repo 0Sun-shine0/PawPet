@@ -20,7 +20,7 @@ Switch {
         radius: height / 2
         color: control.checked ? control.checkedColor : Theme.surfaceHi
         border.width: 1
-        border.color: control.checked ? Qt.rgba(1, 1, 1, 0.18) : Theme.border
+        border.color: control.checked ? Qt.rgba(0, 0, 0, 0.06) : Theme.border
 
         Behavior on color { ColorAnimation { duration: Theme.animFast } }
 
@@ -31,7 +31,11 @@ Switch {
             radius: 9
             y: 2
             x: control.checked ? track.width - width - 3 : 3
-            color: control.checked ? "#ffffff" : "#8b83a8"
+            // 关的时候原来用 #8b83a8（深色主题的灰紫），在粉白底上像块脏点。
+            // 改成白球 + 淡描边，一眼能看出「这是个可以拨的开关」。
+            color: "#ffffff"
+            border.width: control.checked ? 0 : 1
+            border.color: Theme.border
 
             Behavior on x {
                 NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutBack; easing.overshoot: 1.4 }

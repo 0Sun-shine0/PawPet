@@ -71,6 +71,8 @@ class AiController(QObject):
     settingsChanged = Signal()
     memoryChanged = Signal()
     modelsChanged = Signal()
+    # 步骤时间线变了（「边做边说」）
+    stepsChanged = Signal()
     toastRequested = Signal(str, str)
     # 自动记忆学到了东西。和 _learnedIn 分开：
     # _learnedIn 是线程桥（工作线程 → 主线程），这个是主线程上的对外广播，
@@ -82,8 +84,10 @@ class AiController(QObject):
     # 不然会出现「问了新问题，它把上一轮的结果又输出一遍」。
     _statusIn = Signal(str, int)
     _eventIn = Signal(object, int)
-    _finishedIn = Signal(str, str, int)
-    _approvalIn = Signal(str, str, str, str)
+    # (最终文本, 错误, 轮次, 收尾交代) —— 第四项是「干了几件事、文件存哪了、
+    # 能不能撤回」，由执行层如实统计，界面上作为助手气泡下面的一行小字。
+    _finishedIn = Signal(str, str, int, str)
+    _approvalIn = Signal(str, str, str, str, bool, object)
     _modelsIn = Signal(bool, object)
     _learnedIn = Signal(str, object, int)
     _batchIn = Signal(object)
@@ -122,6 +126,9 @@ class AiController(QObject):
         # 当前这一轮用户的原话。自动记忆要用它 —— 不能回头去消息列表里
         # 找「最后一条用户消息」，那时用户可能已经追问下一句了。
         self._turn_user_text = ""
+        # 「边做边说」的时间线：最近几步的人话标签。
+        # 新一轮开始时清空，不然会看到上一轮的步骤。
+        self._steps: list[str] = []
 
         self.actions.level = str(store.settings.get("ai_level", LEVEL_CONFIRM))
 
@@ -272,6 +279,42 @@ class AiController(QObject):
         return (f"当前 {steps} 步。一步 = 模型看一次结果再决定下一步，"
                 f"一步里可以同时做几个动作，所以 {steps} 步通常能完成不少操作。"
                 f"可调范围 {MIN_MAX_STEPS}–{MAX_MAX_STEPS}。")
+
+    # ------------------------------------------------------------ 现成任务
+    # 「首页直接列几个能点就跑的任务」。
+    # 真正的门槛不是模型能力，是用户不知道能说什么 —— 空输入框前面
+    # 大部分人只会打一句「你好」。给几条具体的例子，转化率完全不同。
+    @Property("QVariantList", constant=True)
+    def taskTemplates(self) -> list:
+        from .tasks import all_templates
+
+        return all_templates()
+
+    @Property("QVariantList", constant=True)
+    def taskGroups(self) -> list:
+        """按人群分好组的模板，界面上分栏显示。"""
+        from .tasks import groups
+
+        return groups()
+
+    @Slot(str)
+    def runTemplate(self, key: str) -> None:
+        """点了现成任务就直接开跑，不用用户再打字。"""
+        from .tasks import find
+
+        template = find(key)
+        if template is None:
+            return
+        if not self.configured:
+            self.toastRequested.emit("还没配置模型", "去「AI 操作 → 设置」填一个 API Key")
+            return
+        if self._running:
+            self.toastRequested.emit("正在忙", "等这一轮跑完再点，或者先按停止")
+            return
+        # 说明文字也进对话，用户回看时知道这是从模板点出来的
+        self._push("info", f"📌 现成任务：{template.label}")
+        self.send(template.prompt)
+
 
     # ------------------------------------------------------------ 跨会话记忆
     def _memory(self):
@@ -605,6 +648,9 @@ class AiController(QObject):
             # 失败时给出「接下来怎么办」的一行说明。
             # 让用户看得懂卡在哪、正打算怎么绕 —— 而不是只看到一句报错。
             "recovery": extra.get("recovery", ""),
+            # 「做完有交代」：干了几件事、文件存哪了、能不能撤回。
+            # 只有这一轮的**最终**回答才带，中间过程不需要。
+            "report": extra.get("report", ""),
         }
         self._messages.append(item)
         del self._messages[:-MAX_CHAT_ITEMS]
@@ -656,11 +702,40 @@ class AiController(QObject):
     def hasPendingApproval(self) -> bool:
         return self._pending is not None
 
-    def _show_approval(self, request_id: str, tool: str, risk: str, summary: str) -> None:
+    def _show_approval(self, request_id: str, tool: str, risk: str, summary: str,
+                       question: bool = False, options: object = None) -> None:
         self._pending = {
             "id": request_id, "tool": tool, "risk": risk, "summary": summary,
+            "question": bool(question),
+            "options": [str(item) for item in (options or [])],
         }
         self.approvalChanged.emit()
+
+    @Property(bool, notify=approvalChanged)
+    def hasPendingQuestion(self) -> bool:
+        """当前挂着的是「问你一句」还是普通审批？
+
+        界面靠它决定显示哪张卡片：提问要一个输入框（或者几个选项按钮），
+        审批要「允许 / 拒绝」。两者走的是同一条阻塞通道。
+        """
+        return bool(self._pending and self._pending.get("question"))
+
+    @Slot(str)
+    def answerPending(self, text: str) -> None:
+        """回答小爪提出的问题（不是审批，所以内容任意）。"""
+        if not self._pending:
+            return
+        request_id = self._pending["id"]
+        with self._approval_lock:
+            entry = self._approvals.get(request_id)
+        if entry is not None:
+            entry["answer"] = (text or "").strip()
+            entry["result"] = bool(entry["answer"])
+            entry["event"].set()
+        # 同 resolveApproval：不管工作线程那边还在不在，卡片都要收起来
+        if self._pending.get("id") == request_id:
+            self._pending = None
+            self.approvalChanged.emit()
 
     def _apply_batch(self, items: object) -> None:
         """主线程：把整批待确认操作显示出来。"""
@@ -671,10 +746,14 @@ class AiController(QObject):
     def resolveApproval(self, request_id: str, approved: bool) -> None:
         with self._approval_lock:
             entry = self._approvals.get(request_id)
-        if entry is None:
-            return
-        entry["result"] = bool(approved)
-        entry["event"].set()
+        if entry is not None:
+            entry["result"] = bool(approved)
+            entry["event"].set()
+        # 卡片无论如何都要收起来。
+        #
+        # 原来这里在 entry 是 None 时直接 return，于是：工作线程等超时之后
+        # 卡片会一直挂在界面上，用户点了「允许」它也不消失 —— 看起来就是
+        # 界面卡死了。用户点了按钮就必须有反应。
         if self._pending and self._pending.get("id") == request_id:
             self._pending = None
             self.approvalChanged.emit()
@@ -729,6 +808,9 @@ class AiController(QObject):
         self._turn += 1
         turn = self._turn
         self._turn_user_text = text
+        # 新一轮：上一轮的步骤时间线要清掉，否则「正在做」会串轮
+        self._steps = []
+        self.stepsChanged.emit()
 
         self._thread = threading.Thread(
             target=self._worker, args=(text, turn), name="pawpet-ai", daemon=True
@@ -745,7 +827,7 @@ class AiController(QObject):
         try:
             client = self._client()
             if not client.configured:
-                self._finishedIn.emit("", "没有配置 API Key", turn)
+                self._finishedIn.emit("", "没有配置 API Key", turn, "")
                 return
 
             self.runner = AgentRunner(
@@ -768,7 +850,10 @@ class AiController(QObject):
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
         finally:
-            self._finishedIn.emit(final, error, turn)
+            report = ""
+            if self.runner is not None:
+                report = getattr(self.runner, "last_summary", "") or ""
+            self._finishedIn.emit(final, error, turn, report)
 
     def _build_history(self) -> list:
         """把界面上的对话还原成模型消息，让多轮对话有上下文。
@@ -815,6 +900,9 @@ class AiController(QObject):
                        ok=False, detail=event.detail)
             return
         if event.kind == "tool":
+            # 「边做边说」的素材：工具执行前把这一步记进时间线，
+            # 状态行显示「正在做：xxx → 刚做完：yyy」。
+            self._note_step(event)
             image_path = ""
             if event.image_png:
                 image_path = self._write_preview(event.image_png)
@@ -836,7 +924,38 @@ class AiController(QObject):
             return
         self._push("info", event.text)
 
-    def _apply_finished(self, text: str, error: str, turn: int = 0) -> None:
+    # -------------------------------------------------- 边做边说：步骤时间线
+    # 用户的原话是「每步显示『正在打开浏览器 → 找到导出按钮』」。
+    # 关键不是把工具名念出来，而是让他随时知道**现在在干什么**。
+    # 所以这里存的是人话版的标签（工具事件里的 text 已经是
+    # _human_summary 生成的人话），不是 tool 名。
+    MAX_STEPS_SHOWN = 4
+
+    def _note_step(self, event: StepEvent) -> None:
+        label = (event.text or "").strip()
+        if not label or event.tool == "screenshot":
+            # 「看屏幕」是每轮开头自动做的事，写进时间线只会占位置
+            return
+        if label not in self._steps:
+            self._steps.append(label)
+        del self._steps[:-self.MAX_STEPS_SHOWN]
+        self.stepsChanged.emit()
+
+    @Property("QVariantList", notify=stepsChanged)
+    def stepTimeline(self) -> list:
+        """最近几步的人话标签，最早的在前。界面拿它画「→ 甲 → 乙」。"""
+        return list(getattr(self, "_steps", []))
+
+    @Property(str, notify=stepsChanged)
+    def progressLine(self) -> str:
+        """一行进度：「刚做完 A → 刚做完 B」，最后一步单独高亮。"""
+        steps = getattr(self, "_steps", [])
+        if not steps:
+            return ""
+        return " → ".join(steps)
+
+    def _apply_finished(self, text: str, error: str, turn: int = 0,
+                        report: str = "") -> None:
         if not self._is_current(turn):
             # 这一轮早被新一轮取代了：不要再动界面状态，
             # 更不要起自动记忆线程（那正是「上一轮结果插进新一轮」的来源）
@@ -866,7 +985,16 @@ class AiController(QObject):
                     last_assistant = (item.get("text") or "").strip()
                     break
             if last_assistant != text.strip():
-                self._push("assistant", text)
+                self._push("assistant", text, report=report)
+            elif report:
+                # 收尾文字和上一条助手消息一样（模型在循环中间已经说过），
+                # 那就别重复推一条，但「交代」还是得让用户看到 ——
+                # 挂到那条已有的消息上。
+                for item in reversed(self._messages):
+                    if item.get("role") == "assistant":
+                        item["report"] = report
+                        self.messagesChanged.emit()
+                        break
             self.toastRequested.emit("任务结束", text[:80])
 
         # 任务结束后，后台判断这一轮有没有值得长期记住的东西。
@@ -944,21 +1072,53 @@ class AiController(QObject):
     def request_approval_blocking(self, request: ApprovalRequest) -> bool:
         """在工作线程里被调用，阻塞等待用户点按钮。"""
         request_id = f"a{int(time.time() * 1000)}"
-        entry = {"event": threading.Event(), "result": False}
+        entry = {"event": threading.Event(), "result": False, "answer": ""}
         with self._approval_lock:
             self._approvals[request_id] = entry
 
-        self._approvalIn.emit(request_id, request.tool_name, request.risk, request.summary)
+        self._approvalIn.emit(request_id, request.tool_name, request.risk,
+                              request.summary, bool(request.question),
+                              list(request.options or []))
 
         # 最多等 5 分钟，避免用户走开后线程永久挂着
         if not entry["event"].wait(timeout=300):
             with self._approval_lock:
                 self._approvals.pop(request_id, None)
+            if request.question and self._pending \
+                    and self._pending.get("id") == request_id:
+                self._pending = None
+                self.approvalChanged.emit()
             return False
 
         with self._approval_lock:
             self._approvals.pop(request_id, None)
         return bool(entry["result"])
+
+    def ask_user_blocking(self, question: str, options: list) -> str:
+        """把模型的问题抛给用户，阻塞等他的回答（和审批共用一条通道）。
+
+        超时同样按「没回答」处理 —— 用户可能关着屏幕走开了，
+        这时候让工作线程一直挂着没有意义。
+        """
+        request_id = f"q{int(time.time() * 1000)}"
+        entry = {"event": threading.Event(), "result": False, "answer": ""}
+        with self._approval_lock:
+            self._approvals[request_id] = entry
+
+        self._approvalIn.emit(request_id, "ask_user", "read", question, True,
+                              list(options or []))
+
+        if not entry["event"].wait(timeout=300):
+            with self._approval_lock:
+                self._approvals.pop(request_id, None)
+            if self._pending and self._pending.get("id") == request_id:
+                self._pending = None
+                self.approvalChanged.emit()
+            return ""
+
+        with self._approval_lock:
+            self._approvals.pop(request_id, None)
+        return str(entry.get("answer") or "")
 
     # ------------------------------------------------------------ 合并确认
     @Property("QVariantList", notify=approvalChanged)
@@ -1095,7 +1255,7 @@ class AiController(QObject):
             # 这样它的回显不会被 _is_current 丢掉。
             turn = self._turn
             ok, message = self._client().test_connection()
-            self._finishedIn.emit("", "" if ok else message, turn)
+            self._finishedIn.emit("", "" if ok else message, turn, "")
             self._statusIn.emit("空闲", turn)
             self._eventIn.emit(StepEvent(
                 kind="info" if ok else "error",
@@ -1239,3 +1399,6 @@ class _QtCallbacks(AgentCallbacks):
     def request_approval_batch(self, items: list) -> dict:
         """把整批操作一次问完，而不是逐个弹卡片。"""
         return self._c.request_approval_batch_blocking(items)
+
+    def ask_user(self, question: str, options: list) -> str:
+        return self._c.ask_user_blocking(question, options)

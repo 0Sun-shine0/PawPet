@@ -134,19 +134,9 @@ Window {
                       ? Theme.gold
                       : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.45)
 
-        // 左侧一条彩色指示条，颜色跟着状态走
-        Rectangle {
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            width: 4
-            radius: 2
-            color: backend.ai.hasPendingApproval ? Theme.gold
-                 : bar.busy ? Theme.mint
-                 : Theme.accent
-
-            Behavior on color { ColorAnimation { duration: Theme.animNormal } }
-        }
+        // 状态用**描边颜色**表达，不再画左边那条竖色条。
+        // 用户明确说过不要「左边一根大竖线」—— 那是告警框的语汇，
+        // 而这个窗口是「小爪在跟你说话」。描边 + 右上角的圆点已经够了。
 
         ColumnLayout {
             id: content
@@ -154,7 +144,6 @@ Window {
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.margins: 14
-            anchors.leftMargin: 18
             spacing: 9
 
             // ---------------------------------------------------- 输入行
@@ -223,10 +212,15 @@ Window {
                 spacing: 8
 
                 Rectangle {
-                    implicitWidth: 7
-                    implicitHeight: 7
-                    radius: 3.5
+                    implicitWidth: 8
+                    implicitHeight: 8
+                    radius: 4
                     color: bar.busy ? Theme.mint : Theme.textFaint
+                    // 浅色底上单靠薄荷色不够显眼，加一圈淡描边把它托起来
+                    border.width: 1
+                    border.color: bar.busy ? Qt.rgba(Theme.mint.r, Theme.mint.g,
+                                                     Theme.mint.b, 0.45)
+                                           : Theme.border
                     SequentialAnimation on opacity {
                         running: bar.busy
                         loops: Animation.Infinite
@@ -238,7 +232,9 @@ Window {
                 Text {
                     Layout.fillWidth: true
                     text: backend.ai.status
-                    color: bar.busy ? Theme.mint : Theme.textFaint
+                    // 薄荷色当正文太浅了（原来深色底上没问题），
+                    // 浅底上要用深一点的字，只让点点担颜色
+                    color: bar.busy ? Theme.text : Theme.textFaint
                     font.family: Theme.font
                     font.pixelSize: Theme.fsTiny
                     elide: Text.ElideRight
@@ -282,7 +278,11 @@ Window {
                         spacing: 1
                         Text {
                             Layout.fillWidth: true
-                            text: "小爪想" + (backend.ai.pendingApproval.summary || "")
+                            // 提问时不加「小爪想」前缀 —— 那句已经是一个完整的问句，
+                            // 拼起来会变成「小爪想「下载」里有两个文件夹…」这种病句
+                            text: backend.ai.hasPendingQuestion
+                                  ? (backend.ai.pendingApproval.summary || "")
+                                  : ("小爪想" + (backend.ai.pendingApproval.summary || ""))
                             color: Theme.gold
                             font.family: Theme.font
                             font.pixelSize: Theme.fsSmall
@@ -290,11 +290,34 @@ Window {
                             elide: Text.ElideRight
                         }
                         Text {
-                            text: "需要你点头才会执行"
+                            text: backend.ai.hasPendingQuestion
+                                  ? "要你拿个主意，答完我接着干"
+                                  : "需要你点头才会执行"
                             color: Theme.textFaint
                             font.family: Theme.font
                             font.pixelSize: Theme.fsTiny
                         }
+                    }
+
+                    // 提问：给输入框 + 快捷选项（和 AI 页里那张卡片一致）
+                    PawField {
+                        Layout.fillWidth: true
+                        visible: backend.ai.hasPendingQuestion
+                        placeholderText: "回答小爪，或者直接说「你自己定」"
+                        onAccepted: {
+                            if (text.trim().length > 0) {
+                                backend.ai.answerPending(text)
+                                text = ""
+                            }
+                        }
+                    }
+
+                    PawButton {
+                        visible: backend.ai.hasPendingQuestion
+                        text: "你自己定"
+                        variant: "ghost"
+                        small: true
+                        onClicked: backend.ai.answerPending("你自己看着办，按最合理的来")
                     }
 
                     PawButton {
@@ -302,12 +325,14 @@ Window {
                         glyph: "✓"
                         variant: "primary"
                         small: true
+                        visible: !backend.ai.hasPendingQuestion
                         onClicked: backend.ai.resolvePending(true)
                     }
                     PawButton {
                         text: "拒绝"
                         variant: "ghost"
                         small: true
+                        visible: !backend.ai.hasPendingQuestion
                         onClicked: backend.ai.resolvePending(false)
                     }
                 }

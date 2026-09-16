@@ -88,7 +88,9 @@ Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: Theme.radiusMd
-                        color: "#0d0b14"
+                        // 截图底板。原来是近黑色（#0d0b14），深色主题下像「显示器」；
+                        // 浅色主题里它变成一大块黑疤。浅灰粉底 + 淡描边同样能衬托截图。
+                        color: Theme.surfaceAlt
                         border.width: 1
                         border.color: Theme.border
                         clip: true
@@ -334,6 +336,67 @@ Item {
                         text: "清空"
                         variant: "ghost"
                         onClicked: backend.ai.clear()
+                    }
+                }
+            }
+
+            // -------------------------------------------------- 边做边说
+            // 「每步显示：正在打开浏览器 → 找到导出按钮」。
+            // 只在跑的时候出现：跑完了这些步骤会留在下面的动作卡片里，
+            // 状态条再挂着就是噪音。
+            //
+            // 和对话区里的卡片**不重复**：那里是完整记录（带输出、截图、
+            // 耗时），这里是最近几步的即时进度 —— 用户眼睛不用离开顶部
+            // 就知道它现在在干什么，还能就地按停。
+            Rectangle {
+                Layout.fillWidth: true
+                visible: backend.ai.running
+                         && backend.ai.progressLine.length > 0
+                implicitHeight: progressRow.implicitHeight + 18
+                radius: Theme.radiusMd
+                color: Theme.surfaceAlt
+                border.width: 1
+                border.color: Theme.borderSoft
+
+                RowLayout {
+                    id: progressRow
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 10
+                    spacing: 7
+
+                    Rectangle {
+                        implicitWidth: 7
+                        implicitHeight: 7
+                        radius: 3.5
+                        color: Theme.mint
+                        SequentialAnimation on opacity {
+                            running: backend.ai.running
+                            loops: Animation.Infinite
+                            NumberAnimation { to: 0.25; duration: 520 }
+                            NumberAnimation { to: 1.0; duration: 520 }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: backend.ai.progressLine
+                        textFormat: Text.PlainText
+                        color: Theme.textDim
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        // 从左边截断：用户最关心的是「刚刚做了什么」，
+                        // 那是链条的末尾，不能被截掉。
+                        elide: Text.ElideLeft
+                    }
+
+                    PawButton {
+                        small: true
+                        variant: "ghost"
+                        text: "停"
+                        implicitWidth: 38
+                        onClicked: backend.ai.stop()
                     }
                 }
             }
@@ -874,6 +937,7 @@ Item {
                         seconds: modelData.seconds
                         imageSource: modelData.image
                         recovery: modelData.recovery || ""
+                        report: modelData.report || ""
                     }
                 }
 
@@ -901,10 +965,7 @@ Item {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: "试试这样说：\n" +
-                              "「屏幕上这个报错是什么意思」\n" +
-                              "「打开记事本，写下明天要做的三件事」\n" +
-                              "「帮我把这段话记成待办」"
+                        text: "屏幕上的事、电脑里的事，说一句就行。\n下面有现成的，点一下我就开始干。"
                         color: Theme.textFaint
                         font.family: Theme.font
                         font.pixelSize: Theme.fsSmall
@@ -915,10 +976,307 @@ Item {
                 }
             }
 
+            // -------------------------------------------------- 现成任务
+            // 「首页直接列几个能点就跑的任务」。
+            //
+            // 放这里而不是塞进空状态里：空状态只在一条消息都没有时出现，
+            // 而用户干完一件事之后往往还想再干一件 —— 那时候模板照样该在。
+            // 这里只在**空闲**（没在跑、也没挂着待确认）时显示，
+            // 免得任务执行中界面还在劝他再点一个。
+            Rectangle {
+                id: templateCard
+                // QML 的 id 不是 objectName，界面自检脚本靠这个名字找它
+                objectName: "templateCard"
+                Layout.fillWidth: true
+                visible: !backend.ai.running
+                         && !backend.ai.hasPendingApproval
+                         && !backend.ai.hasPendingBatch
+                implicitHeight: tmplColumn.implicitHeight + 26
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.borderSoft
+
+                property int activeGroup: 0
+
+                ColumnLayout {
+                    id: tmplColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 14
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            text: "✨"
+                            font.pixelSize: Theme.px(16)
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "点一下就跑"
+                            color: Theme.text
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsBody
+                            font.bold: true
+                        }
+                        Text {
+                            text: "不知道说什么好？挑一个"
+                            color: Theme.textFaint
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsTiny
+                        }
+                    }
+
+                    // 分人群切换：学生 / 上班党 / 日常
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Repeater {
+                            model: backend.ai.taskGroups
+
+                            delegate: Rectangle {
+                                implicitWidth: groupText.implicitWidth + 26
+                                implicitHeight: 28
+                                radius: 14
+                                color: templateCard.activeGroup === index
+                                       ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.16)
+                                       : (groupMouse.containsMouse ? Theme.surfaceHi : Theme.surfaceAlt)
+                                border.width: 1
+                                border.color: templateCard.activeGroup === index
+                                              ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.45)
+                                              : Theme.borderSoft
+
+                                Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                                MouseArea {
+                                    id: groupMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: templateCard.activeGroup = index
+                                }
+
+                                Text {
+                                    id: groupText
+                                    anchors.centerIn: parent
+                                    text: modelData.icon + " " + modelData.label
+                                    color: templateCard.activeGroup === index
+                                           ? Theme.accent : Theme.textDim
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsSmall
+                                    font.bold: templateCard.activeGroup === index
+                                }
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    // 当前人群下的任务。两列排，一屏能看全。
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 8
+                        rowSpacing: 8
+
+                        Repeater {
+                            model: {
+                                var groups = backend.ai.taskGroups
+                                if (groups.length === 0)
+                                    return []
+                                var idx = Math.max(0, Math.min(groups.length - 1,
+                                                               templateCard.activeGroup))
+                                return groups[idx].items
+                            }
+
+                            delegate: Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 54
+                                radius: Theme.radiusMd
+                                color: tmplMouse.containsMouse
+                                       ? Theme.surfaceHi : Theme.surfaceAlt
+                                border.width: 1
+                                border.color: tmplMouse.containsMouse
+                                              ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.4)
+                                              : Theme.borderSoft
+
+                                Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                                MouseArea {
+                                    id: tmplMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.ai.runTemplate(modelData.key)
+                                }
+
+                                ColumnLayout {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 10
+                                    spacing: 2
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.label
+                                        color: Theme.text
+                                        font.family: Theme.font
+                                        font.pixelSize: Theme.fsSmall
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.hint
+                                        color: Theme.textFaint
+                                        font.family: Theme.font
+                                        font.pixelSize: Theme.fsTiny
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: !backend.ai.configured
+                        text: "还没有配置模型 —— 去左边「设置」里填一个 API Key 才能跑。"
+                        color: Theme.rose
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+
+            // -------------------------------------------------- 提问卡片
+            // 「拿不准就停一下问」的落地：模型信息不够时不猜，停在这里问。
+            // 和下面的审批卡片是两回事 —— 审批是「要不要做」，这里是
+            // 「你想怎么做」，所以给的是选项按钮或输入框，不是允许/拒绝。
+            Rectangle {
+                id: askCard
+                Layout.fillWidth: true
+                visible: backend.ai.hasPendingQuestion
+                implicitHeight: askColumn.implicitHeight + 26
+                radius: Theme.radiusLg
+                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.09)
+                border.width: 2
+                border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.45)
+
+                property var answerOptions: backend.ai.pendingApproval.options
+                                               ? backend.ai.pendingApproval.options : []
+
+                ColumnLayout {
+                    id: askColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 14
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            text: "💬"
+                            font.pixelSize: Theme.px(16)
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "小爪想先问你一句"
+                            color: Theme.accent
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsBody
+                            font.bold: true
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: backend.ai.pendingApproval.summary || ""
+                        color: Theme.text
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsBody
+                        wrapMode: Text.Wrap
+                        lineHeight: 1.4
+                    }
+
+                    // 有选项就用按钮（点一下就走），没有就给输入框。
+                    // 两种都留「跳过」的出口 —— 用户可能懒得答，
+                    // 卡着他比答错更烦。
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        visible: askCard.answerOptions.length > 0
+
+                        Repeater {
+                            model: askCard.answerOptions
+                            delegate: PawButton {
+                                small: true
+                                variant: "subtle"
+                                text: modelData
+                                onClicked: backend.ai.answerPending(modelData)
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        PawField {
+                            id: askField
+                            Layout.fillWidth: true
+                            placeholderText: "回答小爪，或者直接说你想怎么做"
+                            onAccepted: {
+                                if (text.trim().length > 0) {
+                                    backend.ai.answerPending(text)
+                                    text = ""
+                                }
+                            }
+                        }
+                        PawButton {
+                            text: "回答"
+                            variant: "primary"
+                            enabled: askField.text.trim().length > 0
+                            onClicked: {
+                                backend.ai.answerPending(askField.text)
+                                askField.text = ""
+                            }
+                        }
+                        PawButton {
+                            text: "你自己定"
+                            variant: "ghost"
+                            onClicked: {
+                                backend.ai.answerPending("你自己看着办，按最合理的来")
+                                askField.text = ""
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "不回答也行 —— 直接说「你自己定」，我会挑最稳妥的做法继续。"
+                        color: Theme.textFaint
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+
             // -------------------------------------------------- 审批卡片
             Rectangle {
                 Layout.fillWidth: true
-                visible: backend.ai.hasPendingApproval
+                // 提问卡和审批卡不能同时出现，样式也完全不同
+                visible: backend.ai.hasPendingApproval && !backend.ai.hasPendingQuestion
                 implicitHeight: approveColumn.implicitHeight + 26
                 radius: Theme.radiusLg
                 color: Qt.rgba(Theme.gold.r, Theme.gold.g, Theme.gold.b, 0.10)

@@ -86,44 +86,68 @@ Window {
         id: frame
         anchors.fill: parent
         anchors.margins: 9
-        color: Theme.surfaceHi
-        radius: Theme.radiusLg
+        color: Theme.surface
+        radius: Theme.radiusXl
         border.width: 1
-        border.color: Qt.rgba(bubble.accentColor.r, bubble.accentColor.g, bubble.accentColor.b, 0.55)
+        border.color: Theme.borderSoft
 
+        // 轻柔投影。浅色界面靠它和背景分层，比描边自然。
+        // 原来这里是「左边一条 4px 的竖色条」—— 用户明确说不要，
+        // 而且竖条会让气泡看起来像「告警框」而不是「说话」。
         Rectangle {
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            width: 4
-            radius: 2
-            color: bubble.accentColor
+            anchors.fill: parent
+            anchors.margins: -1
+            z: -1
+            radius: parent.radius + 1
+            color: "transparent"
+            border.width: 1
+            border.color: Qt.rgba(bubble.accentColor.r, bubble.accentColor.g,
+                                  bubble.accentColor.b, 0.18)
         }
 
         Column {
             id: col
-            x: 18
-            y: 14
+            x: 16
+            y: 13
             width: frame.width - 32
-            spacing: 4
+            spacing: 3
+
+            // 小圆点代替原来的竖条：既标出类型，又不抢视线
+            Row {
+                spacing: 6
+                Rectangle {
+                    width: 7
+                    height: 7
+                    radius: 3.5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: bubble.accentColor
+                }
+                Text {
+                    width: col.width - 13
+                    text: bubble.headline
+                    color: Theme.text
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsSmall
+                    font.bold: true
+                    wrapMode: Text.WordWrap
+                }
+            }
 
             Text {
                 width: parent.width
-                text: bubble.headline
-                color: bubble.accentColor
-                font.family: Theme.font
-                font.pixelSize: Theme.fsBody
-                font.bold: true
-                wrapMode: Text.WordWrap
-            }
-            Text {
-                width: parent.width
+                // **纯文本，绝不显示 Markdown。**
+                // 气泡是「小爪在说话」，不是渲染文档 ——
+                // 用户看到 **加粗** 这种记号只会觉得没做好。
                 text: bubble.body
+                textFormat: Text.PlainText
                 color: Theme.textDim
                 font.family: Theme.font
-                font.pixelSize: Theme.fsSmall
+                font.pixelSize: Theme.fsTiny
                 wrapMode: Text.WordWrap
+                lineHeight: 1.25
                 visible: bubble.body.length > 0
+                maximumLineCount: 4
+                elide: Text.ElideRight
             }
         }
     }

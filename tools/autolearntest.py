@@ -400,8 +400,14 @@ def main() -> int:
 
     try:
         wired.memoryEnabled = True
+        # _start_learning 现在要显式传「本轮用户原话」——
+        # 它不再回头去消息列表里找最后一条用户消息了（那会拿错文本，
+        # 见 tools/turntest.py）。轮次号也要给对，不然回调会被当过期丢掉。
         wired._push("user", "我平时都把窗口放左边，右边留给参考")
-        wired._start_learning("好的，明白了。")
+        wired._turn += 1
+        wired._turn_user_text = "我平时都把窗口放左边，右边留给参考"
+        wired._start_learning("我平时都把窗口放左边，右边留给参考",
+                             "好的，明白了。", wired._turn)
 
         # 一边等，一边转事件循环 —— 没有事件循环，跨线程排队的槽不会执行
         deadline = _time.time() + 10

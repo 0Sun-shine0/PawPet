@@ -30,7 +30,13 @@ from .actions import (
 from .advisor import Advisor, user_facing_failure
 from .batch import BatchItem, should_merge
 from .client import AIClient, AiError
-from .tools import TOOL_INDEX, ToolContext, describe_arguments, openai_tools
+from .tools import (
+    TOOL_INDEX,
+    ToolContext,
+    ToolSpec,
+    describe_arguments,
+    openai_tools,
+)
 
 DEFAULT_MAX_STEPS = 20
 # 步数上限的可选范围。上限不是越大越好：每一轮都要把上下文发给模型，
@@ -337,6 +343,9 @@ class AgentRunner:
         self.touched_paths: list[str] = []
         self.wrote_files = False
         self.last_summary = ""
+        # 这一轮用到了哪些外部 MCP 工具。收尾时要说一句，让用户知道
+        # 「刚才那件事是外部工具干的」—— 出问题时他才知道该去查哪个 server。
+        self._mcp_tools_used: set[str] = set()
         self.messages: list[dict] = [
             {"role": "system",
              "content": system_prompt(self.max_steps, self.memory_text,
@@ -362,6 +371,7 @@ class AgentRunner:
         self.touched_paths = []
         self.wrote_files = False
         self.last_summary = ""
+        self._mcp_tools_used = set()
 
     def reload_memory(self, memory_text: str) -> None:
         """换掉记忆并重建系统提示词。
@@ -481,6 +491,7 @@ class AgentRunner:
         self.touched_paths = []
         self.wrote_files = False
         self.last_summary = ""
+        self._mcp_tools_used = set()
 
         self._append_user(user_text)
         final_text = ""
@@ -532,7 +543,21 @@ class AgentRunner:
                 self._repair_tool_messages()
 
                 try:
-                    reply = self.client.chat(self.messages, tools=openai_tools())
+                    # 每步都重新拼一次工具清单：MCP server 是运行时才连上的，
+                    # 用户在会话中间连一个，下一步就该能用。
+                    #
+                    # 用 getattr 取而不是直接调：agent 的测试里塞的是极简的
+                    # 假 context，没有这个方法。测试桩不该为了一个可选能力
+                    # 被迫补齐接口。
+                    extra = []
+                    probe = getattr(self.context, "mcp_tools", None)
+                    if callable(probe):
+                        try:
+                            extra = probe() or []
+                        except Exception:  # noqa: BLE001 - 外部工具取不到不该拖垮整轮
+                            extra = []
+                    reply = self.client.chat(
+                        self.messages, tools=openai_tools(extra))
                 except AiError as exc:
                     self.last_error = str(exc)
                     self.callbacks.on_error(str(exc))
@@ -805,6 +830,22 @@ class AgentRunner:
     # -------------------------------------------------------------- 单步执行
     def _run_one(self, call, call_id: str):
         spec = TOOL_INDEX.get(call.name)
+        if spec is None and call.name.startswith("mcp_"):
+            # 外面接进来的 MCP 工具，不在内置表里。
+            #
+            # 给它一个**确认级**的合成 spec：用户自己接的 server 会干什么
+            # 我们并不知道，默认让它至少走一次「要不要执行」。按 read 放行
+            # 是不对的 —— 那等于给未知代码开了静默执行的口子。
+            #
+            # 不设成 danger 是因为那会绕过批量合并、每次都单独弹一个卡片，
+            # 接了一堆工具的 server 会把用户烦死。
+            spec = ToolSpec(
+                name=call.name,
+                description="外部 MCP 工具",
+                parameters={},
+                risk=Risk.CONFIRM,
+            )
+            self._mcp_tools_used.add(call.name)
         if spec is None:
             self._record_tool(call_id, call.name, f"未知工具：{call.name}", ok=False)
             return None
@@ -914,7 +955,10 @@ class AgentRunner:
                 "现在请直接用一两句话总结：你做了什么、结果是什么。"
                 "**不要再调用任何工具**，也不要重复工具的输出原文。"
             )
-            reply = self.client.chat(self.messages, tools=None)
+            # tools=[] 而不是 None：明确告诉服务端「这次不给任何工具」，
+            # 逼它说话。传 None 在部分兼容服务上等于「用你默认的」，
+            # 反而可能又调一次工具。
+            reply = self.client.chat(self.messages, tools=[])
             text = (reply.text or "").strip()
             if text:
                 self.callbacks.on_event(StepEvent(kind="assistant", text=text))

@@ -78,8 +78,10 @@ class SilentClient:
         self.tools_param.append(tools)
         if len(self.calls) == 1:
             return FakeReply("", [FakeCall(self.tool)])
-        if tools is None:
-            # 这就是 _force_answer 的补问（它**不带 tools 参数**）
+        # 补问那一次是 `tools=[]`（明确不给工具），不是 None ——
+        # 所以这里判 falsy 而不是 `is None`。agent 侧传 [] 是有意的：
+        # 传 None 在部分兼容服务上等于「用你默认的」，反而可能又调一次工具。
+        if not tools:
             return FakeReply(self.forced_text)
         return FakeReply("")          # 空回复 —— 触发 bug 的元凶
 
@@ -133,7 +135,7 @@ def test_silent_model() -> None:
     check("补问确实发生了（总共请求了 3 次）", len(client.calls) == 3,
           str(len(client.calls)))
     check("补问那一次**没有**带工具（强制它说话）",
-          client.tools_param[-1] is None, str(client.tools_param[-1])[:40])
+          client.tools_param[-1] == [], str(client.tools_param[-1])[:40])
     check("补问的结果被采纳", "云枢" in result, result[:80])
     check("正文进了对话（on_event 收到 assistant）",
           any(getattr(e, "kind", "") == "assistant" for e in sink.events))

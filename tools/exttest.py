@@ -133,15 +133,142 @@ def test_privilege_escalation() -> None:
     check("执行时再拦一次（手改配置绕过校验的兜底）",
           not ok and "不允许" in text, text)
 
-    # code 档默认关着
+    # code 档的默认开关。
+    #
+    # **用户明确要求把默认改成「开」**（他要用 code 档做自己的工具，
+    # 每次都要先去设置里打开太麻烦）。所以这条断言改成记录这个决定，
+    # 而不是假设它必须是关的 —— 免得以后有人看到「默认开着」以为是 bug
+    # 又给改回去。
+    #
+    # 真正要守住的是**别的**东西（下面两条），那些没变：
+    #   * code 档执行必须走确认（agent 那边合成 spec 时给 CONFIRM）；
+    #   * 越权仍然硬拦。
+    from pawpet.ai.extensions import MAX_LEVEL_DEFAULT
+
+    check("code 档默认是开的（用户明确要求的决定，别再改回去）",
+          MAX_LEVEL_DEFAULT == LEVEL_CODE, MAX_LEVEL_DEFAULT)
+
     ext = Extension(name="coder", title="代码工具", description="d",
                     level=LEVEL_CODE, code="print(1)")
-    issues = ext.problems()          # 默认 max_level = recipe
-    check("code 档默认被拒",
+    check("默认档位下 code 定义能过校验", ext.problems() == [],
+          str(ext.problems()))
+
+    # 把上限卡回 recipe 时，code 档仍然要能被拒 —— 说明这套闸还在，
+    # 只是默认值放开了
+    issues = ext.problems("recipe")
+    check("把上限调回 recipe 时 code 档仍被拒（闸还在）",
           any("自定义代码" in p and "关着" in p for p in issues), str(issues))
     check("明确打开后 code 档可以过",
           Extension(name="coder", title="t", description="d",
                     level=LEVEL_CODE, code="print(1)").problems("code") == [])
+
+
+def test_step_params() -> None:
+    print("\n=== 三之二、步骤参数的别名与校验 ===")
+    from pawpet.ai.extensions import LEVEL_RECIPE, Extension, run_recipe
+
+    work = SCRATCH / "params"
+    work.mkdir(parents=True, exist_ok=True)
+    src = work / "many.txt"
+    src.write_text("\n".join(f"行{i}" for i in range(1, 201)), encoding="utf-8")
+
+    def run_one(step: dict) -> tuple[bool, str]:
+        probe = Extension(
+            name="probe", title="探针", description="d", level=LEVEL_RECIPE,
+            steps=[{"op": "read_file", "path": "{path}"}, step],
+        )
+        return run_recipe(probe, {"path": str(src)})
+
+    # **参数名要认全。** 用户的 17 个自定义工具里有两个写了
+    # max_chars / max_lines，而实现原来只读 limit —— 参数被静默忽略，
+    # 永远按默认的 2000 跑。步骤「成功」了但效果不是他要的，且没有提示。
+    print("  truncate 的三种写法：")
+    cases = [
+        ({"op": "truncate", "max_lines": 10}, 10, None),
+        ({"op": "truncate", "max_chars": 30}, None, 30),
+        ({"op": "truncate", "limit": 5}, None, 5),
+    ]
+    for step, want_lines, want_chars in cases:
+        ok, text = run_one(step)
+        label = [k for k in step if k != "op"][0]
+        if want_lines is not None:
+            check(f"truncate 认 {label}（按行截）",
+                  ok and len(text.splitlines()) == want_lines,
+                  f"{len(text.splitlines())} 行")
+        else:
+            check(f"truncate 认 {label}（按字符截）",
+                  ok and len(text) == want_chars, f"{len(text)} 字符")
+
+    # count 认 unit 和 mode 两个名字
+    for key in ("unit", "mode"):
+        ok, text = run_one({"op": "count", key: "lines"})
+        check(f"count 认 {key}", ok and text.strip() == "200", text[:20])
+
+    # whole_line：返回整行而不是匹配片段
+    log = work / "err.log"
+    log.write_text("普通行\nERROR 磁盘满了\n普通行\nERROR 超时\n",
+                   encoding="utf-8")
+
+    def run_re(step: dict) -> str:
+        probe = Extension(
+            name="re", title="正则", description="d", level=LEVEL_RECIPE,
+            steps=[{"op": "read_file", "path": "{path}"}, step],
+        )
+        ok, text = run_recipe(probe, {"path": str(log)})
+        return text if ok else f"（失败：{text}）"
+
+    plain = run_re({"op": "regex_find", "pattern": "ERROR"})
+    check("不加 whole_line 时返回匹配片段（原行为不变）",
+          plain.strip() == "ERROR\nERROR", repr(plain))
+
+    whole = run_re({"op": "regex_find", "pattern": "ERROR", "whole_line": True})
+    check("whole_line 返回整行",
+          "磁盘满了" in whole and "超时" in whole, repr(whole))
+    check("whole_line 不带出无关行", "普通行" not in whole, repr(whole))
+
+    # 写错参数名要**在校验阶段就被抓住**，不能静默忽略
+    bad = Extension(
+        name="bad_param", title="t", description="d", level=LEVEL_RECIPE,
+        steps=[{"op": "truncate", "max_lenth": 50}],
+    )
+    issues = bad.problems()
+    check("写错参数名会被校验抓出来",
+          any("不认识的参数" in p for p in issues), str(issues))
+    check("报错里列出了这一步认哪些参数",
+          any("max_chars" in p for p in issues), str(issues))
+
+    good = Extension(
+        name="ok_param", title="t", description="d", level=LEVEL_RECIPE,
+        steps=[{"op": "truncate", "max_lines": 5}],
+    )
+    check("对的参数名能过校验", good.problems() == [], str(good.problems()))
+
+
+def test_user_extensions() -> None:
+    print("\n=== 三之三、体检真实装好的自定义工具 ===")
+    from pawpet.ai.extensions import LEVEL_LABELS, load_all
+
+    path = ROOT / "extensions.json"
+    if not path.exists():
+        print("  （这台机器上没有 extensions.json，跳过）")
+        return
+
+    items = load_all(path)
+    check("扩展文件读得出来", bool(items), f"{len(items)} 个")
+    print(f"  装了 {len(items)} 个：")
+    broken = []
+    for ext in items:
+        issues = ext.problems()
+        label = LEVEL_LABELS.get(ext.level, ext.level)
+        if issues:
+            broken.append(ext.name)
+            print(f"    [XX] {ext.name:32s} {label}")
+            for issue in issues:
+                print(f"         {issue[:100]}")
+        else:
+            used = f" 用过 {ext.run_count} 次" if ext.run_count else ""
+            print(f"    [ok] {ext.name:32s} {label}{used}")
+    check("已装的工具全部通过校验", not broken, str(broken))
 
 
 def test_recipe_execution() -> None:
@@ -434,6 +561,8 @@ def main() -> int:
 
     test_validation()
     test_privilege_escalation()
+    test_step_params()
+    test_user_extensions()
     test_recipe_execution()
     test_registry_and_tools()
     test_end_to_end()

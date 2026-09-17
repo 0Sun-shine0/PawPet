@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 from dataclasses import dataclass, field
 
@@ -848,6 +849,35 @@ class AgentRunner:
                 risk=Risk.CONFIRM,
             )
             self._mcp_tools_used.add(call.name)
+        if spec is None and call.name.startswith("ext_"):
+            # 用户自定义工具（note / recipe / code）不在内置 TOOL_INDEX 里，
+            # 这里按它的档位合成一个 spec：
+            #   code 档执行的是用户自己写的 Python，必须让用户确认；
+            #   note / recipe 是纯文本 / 只读流程，直接执行。
+            risk = Risk.CONFIRM
+            try:
+                store = getattr(getattr(self, "context", None), "store", None)
+                base = getattr(store, "path", None)
+                if base is not None:
+                    from .extensions import (
+                        LEVEL_CODE,
+                        find_by_tool_name,
+                        load_all,
+                    )
+
+                    ext_file = pathlib.Path(base).parent / "extensions.json"
+                    found = find_by_tool_name(load_all(ext_file), call.name)
+                    if found is not None and found.level != LEVEL_CODE:
+                        risk = Risk.READ
+            except Exception:  # noqa: BLE001 - 拿不到档位就按最保守的来
+                pass
+            spec = ToolSpec(
+                name=call.name,
+                description="用户自定义工具",
+                parameters={},
+                risk=risk,
+            )
+
         if spec is None:
             self._record_tool(call_id, call.name, f"未知工具：{call.name}", ok=False)
             return None

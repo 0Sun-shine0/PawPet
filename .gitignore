@@ -43,6 +43,18 @@ pet_data.json
 pet_data.backup.json
 *.log
 
+# 用户自己造的自定义工具（extensions.json）。
+#
+# **这个仓库是公开的**，而 extensions.json 里装的是使用者本人的工作流：
+# 具体的业务话术模板、公司内部系统的排查套路、本机路径
+# （比如 C:\Users\PC\Desktop\工单台账.csv）。
+# 它属于「私人数据」，和 pet_data.json 一个性质 —— 推上去就收不回来。
+#
+# 注意：开发模式下这个文件落在项目根目录（store.path.parent），
+# 打包后落在 %APPDATA%\PawPet，两边都不会进仓库。
+extensions.json
+extensions.json.bak*
+
 # ---------------------------------------------------------------- 编辑器
 .idea/
 .vscode/

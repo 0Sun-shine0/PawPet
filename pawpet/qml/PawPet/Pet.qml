@@ -35,6 +35,64 @@ Item {
     property real eyeShiftX: 0
     property real eyeShiftY: 0
 
+    // ------------------------------------------------------------ 情绪状态
+    // idle      平时
+    // thinking  AI 正在干活（歪头、眼睛往上看、思考气泡）
+    // speaking  AI 刚回完话（嘴张合、身体轻快地颠）
+    // sleepy    很久没人理（闭眼、呼吸变深变慢、飘 Zzz）
+    // bored     有一会儿没人理（眼神乱飘、小动作）
+    property string mood: "idle"
+    property real fidgetX: 0      // 无聊时眼珠的额外偏移
+    property real fidgetY: 0
+
+    // ---------------------------------------------------------- 运动通道
+    /* 四种情绪各自需要不同的「肢体动作」，但身体是画在 Canvas 上烘焙好的，
+       能动的只有整体变换。所以这里开几条互相独立的通道，动画往里面写，
+       bodyGroup 统一读 —— 互不打架，也不用为了一个动作重画整个身体。
+
+       **活泼的关键是不规则。** 原来呼吸/眨眼/摇尾都是完美周期循环，
+       看久了就是机械感。所以下面除了周期动画，还加了一批随机触发的小动作
+       （抽动、叹气、张望、伸懒腰）——「活」的感觉主要来自这些。
+
+       ---- 通道为什么分成「一次性」和「循环」两组 ----
+       一次性动作（被戳、叹气、伸懒腰）和状态循环（说话时的颠、思考时的摇）
+       会同时发生 —— 最典型的就是「AI 正在说话，用户点了一下宠物」。
+       如果两者写同一个属性，后写的会盖掉先写的，表现是抖动或某个动作
+       整个失效，而且**不会报任何错**。
+
+       所以拆成两组，在 bodyGroup 里叠加：
+         hop / squashX / squashY  ← 一次性动作（poke / sigh / stretch / tinyHop）
+         loopHop / loopSquashX / loopSquashY ← 状态循环（speakBounce）
+       叠加之后「一边说话一边被戳」反而是最自然的效果。 */
+    property real hop: 0          // 一次性：弹跳的纵向偏移
+    property real squashX: 1.0    // 一次性：非等比缩放
+    property real squashY: 1.0
+    property real sway: 0         // 摇摆角度，叠加在 headTilt 上
+
+    property real loopHop: 0      // 循环：说话时的颠
+    property real loopSquashX: 1.0
+    property real loopSquashY: 1.0
+
+    // 呼吸
+    readonly property real breathAmp: mood === "sleepy" ? -5.5
+                                    : mood === "thinking" ? -2.0
+                                    : mood === "speaking" ? -4.2 : -3.5
+    readonly property int breathMs: mood === "sleepy" ? 2600
+                                  : mood === "thinking" ? 900
+                                  : mood === "speaking" ? 700 : 1500
+    // 摇尾
+    readonly property real tailAmp: mood === "sleepy" ? 2
+                                  : (mood === "thinking" || mood === "speaking") ? 12 : 8
+    readonly property int tailMs: mood === "sleepy" ? 3200
+                                : (mood === "thinking" || mood === "speaking") ? 1100 : 1900
+    // 视线
+    readonly property real gazeX: mood === "thinking" ? 1.6 : 0
+    readonly property real gazeY: mood === "thinking" ? -2.4 : 0
+    // 头部倾斜：四种状态各不相同，一眼能看出它在干嘛
+    readonly property real headTilt: mood === "thinking" ? 4.5
+                                   : mood === "bored" ? -3.5
+                                   : mood === "sleepy" ? -5.0 : 0
+
     readonly property color ringColor: Theme.modeColor(mode)
 
     // ---------------------------------------------------------------- 几何参数
@@ -46,25 +104,25 @@ Item {
                      eyeColor: "#3A2E28",
                      badgeX: 100, badgeY: 162, badgeR: 21,
                      tailX: 146, tailY: 104, tailW: 58, tailH: 74,
-                     tailOX: 6, tailOY: 58 }
+                     tailOX: 6, tailOY: 58, mouthX: 100, mouthY: 122 }
         case "penguin":
             return { eyeY: 100, eyeLX: 84, eyeRX: 116, eyeW: 15, eyeH: 17,
                      eyeColor: "#2B2B33",
                      badgeX: 100, badgeY: 172, badgeR: 21,
                      tailX: 146, tailY: 128, tailW: 56, tailH: 62,
-                     tailOX: 8, tailOY: 52 }
+                     tailOX: 8, tailOY: 52, mouthX: 100, mouthY: 128 }
         case "fox":
             return { eyeY: 100, eyeLX: 78, eyeRX: 122, eyeW: 19, eyeH: 21,
                      eyeColor: "#4A3327",
                      badgeX: 100, badgeY: 162, badgeR: 21,
                      tailX: 138, tailY: 92, tailW: 62, tailH: 84,
-                     tailOX: 8, tailOY: 68 }
+                     tailOX: 8, tailOY: 68, mouthX: 100, mouthY: 130 }
         default: // mochi
             return { eyeY: 122, eyeLX: 76, eyeRX: 124, eyeW: 21, eyeH: 23,
                      eyeColor: "#3E3548",
                      badgeX: 100, badgeY: 162, badgeR: 22,
                      tailX: 142, tailY: 116, tailW: 62, tailH: 78,
-                     tailOX: 10, tailOY: 66 }
+                     tailOX: 10, tailOY: 66, mouthX: 100, mouthY: 153 }
         }
     }
 
@@ -163,7 +221,26 @@ Item {
         id: bodyGroup
         anchors.fill: parent
         transformOrigin: Item.Bottom
-        y: root.bob
+        // 三条通道同时作用：呼吸（bob）+ 一次性动作（hop）+ 状态循环（loopHop）。
+        // 分开写是为了让不同动画能各管一条，互不覆盖。
+        y: root.bob + root.hop + root.loopHop
+        rotation: root.headTilt + root.sway
+        Behavior on rotation {
+            NumberAnimation { duration: 420; easing.type: Theme.easing }
+        }
+
+        // 挤压拉伸。Item 自带的 scale 是等比的，做不出「压扁」的效果，
+        // 所以用 Scale 变换给两个轴各自的系数。轴心放在底部中心 ——
+        // 从脚底压下去才像有重量，从中心压会像飘在空中。
+        //
+        // 两组系数**相乘**：一次性的形变叠在循环形变上，
+        // 「一边说话一边被戳」才会是两个效果同时有，而不是互相顶掉。
+        transform: Scale {
+            origin.x: bodyGroup.width / 2
+            origin.y: bodyGroup.height
+            xScale: root.squashX * root.loopSquashX
+            yScale: root.squashY * root.loopSquashY
+        }
 
         Canvas {
             id: bodyCanvas
@@ -185,9 +262,9 @@ Item {
             y: root.geo.eyeY - height / 2
             eyeW: root.geo.eyeW
             eyeH: root.geo.eyeH
-            shut: root.blinking
-            shiftX: root.eyeShiftX
-            shiftY: root.eyeShiftY
+            shut: root.blinking || root.mood === "sleepy"
+            shiftX: root.eyeShiftX + root.fidgetX + root.gazeX
+            shiftY: root.eyeShiftY + root.fidgetY + root.gazeY
             eyeColor: root.geo.eyeColor
         }
         PetEye {
@@ -195,9 +272,9 @@ Item {
             y: root.geo.eyeY - height / 2
             eyeW: root.geo.eyeW
             eyeH: root.geo.eyeH
-            shut: root.blinking
-            shiftX: root.eyeShiftX
-            shiftY: root.eyeShiftY
+            shut: root.blinking || root.mood === "sleepy"
+            shiftX: root.eyeShiftX + root.fidgetX + root.gazeX
+            shiftY: root.eyeShiftY + root.fidgetY + root.gazeY
             eyeColor: root.geo.eyeColor
         }
     }
@@ -263,33 +340,445 @@ Item {
         }
     }
 
-    // ------------------------------------------------------- 呼吸 / 眨眼 / 摇尾
-    SequentialAnimation {
-        running: true
-        loops: Animation.Infinite
-        NumberAnimation { target: root; property: "bob"; to: -3.5; duration: 1500; easing.type: Easing.InOutSine }
-        NumberAnimation { target: root; property: "bob"; to: 0; duration: 1500; easing.type: Easing.InOutSine }
+    // ---------------------------------------------------------------- 状态覆盖层
+    // 身体是画进 Canvas 再缓存的静态图，状态小件全部走 GPU 变换叠在上面，
+    // 不触发身体重绘，所以一直动也不费电。
+
+    // 说话时张合的嘴：盖在画好的嘴上做张合，比重画整个身体便宜得多
+    Item {
+        id: mouthOverlay
+        visible: root.mood === "speaking"
+        x: root.geo.mouthX
+        y: root.geo.mouthY
+
+        // 张嘴时露出的口腔：深色内圈 + 舌头色，比一个纯色方块像嘴
+        Rectangle {
+            anchors.centerIn: parent
+            width: 15
+            height: 4
+            radius: height / 2
+            color: "#8A4A52"
+            SequentialAnimation on height {
+                running: mouthOverlay.visible
+                loops: Animation.Infinite
+                NumberAnimation { to: 11; duration: 120; easing.type: Easing.InOutQuad }
+                NumberAnimation { to: 3; duration: 140; easing.type: Easing.InOutQuad }
+            }
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: 1
+            width: 8
+            height: 3
+            radius: 1.5
+            color: "#C97A82"
+            opacity: 0.85
+            SequentialAnimation on opacity {
+                running: mouthOverlay.visible
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.95; duration: 120 }
+                NumberAnimation { to: 0.25; duration: 140 }
+            }
+        }
     }
 
+    // 思考气泡：三个点轮流跳 + 整体轻轻上浮
+    Item {
+        id: thinkBubble
+        visible: root.mood === "thinking"
+        x: 136
+        y: 20
+        width: 48
+        height: 28
+
+        // 轻轻飘：站桩似的挂着会显得很呆
+        SequentialAnimation on y {
+            running: thinkBubble.visible
+            loops: Animation.Infinite
+            NumberAnimation { to: 15; duration: 1400; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 20; duration: 1400; easing.type: Easing.InOutSine }
+        }
+        SequentialAnimation on opacity {
+            running: thinkBubble.visible
+            loops: Animation.Infinite
+            NumberAnimation { to: 0.72; duration: 1100; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 1.0; duration: 1100; easing.type: Easing.InOutSine }
+        }
+
+        // 引向头顶的小圆点
+        //
+        // **注意 Qt.rgba() 是函数，不能写成字符串。**
+        // `color: "rgba(108,86,64,0.35)"` 看着像 CSS，但 QML 的 color 属性
+        // 只认 "#rrggbb" / "#aarrggbb" / 颜色名 —— 传字符串会直接报
+        // 「Invalid property assignment: color expected」，整个 Pet.qml
+        // 加载失败，还会级联到 Dashboard / Main / SettingsPage / PetWindow。
+        Rectangle { width: 5; height: 5; radius: 2.5; x: -10; y: 31
+                    color: "#FFFDF7"; border.width: 1
+                    border.color: Qt.rgba(108 / 255, 86 / 255, 64 / 255, 0.35) }
+        Rectangle { width: 8; height: 8; radius: 4; x: -4; y: 23
+                    color: "#FFFDF7"; border.width: 1
+                    border.color: Qt.rgba(108 / 255, 86 / 255, 64 / 255, 0.35) }
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 14
+            color: "#FFFDF7"
+            border.width: 1.2
+            border.color: Qt.rgba(108 / 255, 86 / 255, 64 / 255, 0.35)
+        }
+        Row {
+            anchors.centerIn: parent
+            spacing: 5
+            Repeater {
+                model: 3
+                Rectangle {
+                    width: 6.5
+                    height: 6.5
+                    radius: 3.25
+                    color: "#8A7A6A"
+                    SequentialAnimation on scale {
+                        running: thinkBubble.visible
+                        loops: Animation.Infinite
+                        PauseAnimation { duration: index * 150 }
+                        NumberAnimation { to: 1.45; duration: 190; easing.type: Easing.OutQuad }
+                        NumberAnimation { to: 1.0; duration: 210; easing.type: Easing.InQuad }
+                        PauseAnimation { duration: 420 + (2 - index) * 150 }
+                    }
+                }
+            }
+        }
+    }
+
+    // 无聊的省略号气泡：表示它在「唉……」
+    // 用省略号而不是文字，是因为它只是情绪，不该像在跟用户说话
+    Item {
+        id: boredBubble
+        visible: root.mood === "bored"
+        x: 138
+        y: 34
+        width: 40
+        height: 22
+
+        SequentialAnimation on y {
+            running: boredBubble.visible
+            loops: Animation.Infinite
+            NumberAnimation { to: 38; duration: 1800; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 34; duration: 1800; easing.type: Easing.InOutSine }
+        }
+
+        Rectangle {
+            width: 5; height: 5; radius: 2.5; x: -6; y: 24
+            color: "#FFFAF3"; border.width: 1
+            border.color: Qt.rgba(130 / 255, 115 / 255, 100 / 255, 0.3)
+        }
+        Rectangle {
+            anchors.fill: parent
+            radius: 11
+            color: "#FFFAF3"
+            border.width: 1
+            border.color: Qt.rgba(130 / 255, 115 / 255, 100 / 255, 0.3)
+        }
+        Row {
+            anchors.centerIn: parent
+            spacing: 3.5
+            Repeater {
+                model: 3
+                Rectangle {
+                    width: 4.5
+                    height: 4.5
+                    radius: 2.25
+                    color: "#A2948A"
+                    // 一个一个亮起来，像话说到一半没劲了
+                    SequentialAnimation on opacity {
+                        running: boredBubble.visible
+                        loops: Animation.Infinite
+                        PauseAnimation { duration: index * 420 }
+                        NumberAnimation { to: 1.0; duration: 260 }
+                        NumberAnimation { to: 0.25; duration: 900 }
+                        PauseAnimation { duration: 420 }
+                    }
+                }
+            }
+        }
+    }
+
+    // 打盹的 Zzz：三个 z 错开往上飘，透明度走进走出
+    Item {
+        id: sleepZs
+        visible: root.mood === "sleepy"
+        Repeater {
+            model: 3
+            delegate: Item {
+                id: zItem
+                property real t: 0
+                Text {
+                    text: "z"
+                    color: "#8E84A8"
+                    font.family: Theme.font
+                    // 越飘越大，所以带着 index 一起过 Theme.px()。
+                    // 直接写 `13 + index * 5` 的话不吃界面缩放 ——
+                    // 用户把界面调大，这一串 z 还是原来那么小。
+                    font.pixelSize: Theme.px(13 + index * 5)
+                    font.bold: true
+                    opacity: Math.sin(Math.min(1, zItem.t) * Math.PI) * 0.9
+                    x: 134 + index * 13 + zItem.t * 10
+                    y: 66 - zItem.t * 46
+                }
+                SequentialAnimation on t {
+                    running: sleepZs.visible
+                    loops: Animation.Infinite
+                    PauseAnimation { duration: index * 650 }
+                    NumberAnimation { to: 1; duration: 2300; easing.type: Easing.InOutSine }
+                    PropertyAction { target: zItem; property: "t"; value: 0 }
+                }
+            }
+        }
+    }
+
+    // ================================================== 动作层：呼吸/眨眼/摇尾
     SequentialAnimation {
+        id: breathAnim
         running: true
         loops: Animation.Infinite
-        PauseAnimation { duration: 2400 }
+        NumberAnimation { target: root; property: "bob"; to: root.breathAmp; duration: root.breathMs; easing.type: Easing.InOutSine }
+        NumberAnimation { target: root; property: "bob"; to: 0; duration: root.breathMs; easing.type: Easing.InOutSine }
+    }
+
+    // 眨眼：**间隔随机**。
+    //
+    // 原来是一段写死的定长序列（2400/2100/1700），每次循环一模一样 ——
+    // 盯着看几秒就能发现是机械重复，很假。真人眨眼是不规律的，
+    // 所以改成每轮现抽一个间隔。
+    Timer {
+        id: blinkTimer
+        repeat: true
+        running: root.mood !== "sleepy"
+        interval: 1600 + Math.random() * 3200
+        onTriggered: {
+            interval = 1600 + Math.random() * 3200
+            // 偶尔来个连眨（两下），更像活的
+            if (Math.random() < 0.22)
+                doubleBlink.restart()
+            else
+                singleBlink.restart()
+        }
+    }
+    SequentialAnimation {
+        id: singleBlink
         ScriptAction { script: root.blinking = true }
-        PauseAnimation { duration: 110 }
+        PauseAnimation { duration: 105 }
         ScriptAction { script: root.blinking = false }
-        PauseAnimation { duration: 2100 }
+    }
+    SequentialAnimation {
+        id: doubleBlink
+        ScriptAction { script: root.blinking = true }
+        PauseAnimation { duration: 95 }
+        ScriptAction { script: root.blinking = false }
+        PauseAnimation { duration: 130 }
         ScriptAction { script: root.blinking = true }
         PauseAnimation { duration: 90 }
         ScriptAction { script: root.blinking = false }
-        PauseAnimation { duration: 1700 }
     }
 
     SequentialAnimation {
+        id: tailAnim
         running: true
         loops: Animation.Infinite
-        NumberAnimation { target: root; property: "tailAngle"; to: 8; duration: 1900; easing.type: Easing.InOutSine }
-        NumberAnimation { target: root; property: "tailAngle"; to: -8; duration: 1900; easing.type: Easing.InOutSine }
+        NumberAnimation { target: root; property: "tailAngle"; to: root.tailAmp; duration: root.tailMs; easing.type: Easing.InOutSine }
+        NumberAnimation { target: root; property: "tailAngle"; to: -root.tailAmp; duration: root.tailMs; easing.type: Easing.InOutSine }
+    }
+
+    // ==================================================== 动作层：说话
+    // 一边说一边轻快地颠：起跳时拉长、落地时压扁（挤压拉伸原理）。
+    // 光上下动会很僵，加上形变才有弹性的感觉。
+    //
+    // 写 loopHop / loopSquash*，**不写 hop / squash*** —— 后者归一次性动作
+    // （poke / sigh / stretch）。用户完全可能在 AI 说话时点一下宠物，
+    // 两者同时发生是常态，共用一个属性就会互相顶掉。
+    SequentialAnimation {
+        id: speakBounce
+        running: root.mood === "speaking"
+        loops: Animation.Infinite
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "loopHop"; to: -4.5; duration: 190; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "loopSquashY"; to: 1.05; duration: 190 }
+            NumberAnimation { target: root; property: "loopSquashX"; to: 0.965; duration: 190 }
+        }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "loopHop"; to: 0; duration: 210; easing.type: Easing.InQuad }
+            NumberAnimation { target: root; property: "loopSquashY"; to: 0.955; duration: 210 }
+            NumberAnimation { target: root; property: "loopSquashX"; to: 1.035; duration: 210 }
+        }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "loopSquashY"; to: 1.0; duration: 260; easing.type: Easing.OutBack }
+            NumberAnimation { target: root; property: "loopSquashX"; to: 1.0; duration: 260; easing.type: Easing.OutBack }
+        }
+        PauseAnimation { duration: 90 }
+    }
+
+    // ==================================================== 动作层：思考
+    // 轻轻左右摇摆，像在琢磨。幅度很小（±1.8°）—— 大了会像喝醉。
+    SequentialAnimation {
+        id: thinkSway
+        running: root.mood === "thinking"
+        loops: Animation.Infinite
+        NumberAnimation { target: root; property: "sway"; to: 1.8; duration: 1500; easing.type: Easing.InOutSine }
+        NumberAnimation { target: root; property: "sway"; to: -1.8; duration: 1500; easing.type: Easing.InOutSine }
+    }
+
+    // ==================================================== 动作层：打盹
+    // 睡着了也会偶尔动一下（做梦/换姿势），一动不动反而像死机。
+    Timer {
+        id: sleepTwitchTimer
+        repeat: true
+        running: root.mood === "sleepy"
+        interval: 4200 + Math.random() * 6000
+        onTriggered: {
+            interval = 4200 + Math.random() * 6000
+            sleepTwitch.restart()
+        }
+    }
+    SequentialAnimation {
+        id: sleepTwitch
+        NumberAnimation { target: root; property: "sway"; to: 2.4; duration: 100; easing.type: Easing.OutQuad }
+        NumberAnimation { target: root; property: "sway"; to: -0.6; duration: 220; easing.type: Easing.OutQuad }
+        NumberAnimation { target: root; property: "sway"; to: 0; duration: 420; easing.type: Easing.OutElastic }
+    }
+
+    // ==================================================== 动作层：无聊
+    // 无聊时眼神乱飘 + 偶尔叹口气 + 偶尔扭头张望。
+    Behavior on fidgetX { NumberAnimation { duration: 300; easing.type: Easing.InOutQuad } }
+    Behavior on fidgetY { NumberAnimation { duration: 300; easing.type: Easing.InOutQuad } }
+
+    Timer {
+        id: boredTimer
+        repeat: true
+        running: root.mood === "bored"
+        interval: 1800 + Math.random() * 2400
+        onTriggered: {
+            interval = 1800 + Math.random() * 2400
+            var roll = Math.random()
+            if (roll < 0.55) {
+                // 眼神乱飘
+                root.fidgetX = (Math.random() * 6) - 3
+                root.fidgetY = (Math.random() * 2.4) - 1.2
+            } else if (roll < 0.8) {
+                sighAnim.restart()          // 叹气
+            } else {
+                lookAroundAnim.restart()    // 扭头张望
+            }
+        }
+    }
+
+    // 叹气：慢慢压扁再慢慢回弹，像泄了气
+    //
+    // **注意这里写的是 hop 不是 bob。** bob 归常驻的 breathAnim 管
+    // （无限循环），两个动画同时写同一个属性会互相覆盖 —— 表现出来就是
+    // 抖动或者「叹气根本看不出来」。每条通道只归一个动画写。
+    SequentialAnimation {
+        id: sighAnim
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 0.93; duration: 520; easing.type: Easing.InOutQuad }
+            NumberAnimation { target: root; property: "squashX"; to: 1.055; duration: 520; easing.type: Easing.InOutQuad }
+            NumberAnimation { target: root; property: "hop"; to: 1.5; duration: 520; easing.type: Easing.InOutQuad }
+        }
+        PauseAnimation { duration: 240 }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 1.0; duration: 820; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "squashX"; to: 1.0; duration: 820; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "hop"; to: 0; duration: 820; easing.type: Easing.OutQuad }
+        }
+    }
+
+    // 扭头张望：头转过去停一下再转回来，像在看别处
+    SequentialAnimation {
+        id: lookAroundAnim
+        PauseAnimation { duration: 260 }
+        NumberAnimation { target: root; property: "sway"; to: 7.5; duration: 620; easing.type: Easing.OutBack }
+        PauseAnimation { duration: 900 }
+        NumberAnimation { target: root; property: "sway"; to: 0; duration: 700; easing.type: Easing.InOutQuad }
+    }
+
+    // ==================================================== 动作层：通用小动作
+    // 平时（idle）也要有点小动静，否则就是个静止贴图。
+    // **间隔随机**是重点：固定节奏会被看出是循环。
+    Timer {
+        id: fidgetTimer
+        repeat: true
+        running: root.mood === "idle"
+        interval: 6000 + Math.random() * 8000
+        onTriggered: {
+            interval = 6000 + Math.random() * 8000
+            if (Math.random() < 0.45)
+                tinyHop.restart()
+            else
+                headTwitch.restart()
+        }
+    }
+    // 轻微一跳
+    SequentialAnimation {
+        id: tinyHop
+        NumberAnimation { target: root; property: "hop"; to: -3.5; duration: 150; easing.type: Easing.OutQuad }
+        NumberAnimation { target: root; property: "hop"; to: 0; duration: 300; easing.type: Easing.OutBounce }
+    }
+    // 抖一下头（像甩掉什么东西）
+    SequentialAnimation {
+        id: headTwitch
+        NumberAnimation { target: root; property: "sway"; to: 3.2; duration: 110; easing.type: Easing.OutQuad }
+        NumberAnimation { target: root; property: "sway"; to: -1.4; duration: 160; easing.type: Easing.InOutQuad }
+        NumberAnimation { target: root; property: "sway"; to: 0; duration: 320; easing.type: Easing.OutElastic }
+    }
+
+    // 睡醒伸懒腰：拉长 + 抬起来，再慢慢落回
+    SequentialAnimation {
+        id: stretchAnim
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 1.10; duration: 420; easing.type: Easing.OutBack }
+            NumberAnimation { target: root; property: "squashX"; to: 0.925; duration: 420; easing.type: Easing.OutBack }
+            NumberAnimation { target: root; property: "hop"; to: -7; duration: 420; easing.type: Easing.OutBack }
+        }
+        PauseAnimation { duration: 260 }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 1.0; duration: 500; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "squashX"; to: 1.0; duration: 500; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "hop"; to: 0; duration: 560; easing.type: Easing.OutBounce }
+        }
+    }
+
+    // 记住上一个状态，用来判断「刚睡醒」这类转变。
+    // 注意：QML 不允许同名信号处理器写两遍，所以状态切换的全部处理
+    // 都放在下面**这一个** onMoodChanged 里。
+    property string previousMood: "idle"
+
+    onMoodChanged: {
+        // 离开某个状态时，把它留下的姿势收干净 —— 否则会出现
+        // 「已经不无聊了但头还歪着」这种残留。
+        if (mood !== "bored" && mood !== "thinking" && mood !== "sleepy")
+            sway = 0
+        if (mood !== "bored") {
+            fidgetX = 0
+            fidgetY = 0
+        }
+        if (mood !== "speaking") {
+            hop = 0
+            squashX = 1.0
+            squashY = 1.0
+            // 循环组也要归位 —— 离开说话态时 speakBounce 会停，
+            // 但它停在半路（比如正颠到最高点），不复位的话宠物会一直
+            // 保持着那个形变，看起来像卡住了。
+            loopHop = 0
+            loopSquashX = 1.0
+            loopSquashY = 1.0
+        }
+        // 睡醒了伸个懒腰
+        if (mood === "idle" && previousMood === "sleepy")
+            stretchAnim.restart()
+
+        // 让新的呼吸/摇尾参数立刻生效，不用等当前这一拍跑完
+        breathAnim.restart()
+        tailAnim.restart()
+
+        previousMood = mood
     }
 
     onStyleChanged: {
@@ -305,11 +794,26 @@ Item {
         pokeAnim.restart()
     }
 
+    // 被戳一下：猛地一缩再弹回来。
+    // 走 squash/hop 通道而不是直接动 bodyGroup.scale —— 那样会和
+    // Scale 变换叠加成两套缩放，poke 的同时如果在说话就会变形成怪样子。
     SequentialAnimation {
         id: pokeAnim
-        NumberAnimation { target: bodyGroup; property: "scale"; to: 1.10; duration: 110; easing.type: Easing.OutQuad }
-        NumberAnimation { target: bodyGroup; property: "scale"; to: 0.95; duration: 110; easing.type: Easing.InQuad }
-        NumberAnimation { target: bodyGroup; property: "scale"; to: 1.0; duration: 220; easing.type: Easing.OutBack }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 0.86; duration: 90; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "squashX"; to: 1.12; duration: 90; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "hop"; to: 3; duration: 90; easing.type: Easing.OutQuad }
+        }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 1.06; duration: 150; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "squashX"; to: 0.965; duration: 150; easing.type: Easing.OutQuad }
+            NumberAnimation { target: root; property: "hop"; to: -4.5; duration: 150; easing.type: Easing.OutQuad }
+        }
+        ParallelAnimation {
+            NumberAnimation { target: root; property: "squashY"; to: 1.0; duration: 360; easing.type: Easing.OutElastic }
+            NumberAnimation { target: root; property: "squashX"; to: 1.0; duration: 360; easing.type: Easing.OutElastic }
+            NumberAnimation { target: root; property: "hop"; to: 0; duration: 360; easing.type: Easing.OutBounce }
+        }
     }
 
     // ====================================================================

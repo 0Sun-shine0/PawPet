@@ -244,6 +244,102 @@ def test_step_params() -> None:
     check("对的参数名能过校验", good.problems() == [], str(good.problems()))
 
 
+def test_remove_restore() -> None:
+    print("\n=== 三之四、卸载要确认，而且要能捞回来 ===")
+    from pawpet.ai.actions import AuditLog, DesktopActions, Risk
+    from pawpet.ai.extensions import (
+        LEVEL_RECIPE,
+        Extension,
+        load_all,
+        load_trash,
+        save_all,
+    )
+    from pawpet.ai.tools import TOOL_INDEX, ToolContext
+
+    # **风险级别**：删掉的是用户手工攒下来的东西，必须确认。
+    #
+    # 原来 remove_extension 是 Risk.READ —— 不确认、不提示、没有后悔药。
+    # 这台机器上有 17 个用户自己打磨的工具，模型听错一句话就能永久毁掉
+    # 一个。目标里的「审批」就落在这里。
+    check("remove_extension 需要确认（不是 READ）",
+          TOOL_INDEX["remove_extension"].risk is Risk.CONFIRM,
+          str(TOOL_INDEX["remove_extension"].risk))
+    check("restore_extension 需要确认",
+          TOOL_INDEX["restore_extension"].risk is Risk.CONFIRM,
+          str(TOOL_INDEX["restore_extension"].risk))
+
+    work = SCRATCH / "trash"
+    work.mkdir(parents=True, exist_ok=True)
+    book = work / "extensions.json"
+
+    keep = Extension(name="keep_me", title="留着", description="d",
+                     level=LEVEL_RECIPE,
+                     steps=[{"op": "truncate", "max_lines": 5}])
+    victim = Extension(name="victim", title="要删的", description="d",
+                       level=LEVEL_RECIPE, run_count=7,
+                       steps=[{"op": "truncate", "max_lines": 9}])
+    save_all(book, [keep, victim])
+
+    # _ext_book() 是从 store.path 推路径的，给一个最小的替身
+    class _Store:
+        path = work / "pet_data.json"
+
+    actions = DesktopActions(AuditLog())
+    actions.level = "confirm"
+    context = ToolContext.__new__(ToolContext)
+    context.actions = actions
+    context.store = _Store()
+
+    ok, text, _ = context._do_remove_extension({"name": "victim"})
+    check("能卸掉", ok and "victim" not in [e.name for e in load_all(book)],
+          text[:70])
+    check("留着的不受影响", [e.name for e in load_all(book)] == ["keep_me"],
+          str([e.name for e in load_all(book)]))
+
+    # **回滚**：删掉的定义要进回收站
+    trashed = load_trash(book)
+    check("卸掉的定义进了回收站", len(trashed) == 1, str(len(trashed)))
+    check("回收站里是那一个", bool(trashed) and trashed[0].get("name") == "victim",
+          str(trashed[:1])[:80])
+    check("回收站记了删除时间",
+          bool(trashed and trashed[0].get("removedAt")), "没时间戳")
+    check("卸掉时说了还能加回来", "加回来" in text, text[:80])
+
+    # 捞回来
+    ok2, text2, _ = context._do_restore_extension({"name": "victim"})
+    names = sorted(e.name for e in load_all(book))
+    check("能从回收站捞回来", ok2 and names == ["keep_me", "victim"],
+          f"{text2[:60]} {names}")
+    check("捞回来后回收站空了", load_trash(book) == [],
+          str(load_trash(book))[:60])
+
+    restored = next(e for e in load_all(book) if e.name == "victim")
+    check("捞回来的定义内容完整（用过几次也还在）",
+          restored.run_count == 7 and restored.title == "要删的",
+          f"run_count={restored.run_count} title={restored.title!r}")
+
+    # 边界
+    ok3, text3, _ = context._do_restore_extension({"name": "victim"})
+    check("已经在列表里时不给重复恢复", not ok3 and "已经在列表里" in text3,
+          text3[:60])
+    ok4, text4, _ = context._do_restore_extension({"name": "从没存在过"})
+    check("回收站里没有时给可读提示", not ok4 and "回收站里没有" in text4,
+          text4[:60])
+    ok5, text5, _ = context._do_remove_extension({"name": "从没存在过"})
+    check("删不存在的给可读提示（并列出有哪些）",
+          not ok5 and "没有叫" in text5 and "keep_me" in text5, text5[:70])
+    ok6, text6, _ = context._do_remove_extension({"name": ""})
+    check("不给名字时提示要名字", not ok6 and "哪一个" in text6, text6[:60])
+
+    # 同名反复装卸不该把回收站刷满
+    for _ in range(3):
+        context._do_remove_extension({"name": "victim"})
+        context._do_restore_extension({"name": "victim"})
+    context._do_remove_extension({"name": "victim"})
+    check("同名反复装卸只留一条（不刷满回收站）",
+          len(load_trash(book)) == 1, str(len(load_trash(book))))
+
+
 def test_user_extensions() -> None:
     print("\n=== 三之三、体检真实装好的自定义工具 ===")
     from pawpet.ai.extensions import LEVEL_LABELS, load_all
@@ -562,6 +658,7 @@ def main() -> int:
     test_validation()
     test_privilege_escalation()
     test_step_params()
+    test_remove_restore()
     test_user_extensions()
     test_recipe_execution()
     test_registry_and_tools()

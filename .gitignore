@@ -59,6 +59,8 @@ pet_data.backup.json
 # 打包后落在 %APPDATA%\PawPet，两边都不会进仓库。
 extensions.json
 extensions.json.bak*
+# 卸载后的回收站：里面同样是用户自己的工具定义，一样的隐私性质
+extensions.removed.json
 
 # 对话记录。**里面是用户和 AI 说过的话** —— 工单内容、客户名、
 # 文件路径都可能在里面。仓库是公开的，务必保持忽略。

@@ -59,6 +59,14 @@ from .vision import ScreenCapture, downscale_png
 MAX_CHAT_ITEMS = 200
 MAX_SCREENSHOTS_KEPT = 3
 
+# ------------------------------------------------------------ 历史回放的规矩
+# 多轮对话的上下文从界面消息列表重建（见 _build_history）。这里的数字决定
+# 模型能看到多久的之前：
+HISTORY_TURNS = 8          # 最多回放几轮（一问一答算一轮）
+HISTORY_BUDGET = 16000     # 回放内容一共最多多少字符
+HISTORY_USER_MAX = 800     # 单条用户消息最多保留多少
+HISTORY_ASSISTANT_MAX = 1600
+
 
 class AiController(QObject):
     # ---------------------------------------------------------- 给 QML 的信号
@@ -1003,6 +1011,16 @@ class AiController(QObject):
         """把界面上的对话还原成模型消息，让多轮对话有上下文。
 
         只回放纯文本对话，工具调用的中间过程不回放 —— 那会让历史变得又长又乱。
+
+        两个修过的坑（都是「上下文差」的实际来源）：
+
+        * **不能按消息条数取窗口。** 消息列表里混着工具卡片、系统提示、
+          错误条，一轮多步任务轻松产生十几条。原来直接取最后 12 条，
+          窗口经常被工具卡片占满，真正的对话一条都带不上。
+          现在先过滤出 user / assistant，再按「轮数 + 字符预算」回放。
+        * **当前这句不能回放。** send() 已经把它 push 进消息列表了，
+          而 runner.run() 还会再 append 一遍 —— 回放里带上它，
+          模型会把同一个问题看两遍。
         """
         history: list[dict] = [{
             "role": "system",
@@ -1012,15 +1030,42 @@ class AiController(QObject):
                 self._kb_text(),
             ),
         }]
-        for item in self._messages[-12:]:
-            role = item.get("role")
+
+        dialogue = [
+            item for item in self._messages
+            if item.get("role") in ("user", "assistant")
+            and (item.get("text") or "").strip()
+        ]
+        # 去掉这一轮的问题（见 docstring 第二条）
+        if dialogue and dialogue[-1].get("role") == "user":
+            dialogue.pop()
+
+        picked: list[dict] = []
+        budget = HISTORY_BUDGET
+        turns = 0
+        for item in reversed(dialogue):
+            role = item["role"]
+            limit = HISTORY_USER_MAX if role == "user" else HISTORY_ASSISTANT_MAX
             text = (item.get("text") or "").strip()
-            if not text:
-                continue
+            if len(text) > limit:
+                text = text[:limit] + "…"
+            if len(text) > budget:
+                break
+            picked.append({"role": role, "content": text})
+            budget -= len(text)
             if role == "user":
-                history.append({"role": "user", "content": text})
-            elif role == "assistant":
-                history.append({"role": "assistant", "content": text})
+                turns += 1
+                if turns >= HISTORY_TURNS:
+                    break
+        picked.reverse()
+
+        # 截断过就如实告诉模型，免得它以为对话是完整的、瞎接话
+        if len(picked) < len(dialogue):
+            history[0]["content"] += (
+                "\n\n（更早的对话记录已省略。如果用户提到之前聊过、"
+                "而你这里没有的内容，如实说你不记得，不要瞎猜。）"
+            )
+        history.extend(picked)
         return history
 
     # ------------------------------------------------------- 工作线程的回调

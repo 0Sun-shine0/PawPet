@@ -123,14 +123,32 @@ def test_launch(target: Path) -> None:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
     )
-    time.sleep(13)
+
+    # **轮询等条件成立，不要固定 sleep。**
+    #
+    # 原来是 `time.sleep(13)` 然后查数据文件 —— 打包后第一次启动要解包、
+    # 初始化 Qt，慢一点就查不到，测试随机变红。实测踩过：同一份 exe
+    # packtest 过、setuptest 偶发失败，重跑又好了。
+    #
+    # 偶发的红比稳定的红更糟 —— 它会让人开始忽略失败信号
+    # （这跟「构建成功却报退出码 1」是同一类问题）。
+    # 所以改成「最多等 40 秒，每秒看一次数据文件出来没有」，
+    # 正常情况 3~5 秒就返回，慢机器也不会假失败。
+    deadline = time.time() + 40
+    wrote: list = []
+    while time.time() < deadline:
+        wrote = list(sandbox_home.rglob("pet_data.json"))
+        if wrote or process.poll() is not None:
+            break
+        time.sleep(1.0)
+    # 再给一秒让日志/窗口稳定，免得读到半截的输出
+    time.sleep(1.0)
 
     alive = process.poll() is None
     check("进程活着（没闪退）", alive,
           f"退出码 {process.poll()}" if not alive else "")
 
     # 数据文件出现 => 配置解析、存储层、路径逻辑全通
-    wrote = list(sandbox_home.rglob("pet_data.json"))
     check("在隔离目录里建立了数据文件", len(wrote) > 0,
           f"沙箱内容 {[p.name for p in sandbox_home.rglob('*')][:8]}")
 

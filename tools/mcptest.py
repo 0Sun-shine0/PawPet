@@ -243,6 +243,56 @@ def main() -> int:
     ok, text, _bundle = context.execute("根本没有这个工具", {})
     check("不认识的名字给可读错误", not ok and "没有名为" in text, text)
 
+    # ---------------------------------------------------------------- 七
+    #
+    # 用**项目自带的** pawkit server 再跑一遍。
+    #
+    # 前面那个 fake server 只证明「接线是对的」；pawkit 是真正要发给用户用的
+    # 东西，495 行、8 个工具，而且**之前一次都没真连过**。实测发现它的
+    # `time_until` 说明里写着能问「到 9:30 还有多久」，实现却只认完整日期 ——
+    # 模型照着说明传参会被拒，然后跟用户说「这个工具不支持」。
+    # 说明和实现不一致比少个功能更糟，因为模型会信说明。
+    print("\n=== 七、项目自带的 pawkit 真连一遍 ===")
+    pawkit = ROOT / "mcp_servers" / "pawkit.py"
+    check("pawkit.py 存在", pawkit.exists(), "找不到 mcp_servers/pawkit.py")
+    if pawkit.exists():
+        pk = MCPClient("pawkit", [sys.executable, str(pawkit)],
+                       cwd=str(ROOT), timeout=20)
+        ok, message = pk.start()
+        check("pawkit 连得上", ok, message)
+        if ok:
+            check("pawkit 提供了工具", len(pk.tools) >= 6, str(len(pk.tools)))
+            names = [t["name"] for t in pk.tool_summaries()]
+            print(f"     工具：{', '.join(names)}")
+
+            # 每个工具都要能真的调一次 —— 光「列得出来」不算数，
+            # 前面那个 fake server 已经证明「能列」和「能调」是两回事。
+            cases = [
+                ("now", {}),
+                # 纯时间是这次修的 bug 的回归：说明里承诺支持，实现原来不认
+                ("time_until", {"target": "18:00"}),
+                ("time_until", {"target": "2026-10-01"}),
+                ("time_until", {"target": "10-01"}),
+                ("ts_convert", {"value": "1789541258"}),
+                ("sys_status", {}),
+                ("calc", {"expression": "2+3*4"}),
+                ("gen_password", {"length": 12}),
+                ("decide", {"mode": "pick", "options": ["甲", "乙", "丙"]}),
+                ("decide", {"mode": "coin"}),
+            ]
+            for tool_name, args in cases:
+                ok2, text = pk.call_tool(tool_name, args)
+                label = f"{tool_name}({','.join(args) or '-'})"
+                check(f"pawkit.{label} 调得动",
+                      ok2 and bool((text or "").strip()), (text or "")[:70])
+
+            ok2, text = pk.call_tool("file_hash",
+                                     {"path": str(ROOT / "run_pawpet.py")})
+            check("file_hash 能算本地文件", ok2 and "sha256" in text.lower(),
+                  text[:60])
+
+            pk.stop()
+
     client.stop()
     backend.shutdown()
 

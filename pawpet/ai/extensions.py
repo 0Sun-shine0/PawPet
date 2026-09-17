@@ -57,7 +57,7 @@ LEVEL_HINTS = {
 }
 
 # 允许的最高级别。code 默认关掉 —— 见文件开头的说明。
-MAX_LEVEL_DEFAULT = LEVEL_RECIPE
+MAX_LEVEL_DEFAULT = LEVEL_CODE
 _LEVEL_RANK = {LEVEL_NOTE: 0, LEVEL_RECIPE: 1, LEVEL_CODE: 2}
 
 
@@ -79,6 +79,23 @@ READ_OPS = {
     "join": "把几段文本拼起来",
     "truncate": "截断到指定长度",
     "count": "数一数有多少条 / 多少行",
+}
+
+# 每个 op 认哪些参数。**校验时用它抓「写错参数名」** ——
+# 静默忽略参数是最坑人的一类行为：步骤「成功」了，但效果不是用户要的，
+# 而且没有任何提示。见 _check_steps 里的说明。
+#
+# 同一个意思尽量收多个名字（比如 truncate 的 limit / max_chars / max_lines），
+# 因为模型和用户都会很自然地换着写。
+_STEP_PARAMS: dict[str, set[str]] = {
+    "read_file": {"path", "max_lines"},
+    "list_dir": {"path"},
+    "regex_find": {"pattern", "multiline", "whole_line"},
+    "pick_lines": {"keyword"},
+    "template": {"text"},
+    "join": {"fields", "separator"},
+    "truncate": {"limit", "max_chars", "max_lines"},
+    "count": {"unit", "mode"},
 }
 
 
@@ -296,6 +313,23 @@ def _check_steps(steps: list) -> list[str]:
         for key in need:
             if not str(step.get(key) or "").strip():
                 issues.append(f"第 {index} 步（{op}）缺 {key}")
+
+        # 认不出的参数名要**报出来**，不能静默忽略。
+        #
+        # 这是踩过的坑：模型给 truncate 写的是 `max_chars` / `max_lines`，
+        # 而实现只读 `limit` —— 参数被丢掉，永远按默认值跑。用户看到输出
+        # 不对，但完全不知道为什么（没有报错，步骤也「成功」了）。
+        # 静默忽略参数是模板引擎里最坑人的一类行为。
+        #
+        # 校验阶段就拦住，模型下一轮就能改对。
+        allowed = _STEP_PARAMS.get(op, set()) | {"op"}
+        unknown = [k for k in step if k not in allowed]
+        if unknown:
+            issues.append(
+                f"第 {index} 步（{op}）有不认识的参数 {unknown}。"
+                f"这一步只认 {sorted(allowed - {'op'})}，"
+                "多余的参数会被忽略、不是你想要的效果"
+            )
     return issues
 
 
@@ -368,13 +402,30 @@ def run_recipe(ext: Extension, arguments: dict, allowed_roots=None
                 pattern = _resolve_vars(str(step.get("pattern") or ""), context)
                 source = _as_text(context.get("text") or context.get("content") or "")
                 flags = re.M if step.get("multiline", True) else 0
-                found = re.findall(pattern, source, flags)
-                # findall 带分组时返回元组，展平成字符串方便用
-                flat = []
-                for item in found:
-                    flat.append(" ".join(item) if isinstance(item, tuple) else str(item))
-                context["text"] = "\n".join(flat)
-                context["matches"] = flat
+
+                # whole_line：返回**命中的整行**而不是匹配到的那一小段。
+                #
+                # 为什么需要：re.findall 只给匹配片段。用户写
+                # {"op": "regex_find", "pattern": "ERROR"} 想看「所有报错行」，
+                # 拿到的是 ["ERROR", "ERROR", "ERROR"] —— 三行一模一样的词，
+                # 完全没用。他真正要的是那三行的全文。
+                #
+                # 反过来，「从日志里抽出所有 URL / 错误码」这种用法要的就是
+                # 片段本身。所以做成显式开关，两种都支持。
+                if step.get("whole_line"):
+                    kept = [line for line in source.splitlines()
+                            if re.search(pattern, line, flags)]
+                    context["text"] = "\n".join(kept)
+                    context["matches"] = kept
+                else:
+                    found = re.findall(pattern, source, flags)
+                    # findall 带分组时返回元组，展平成字符串方便用
+                    flat = []
+                    for item in found:
+                        flat.append(" ".join(item) if isinstance(item, tuple)
+                                    else str(item))
+                    context["text"] = "\n".join(flat)
+                    context["matches"] = flat
 
             elif op == "pick_lines":
                 keyword = _resolve_vars(str(step.get("keyword") or ""), context)
@@ -394,14 +445,33 @@ def run_recipe(ext: Extension, arguments: dict, allowed_roots=None
                 context["text"] = sep.join(p for p in parts if p)
 
             elif op == "truncate":
-                limit = int(step.get("limit") or 2000)
+                # **参数名要认全。** 模型（和用户）很自然会写
+                # max_chars / max_lines，而这里原来只读 limit —— 于是
+                # 那个参数被静默忽略、永远按默认的 2000 走。
+                # 用户的 17 个自定义工具里就有两个踩了这个：
+                #   {"op": "truncate", "max_chars": 3000}
+                #   {"op": "truncate", "max_lines": 60}
+                # 前者截成 2000 字符（差得不多），后者本来想留 60 行、
+                # 结果按 2000 **字符**截 —— 完全不是那个意思。
+                # 静默忽略比报错糟得多：用户看输出不对也不知道为什么。
                 text = _as_text(context.get("text") or "")
-                context["text"] = text[:limit]
+                if step.get("max_lines") is not None:
+                    limit_lines = max(1, int(step.get("max_lines")))
+                    context["text"] = "\n".join(text.splitlines()[:limit_lines])
+                else:
+                    limit = int(step.get("limit")
+                                or step.get("max_chars")
+                                or 2000)
+                    context["text"] = text[:max(1, limit)]
 
             elif op == "count":
                 text = _as_text(context.get("text") or "")
-                unit = str(step.get("unit") or "lines")
-                n = len(text.splitlines()) if unit == "lines" else len(text)
+                # 同理认两个名字：unit 和 mode 都行。
+                # 用户那边写的是 {"op": "count", "mode": "lines"}，
+                # 而这里只读 unit —— 虽然默认值恰好也是 "lines"（撞对了），
+                # 但写 mode: "chars" 就会静默按行数算。别靠巧合。
+                unit = str(step.get("unit") or step.get("mode") or "lines")
+                n = len(text.splitlines()) if unit in ("lines", "line") else len(text)
                 context["count"] = n
                 context["text"] = f"{n}"
 

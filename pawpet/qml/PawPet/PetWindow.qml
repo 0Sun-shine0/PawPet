@@ -31,6 +31,68 @@ Window {
     property bool hovering: false
     property bool positionReady: false
 
+    // ------------------------------------------------------------ 宠物情绪状态
+    // idle | thinking | speaking | sleepy | bored，按优先级取。
+    // 数据来源：backend.ai.running（AI 在干活）、消息列表（刚回完话）、
+    // 以及一个空闲秒表（多久没人理它了）。
+    property int idleSeconds: 0
+    readonly property string petMood: {
+        if (backend.ai.running)
+            return "thinking"
+        if (speakTimer.running)
+            return "speaking"
+        if (win.hovering)
+            return "idle"
+        if (idleSeconds >= 240)
+            return "sleepy"
+        if (idleSeconds >= 45)
+            return "bored"
+        return "idle"
+    }
+
+    Timer {
+        id: idleTimer
+        interval: 1000
+        repeat: true
+        running: true
+        onTriggered: {
+            if (win.hovering || backend.ai.running || speakTimer.running)
+                win.idleSeconds = 0
+            else
+                win.idleSeconds += 1
+        }
+    }
+
+    // AI 回话后让宠物「说」一会儿，时长跟着回答长度走
+    Timer {
+        id: speakTimer
+        repeat: false
+    }
+
+    Connections {
+        target: backend.ai
+        function onMessagesChanged() {
+            win.idleSeconds = 0
+            var msgs = backend.ai.messages
+            if (!msgs || msgs.length === 0)
+                return
+            var last = msgs[msgs.length - 1]
+            // 只认「这一轮已经结束后的回答」；任务中间的助手消息
+            // 由 thinking 状态管，不在这里抢
+            if (last.role === "assistant" && !backend.ai.running) {
+                speakTimer.interval = Math.min(6000, 1400 + String(last.text || "").length * 35)
+                speakTimer.restart()
+                pet.poke()
+            }
+        }
+        function onRunningChanged() {
+            win.idleSeconds = 0
+            // 开始干活时精神一下
+            if (backend.ai.running)
+                pet.poke()
+        }
+    }
+
     // -------------------------------------------------------------- 状态
     function clampToScreen() {
         var area = backend.screenAt(win.x, win.y)
@@ -110,6 +172,7 @@ Window {
             badgeText: backend.petBadge
             eyeShiftX: win.eyeShiftX
             eyeShiftY: win.eyeShiftY
+            mood: win.petMood
         }
     }
 
@@ -158,6 +221,7 @@ Window {
 
         onTapped: {
             pet.poke()
+            win.idleSeconds = 0
             clickTimer.restart()
         }
         onDoubleTapped: {

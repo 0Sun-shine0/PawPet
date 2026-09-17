@@ -482,6 +482,9 @@ TOOLS: list[ToolSpec] = [
                                "可以用 {参数名} 引用参数，用 {text} 引用上一步的输出",
                 "items": {"type": "object"},
             },
+            "code": {**_STRING, "description":
+                     f"仅 {LEVEL_CODE} 需要：要运行的 Python 代码，"
+                     "里面必须定义 def run(args) 并 return 结果文本"},
             "parameters": {
                 "type": "object",
                 "description": "这个工具要问用户拿什么，JSON Schema 形式",
@@ -1712,6 +1715,7 @@ class ToolContext:
             prompt=str(args.get("prompt") or "").strip(),
             steps=[s for s in steps if isinstance(s, dict)] if isinstance(steps, list) else [],
             parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else {},
+            code=str(args.get("code") or "").strip(),
             created=_time.time(),
             updated=_time.time(),
         )

@@ -206,6 +206,9 @@ def main() -> int:
             ("界面配色定制", "themetest.py"),
             ("自定义工具", "exttest.py"),
             ("MCP 接线", "mcptest.py"),
+            ("MCP 可达性", "mcpwiringtest.py"),
+            ("宠物情绪动画", "moodtest.py"),
+            ("对话持久化", "convtest.py"),
             ("可用性功能", "featuretest.py"),
             # ---- 曾经真出过的 bug，钉住别再回来
             ("轮次串台", "turntest.py"),

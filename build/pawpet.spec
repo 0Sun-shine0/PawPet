@@ -34,6 +34,16 @@ datas = [
     (str(ROOT / "pawpet" / "qml"), "pawpet/qml"),
     # 给用户看的说明
     (str(ROOT / "build" / "使用说明.md"), "."),
+    # 随包发布的 MCP server（pawkit 那 8 个工具）。
+    #
+    # **必须打进去**：它是 .py 脚本、不在 import 图里，PyInstaller 的静态
+    # 分析看不到它 —— 不写这行的话，装出来的小爪在界面上会显示
+    # 「没有内置的 server：pawkit」，而那正是「MCP 做了但从没生效过」
+    # 的原因之一。
+    #
+    # 只取 .py，**不带 __pycache__**：开发机上跑过测试之后那里会留一堆
+    # 字节码，整目录拷进去会白塞几十 KB 陈旧 .pyc 给用户。
+    *[(str(p), "mcp_servers") for p in sorted((ROOT / "mcp_servers").glob("*.py"))],
 ]
 
 # AI 的可选依赖不写进 datas，交给 PyInstaller 自己分析 import 关系带上。

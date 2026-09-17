@@ -33,6 +33,63 @@ def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
+# 屏幕当前抓不抓得到。
+#
+# 为什么要这个判据：Windows 在**锁屏 / 屏保运行 / 会话切换**的时候
+# 不允许 BitBlt 安全桌面，整条截屏链路会 100% 失败 —— 这是系统行为，
+# 不是代码问题，而用户天天会遇到（离开工位一会儿屏保就起来）。
+#
+# 但它和「我们的截屏封装坏了」的表现**一模一样**，所以不能一律跳过：
+# 判据是拿**裸 mss** 直接抓一次 ——
+#   裸的也抓不到 → 环境问题，跳过并大声说明；
+#   裸的能抓、我们的抓不到 → 我们的代码有问题，判失败。
+#
+# 这个判断只用在这里；产品侧的提示语在 pawpet/ai/vision.py 的
+# _capture_hint()。
+_ENV_CAPTURE: tuple[bool, str] | None = None
+
+
+def capture_environment_ok(refresh: bool = False) -> tuple[bool, str]:
+    global _ENV_CAPTURE
+    if _ENV_CAPTURE is not None and not refresh:
+        return _ENV_CAPTURE
+    try:
+        import mss as _mss
+
+        factory = getattr(_mss, "MSS", None) or getattr(_mss, "mss")
+        with factory() as raw_device:
+            raw_shot = raw_device.grab(raw_device.monitors[0])
+            if raw_shot.width > 0:
+                _ENV_CAPTURE = (True, f"{raw_shot.width}x{raw_shot.height}")
+                return _ENV_CAPTURE
+    except Exception as exc:  # noqa: BLE001
+        _ENV_CAPTURE = (False, f"{type(exc).__name__}: {exc}")
+        return _ENV_CAPTURE
+    _ENV_CAPTURE = (False, "抓到 0x0")
+    return _ENV_CAPTURE
+
+
+def check_capture(label: str, shot, detail_source=None) -> bool:
+    """环境抓不到就显眼跳过；能抓但失败才算我们的 bug。
+
+    返回「这个断言是否真的判了」。
+    """
+    env_ok, env_detail = capture_environment_ok()
+    if shot.ok:
+        check(label, True)
+        return True
+    if env_ok:
+        # 裸 mss 能抓，我们抓不到 —— 这是真 bug
+        check(f"{label}（裸 mss 能抓 {env_detail}，我们也该能）", False,
+              str(detail_source or shot.message)[:90])
+        return True
+    print(f"\n  ！！ 跳过「{label}」：当前屏幕抓不到（{env_detail}）")
+    print(f"     报的是：{str(shot.message)[:80]}")
+    print("     裸 mss 也抓不到 → 环境原因（锁屏/屏保/会话切换），"
+          "不是代码问题。")
+    return False
+
+
 def main() -> int:
     print("小爪 AI 模块自测")
 
@@ -60,7 +117,7 @@ def main() -> int:
     check("能枚举显示器", len(monitors) >= 1, f"实际 {len(monitors)}")
 
     shot = capture.grab(monitor=1 if len(monitors) > 1 else 0, with_preview=True)
-    check("截图成功", shot.ok, shot.message)
+    check_capture("截图成功", shot)
     if shot.ok:
         print(f"       真实 {shot.width}x{shot.height} → 模型 {shot.model_width}x{shot.model_height}"
               f"（缩放 {shot.scale_x:.2f}）")
@@ -165,8 +222,17 @@ def main() -> int:
     context = ToolContext(capture2, actions2, store)
     context.last_shot = capture2.grab(monitor=1 if len(capture2.monitors()) > 1 else 0)
 
+    # 这一节整段都依赖「屏幕抓得到」，所以先问一次环境能不能抓
+    env_can_capture, env_detail = capture_environment_ok()
+
     ok, text, bundle = context.execute("screenshot", {"monitor": 1})
-    check("screenshot 工具可用", ok and bundle is not None, text[:60])
+    if env_can_capture:
+        check("screenshot 工具可用", ok and bundle is not None, text[:60])
+    else:
+        print(f"\n  ！！ 跳过截图相关校验：当前屏幕抓不到（{env_detail}）")
+        print(f"     工具说：{text[:70]}")
+        print("     裸 mss 也抓不到 → 环境原因（锁屏/屏保/会话切换），"
+              "不是代码问题。")
     if bundle:
         check("截图包里有预览图", len(bundle.get("preview") or b"") > 1000)
         check("截图包里有 data URL",
@@ -195,8 +261,23 @@ def main() -> int:
     check("未知工具被拒绝", ok is False)
 
     # 坐标映射：模型坐标要能落到真实屏幕内
-    if context.last_shot is not None:
+    #
+    # **必须判 s.ok，不能只判「不是 None」。** 截图失败时 grab() 返回的是
+    # `Shot(False, 原因)` —— 一个 width/height 都是 0 的**失败对象**。
+    # 只判 not None 的话，这段会拿着 width=0 去算 `s.width - 2 = -2`，
+    # 算出 (0, 0)，然后报「超大坐标被夹回屏幕内 (0, 0)」—— 看起来像坐标
+    # 换算坏了，其实是截图根本没成功。
+    if context.last_shot is not None and not context.last_shot.ok:
+        if not env_can_capture:
+            print(f"  ！！ 跳过坐标校验：屏幕抓不到（{env_detail}）")
+        else:
+            check("我们的截屏能用（裸 mss 能抓，我们也该能）", False,
+                  f"裸 mss 抓到 {env_detail}，我们却失败："
+                  f"{context.last_shot.message}")
+    elif context.last_shot is not None:
         s = context.last_shot
+        check("截图尺寸正常", s.width > 0 and s.height > 0,
+              f"{s.width}x{s.height}")
         sx, sy = context.to_screen(s.model_width // 2, s.model_height // 2)
         check("工具层坐标映射在屏幕内",
               0 <= sx < s.width and 0 <= sy < s.height, f"({sx}, {sy})")

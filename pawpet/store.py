@@ -57,7 +57,15 @@ def default_settings() -> dict:
         "ai_memory_enabled": True,      # 跨会话记忆：记住习惯和进度
         "ai_auto_screenshot": True,     # 每轮开始自动截一张给模型
         "ai_show_cursor": True,         # 截图时把鼠标位置标出来
-        "ai_mcp_enabled": False,
+        # 外部工具（MCP）默认打开。
+        #
+        # 随包带了一个 pawkit server，给的是「现在几点 / 算个数 / 生成密码 /
+        # 算文件校验值」这类**纯计算或只读**的工具，没有任何写操作 ——
+        # 默认关着的话，这套东西用户永远看不到，等于白做。
+        #
+        # 想关随时能在设置里关掉；老用户的设置不会被这行影响
+        # （_migrate 是「默认值打底、用户已存的覆盖」）。
+        "ai_mcp_enabled": True,
         # 默认模型给 DeepSeek，不给 OpenAI。
         #
         # 这是**泛用户第一次打开时的值**，而 OpenAI 对国内用户是双重门槛：

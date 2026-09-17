@@ -131,6 +131,23 @@ if not QML_DIR.exists():          # 开发模式下走这里
 # 存在这里，升级不会覆盖掉。
 THEME_FILE = ROOT / "theme.json"
 
+# 随包发布的 MCP server（目前是 pawkit）。
+#
+# 打包后在只读资源目录（_MEIPASS/mcp_servers）；开发模式在项目根目录下。
+# stdio MCP 需要一个能被 spawn 的子进程，而**打包后没有 python.exe** ——
+# 所以「怎么启动它」由 pawpet/ai/mcp.py 的 resolve_command() 统一处理：
+# 一律改成用当前解释器（或 PawPet.exe 自己）跑 `--mcp-server <名字>`。
+MCP_DIR = RESOURCE_DIR / "mcp_servers"
+if not MCP_DIR.exists():          # 开发模式下走这里
+    MCP_DIR = PACKAGE_DIR.parent / "mcp_servers"
+
+# MCP 的服务器清单。
+#
+# 注意它在**数据目录**（ROOT）而不是资源目录：用户要能自己加 server，
+# 而资源目录打包后是只读的。首次启动时会从随包的模板里播种一份
+# （见 pawpet/ai/mcp.py 的 ensure_config）。
+MCP_CONFIG = ROOT / "mcp_servers.json"
+
 DEBUG = bool(os.environ.get("PAWPET_DEBUG"))
 
 

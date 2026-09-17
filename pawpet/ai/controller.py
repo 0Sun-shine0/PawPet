@@ -25,6 +25,7 @@ from ..config import (
     AI_DIR,
     AUDIT_FILE,
     LIVE_PREVIEW,
+    MCP_CONFIG,
     ROOT,
     read_env_value,
     save_env_value,
@@ -53,6 +54,7 @@ from .agent import (
 )
 from .client import AIClient, AiError
 from . import history as history_mod
+from . import mcp as mcp_mod
 from .mcp import MCPClient
 from .tools import ToolContext, openai_tools
 from .vision import ScreenCapture, downscale_png
@@ -84,6 +86,8 @@ class AiController(QObject):
     stepsChanged = Signal()
     # 对话历史变了（切会话 / 删会话 / 新存档）
     historyChanged = Signal()
+    # MCP 连接状态变了（连上/断开/工具数变化）
+    mcpChanged = Signal()
     toastRequested = Signal(str, str)
     # 自动记忆学到了东西。和 _learnedIn 分开：
     # _learnedIn 是线程桥（工作线程 → 主线程），这个是主线程上的对外广播，
@@ -181,7 +185,25 @@ class AiController(QObject):
         self._batchIn.connect(self._apply_batch)
 
         self._load_persisted_preview()
+
+        # MCP 配置：首启从随包的模板播种一份到数据目录。
+        #
+        # 为什么要有这一步：配置在**数据目录**（用户得能自己加 server），
+        # 而数据目录在全新安装时是空的 —— 不播种的话，界面会显示
+        # 「没有 mcp_servers.json」，用户面对一个不知道填什么的输入框。
+        try:
+            mcp_mod.ensure_config(MCP_CONFIG)
+        except Exception:  # noqa: BLE001 - 播种失败不该影响启动
+            pass
+
         self._greet()
+
+        # 自动连 MCP。**放在 _greet 之后**：连接过程会往对话里 push 一条
+        # 「已连接…」的说明，得排在问候语后面才顺。
+        #
+        # 这也是原来最大的缺口：connectMcp() 有定义但**没有任何调用点**，
+        # 于是 pawkit 那 8 个工具一次都没在真实对话里出现过。
+        self._auto_connect_mcp()
 
     # ---------------------------------------------------------------- 启动语
     def _greet(self) -> None:
@@ -736,13 +758,24 @@ class AiController(QObject):
 
     @Property(bool, notify=settingsChanged)
     def mcpEnabled(self) -> bool:
-        return bool(self._settings.get("ai_mcp_enabled", False))
+        return bool(self._settings.get("ai_mcp_enabled", True))
 
     @mcpEnabled.setter
     def mcpEnabled(self, value: bool) -> None:
-        self._settings["ai_mcp_enabled"] = bool(value)
+        wanted = bool(value)
+        if wanted == self.mcpEnabled:
+            return
+        self._settings["ai_mcp_enabled"] = wanted
         self._store.save()
         self.settingsChanged.emit()
+        # **开关要立刻起作用。** 原来只是存了个值：打开之后不连、关掉之后
+        # 也不断 —— 用户点了开关却什么都没发生，只能重启碰运气。
+        if wanted:
+            self.connectMcp()
+            self.toastRequested.emit("MCP 已打开", self.mcpHint())
+        else:
+            self.disconnectMcp()
+            self.toastRequested.emit("MCP 已关闭", "外部工具不再参与")
 
     @Property(str, notify=settingsChanged)
     def capabilityReport(self) -> str:
@@ -1695,72 +1728,141 @@ class AiController(QObject):
     # ------------------------------------------------------------------ MCP
     @Slot(result=str)
     def mcpStatus(self) -> str:
-        config_path = ROOT / "mcp_servers.json"
-        if not config_path.exists():
-            return "没有 mcp_servers.json"
+        config_path = MCP_CONFIG
         if not self.mcpEnabled:
             return "MCP 已关闭"
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            return f"配置读取失败：{exc}"
-        servers = [s for s in (config.get("servers") or []) if s.get("enabled")]
+        servers, problem = mcp_mod.load_config(config_path)
+        if problem:
+            return problem
         if not servers:
             return "配置里没有启用的 server"
         lines = []
         for spec in servers:
+            name = spec.get("name") or "?"
             connected = next((c for c in self._mcp_clients
-                              if c.name == spec.get("name") and c.running), None)
+                              if c.name == name and c.running), None)
             if connected is None:
-                lines.append(f"{spec.get('name', '?')}：未连接")
+                lines.append(f"{name}：未连接")
             else:
-                lines.append(f"{spec.get('name', '?')}：已连接，{len(connected.tools)} 个工具")
+                lines.append(f"{name}：已连接，{len(connected.tools)} 个工具")
         return "\n".join(lines)
+
+    @Property("QVariantList", notify=mcpChanged)
+    def mcpServers(self) -> list:
+        """给界面画的 server 清单：名字、开没开、连上没有、几个工具。
+
+        比 `mcpStatus` 那个纯文本好用 —— 界面要标状态点、要显示工具数，
+        从一段文字里抠不出来。
+        """
+        servers, _problem = mcp_mod.load_config(MCP_CONFIG)
+        out = []
+        for spec in servers:
+            name = str(spec.get("name") or "?")
+            client = next((c for c in self._mcp_clients if c.name == name), None)
+            running = client is not None and client.running
+            out.append({
+                "name": name,
+                "running": running,
+                "toolCount": len(client.tools) if (client and running) else 0,
+                "tools": ([t.get("name", "") for t in client.tool_summaries()]
+                          if (client and running) else []),
+                "command": " ".join(mcp_mod.resolve_command(spec.get("command"))),
+            })
+        return out
+
+    @Property(str, constant=True)
+    def mcpConfigPath(self) -> str:
+        return str(MCP_CONFIG)
+
+    @Slot(result=str)
+    def mcpHint(self) -> str:
+        """给界面用的一句话说明。"""
+        if not self.mcpEnabled:
+            return "关着。打开之后，下面这些 server 提供的工具就能被小爪调用。"
+        servers, problem = mcp_mod.load_config(MCP_CONFIG)
+        if problem:
+            return problem
+        if not servers:
+            return "配置里没有启用的 server。"
+        running = sum(1 for c in self._mcp_clients if c.running)
+        return f"已连接 {running} / {len(servers)} 个 server。"
 
     @Slot()
     def connectMcp(self) -> None:
-        config_path = ROOT / "mcp_servers.json"
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except OSError:
-            self._push("error", "读不到 mcp_servers.json")
+        """连上配置里所有启用的 server。"""
+        servers, problem = mcp_mod.load_config(MCP_CONFIG)
+        if problem:
+            self._push("error", f"MCP：{problem}", ephemeral=True)
+            self.toastRequested.emit("MCP 连不上", problem)
             return
-        except json.JSONDecodeError as exc:
-            self._push("error", f"mcp_servers.json 格式有误：{exc}")
-            return
-
-        servers = [s for s in (config.get("servers") or []) if s.get("enabled")]
         if not servers:
-            self._push("info", "mcp_servers.json 里没有启用的 server。"
-                               "把 enabled 改成 true 并填好 command 再试。")
+            self._push("info", "配置里没有启用的 server。", ephemeral=True)
             return
 
         for spec in servers:
             name = spec.get("name") or "unnamed"
             existing = next((c for c in self._mcp_clients if c.name == name), None)
             if existing is not None and existing.running:
-                self._push("info", f"MCP {name} 已经连着了")
                 continue
+
+            command = mcp_mod.resolve_command(spec.get("command"))
+            if not command:
+                self._push("error", f"MCP {name}：配置里没有 command",
+                           ephemeral=True)
+                self.toastRequested.emit("MCP 配置不完整", f"{name} 缺少 command")
+                continue
+
             client = MCPClient(
                 name=name,
-                command=spec.get("command") or [],
+                command=command,
                 cwd=spec.get("cwd"),
                 timeout=float(spec.get("timeout", 20)),
             )
             ok, message = client.start()
             if ok:
                 self._mcp_clients.append(client)
-                names = ", ".join(t["name"] for t in client.tool_summaries()) or "无"
-                self._push("info", f"MCP {name} 已连接：{message}\n可用工具：{names}")
+                tools = ", ".join(t["name"] for t in client.tool_summaries())
+                # **连接状态是临时消息，不进对话记录。**
+                #
+                # 它每次启动都会重新生成 —— 存下来的话，重启几次历史里就
+                # 堆满「MCP「pawkit」已连接…」，把用户真正问过的东西淹掉。
+                # 和问候语同一个道理：对话记录该是「用户和 AI 说过的话」，
+                # 不是启动日志。当前连接状态由「外部工具」那张卡片负责显示。
+                #
+                # 措辞注意别叠字：client.start() 返回的 message 本身可能就是
+                # 「已连接，8 个工具」，前面再写一遍「已连接」就成了
+                # 「已连接：已连接，8 个工具」。
+                self._push("info",
+                           f"外部工具「{name}」可用（{message}）\n"
+                           f"能调的工具：{tools or '（无）'}",
+                           ephemeral=True)
             else:
-                self._push("error", f"MCP {name} 连接失败：{message}")
+                self._push("error", f"MCP「{name}」连接失败：{message}",
+                           ephemeral=True)
+                self.toastRequested.emit("MCP 连接失败", f"{name}：{message}"[:120])
+        self.mcpChanged.emit()
 
     @Slot()
     def disconnectMcp(self) -> None:
         for client in self._mcp_clients:
             client.stop()
         self._mcp_clients.clear()
-        self._push("info", "已断开所有 MCP 连接")
+        self.mcpChanged.emit()
+        self._push("info", "已断开所有 MCP 连接", ephemeral=True)
+
+    def _auto_connect_mcp(self) -> None:
+        """启动时自动连。
+
+        以前必须手动点「连接」，而那个按钮**根本不存在** —— 于是 MCP
+        永远连不上、pawkit 那 8 个工具一次都没在真实对话里出现过。
+        现在开了开关就自动连。
+        """
+        if not self.mcpEnabled:
+            return
+        try:
+            self.connectMcp()
+        except Exception as exc:  # noqa: BLE001 - 连不上不该影响启动
+            self._push("error", f"MCP 自动连接失败：{exc}")
 
     def shutdown(self) -> None:
         # **退出前把还没落盘的对话写掉。**

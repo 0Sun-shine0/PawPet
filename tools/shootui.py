@@ -231,6 +231,15 @@ def main() -> int:
         ai_page.setProperty("showHistory", False)
         pump(20)
 
+    # 外部工具（MCP）：这一块以前**完全不存在**，connectMcp 零调用点
+    if ai_page is not None:
+        ai_page.setProperty("showMcpDetail", True)
+        pump(60)
+        grab("12-外部工具-展开")
+        ai_page.setProperty("showMcpDetail", False)
+        pump(40)
+        grab("13-外部工具-收起")
+
     # 模型设置展开
     if ai_page is not None:
         ai_page.setProperty("showSettings", True)

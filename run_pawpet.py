@@ -35,6 +35,80 @@ def show_error(title: str, message: str) -> None:
         pass
 
 
+def _ensure_stdio() -> str:
+    """给窗口程序补上 stdin/stdout。失败返回原因，成功返回空串。
+
+    打包后是 GUI 子系统程序（console=False），PyInstaller 会把
+    `sys.stdout` / `sys.stdin` 设成 None。但 MCP 走的就是 stdio ——
+    父进程是用管道启动我们的，fd 0/1 其实是好的，只是 Python 没把它
+    包成文本流。这里补上。
+
+    不补的话，`send()` 第一次 `sys.stdout.write` 就是
+    `AttributeError: 'NoneType' object has no attribute 'write'`，
+    而且发生在协议层 —— 客户端只会看到「连上了但没有工具」。
+    """
+    import os
+
+    for name, fd, mode in (("stdout", 1, "w"), ("stdin", 0, "r")):
+        stream = getattr(sys, name, None)
+        if stream is not None:
+            continue
+        try:
+            setattr(sys, name, os.fdopen(os.dup(fd), mode,
+                                         encoding="utf-8",
+                                         buffering=1 if mode == "w" else -1))
+        except OSError as exc:
+            return f"{name} 打不开：{exc}"
+    return ""
+
+
+def run_mcp_server(name: str) -> int:
+    """把自己当成一个 MCP server 跑起来（`--mcp-server <名字>`）。
+
+    **为什么需要这个模式。** stdio MCP 的客户端要 spawn 一个子进程，
+    而打包之后**没有 python.exe** —— 配置里写
+    `["python", "mcp_servers/pawkit.py"]` 会直接「找不到可执行文件」。
+    所以让 exe 自己兼任 server：`PawPet.exe --mcp-server pawkit`。
+
+    开发模式下 `sys.executable` 是 venv 的 python，同样能跑这个入口 ——
+    于是**同一份配置在两种环境下都对**，不需要按环境写两套。
+
+    注意这个分支在**创建任何 Qt 对象和抢单实例互斥体之前**返回：
+    主程序正开着的时候，另一个 `--mcp-server` 进程必须能起来
+    （它就是被主程序 spawn 的）。
+    """
+    problem = _ensure_stdio()
+    if problem:
+        print(f"[mcp] 无法启动 {name}：{problem}", file=sys.stderr)
+        return 1
+
+    try:
+        from pawpet.ai.mcp import server_path
+    except Exception as exc:  # noqa: BLE001
+        print(f"[mcp] 读不到 server 位置：{exc}", file=sys.stderr)
+        return 1
+
+    path = server_path(name)
+    if path is None:
+        print(f"[mcp] 没有内置的 server：{name}", file=sys.stderr)
+        return 1
+
+    # 直接跑那个脚本（它本来就是 `if __name__ == "__main__"` 的结构）。
+    # 用 runpy 而不是 import：不挂进 sys.modules，退出时也不用清理全局状态。
+    import runpy
+
+    sys.argv = [str(path)]
+    try:
+        runpy.run_path(str(path), run_name="__main__")
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[mcp] {name} 异常退出：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def selfcheck() -> int:
     """把关键模块**真的 import 一遍**，报告结果，然后退出。
 
@@ -105,6 +179,20 @@ def selfcheck() -> int:
 
 
 def main() -> int:
+    # --mcp-server <名字>：把自己当成 MCP server 跑。
+    #
+    # **必须排在所有东西前面**（早于 load_env、早于 Qt、早于单实例互斥体）：
+    # 这个进程是被主程序 spawn 出来的子进程，主程序正开着 ——
+    # 去抢互斥体的话会「检测到已有实例」然后安静退出，
+    # 表现出来就是 MCP「连上了但一个工具都没有」。
+    if "--mcp-server" in sys.argv:
+        index = sys.argv.index("--mcp-server")
+        target = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        if not target:
+            print("[mcp] --mcp-server 后面要跟 server 名字", file=sys.stderr)
+            return 1
+        return run_mcp_server(target)
+
     # --selfcheck：只做导入自检，不启动界面。给打包后的冒烟测试用。
     if "--selfcheck" in sys.argv:
         try:

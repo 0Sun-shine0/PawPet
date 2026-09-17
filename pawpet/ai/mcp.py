@@ -6,18 +6,144 @@
    这里按 id 匹配，把通知单独放一边。
 2. 同步 readline 一旦 server 不吭声就会永久卡死 —— 这里用后台读线程 + 超时。
 3. 进程退出/管道断裂没有兜底 —— 这里每次都检查并给出可读的错误。
+
+**怎么启动 server：见 resolve_command()。** 打包之后没有 python.exe，
+所以配置里写 `["python", "mcp_servers/pawkit.py"]` 是起不来的 ——
+统一改写成「用当前解释器跑 `--mcp-server <名字>`」。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 PROTOCOL_VERSION = "2024-11-05"
 CLIENT_INFO = {"name": "pawpet", "version": "2.0"}
+
+# 配置里用这个前缀表示「跑随包发布的内置 server」，例如 ["builtin", "pawkit"]。
+BUILTIN = "builtin"
+
+# 随包发布的模板。首次启动时播种到数据目录。
+DEFAULT_CONFIG = {
+    "servers": [
+        {
+            "name": "pawkit",
+            "command": [BUILTIN, "pawkit"],
+            "enabled": True,
+        }
+    ]
+}
+
+
+def builtin_command(name: str) -> list[str]:
+    """跑内置 server 的命令行。**开发模式和打包后是两种写法。**
+
+    打包后：`sys.executable` 就是 PawPet.exe，它自己处理 `--mcp-server`，
+            所以 `[exe, "--mcp-server", name]` 就够了。
+
+    开发中：`sys.executable` 是**裸解释器**（venv 的 python.exe），
+            它不认识 `--mcp-server`，会打印一行 usage 然后退出 ——
+            客户端看到的是「MCP server 意外退出：Try `python -h'」。
+            所以必须先告诉它跑哪个入口脚本：
+            `[python, run_pawpet.py, "--mcp-server", name]`。
+
+    这个区别是实测踩出来的：打包形态能用、开发形态不能用，
+    而两边的配置是同一份。
+    """
+    from ..config import PACKAGE_DIR, is_frozen
+
+    if is_frozen():
+        return [sys.executable, "--mcp-server", name]
+
+    entry = PACKAGE_DIR.parent / "run_pawpet.py"
+    return [sys.executable, str(entry), "--mcp-server", name]
+
+
+def resolve_command(command) -> list[str]:
+    """把配置里的 command 解析成**当前环境下真能执行**的命令行。
+
+    三种情况：
+
+    * `["builtin", "pawkit"]` → 用当前解释器跑内置的 pawkit。
+    * `["python", "mcp_servers/pawkit.py"]`（老配置，也是我们随包发的默认值）
+      → **同样改写成内置形态**。打包后没有 python、也没有源码目录，
+      照原样 spawn 只会得到「找不到可执行文件」。
+    * 其它（用户自己加的外部 server）→ 原样返回，那是他的环境他的事。
+    """
+    parts = [str(item).strip() for item in (command or []) if str(item).strip()]
+    if not parts:
+        return []
+
+    if parts[0] == BUILTIN:
+        name = parts[1] if len(parts) > 1 else ""
+        return builtin_command(name) if name else []
+
+    # 认「我们自己发的」脚本：路径里有 mcp_servers/ 且是 .py
+    for part in parts:
+        normalized = part.replace("\\", "/")
+        if normalized.startswith("mcp_servers/") and normalized.endswith(".py"):
+            name = Path(normalized).stem
+            if name:
+                return builtin_command(name)
+
+    return parts
+
+
+def server_path(name: str) -> Path | None:
+    """内置 server 的脚本路径。找不到返回 None。"""
+    from ..config import MCP_DIR
+
+    candidate = MCP_DIR / f"{name}.py"
+    return candidate if candidate.exists() else None
+
+
+def ensure_config(path: Path | None = None) -> tuple[Path, bool]:
+    """确保数据目录里有一份 MCP 配置。返回 (路径, 是不是刚播种的)。
+
+    为什么要在数据目录里放一份、而不直接读随包的：**用户要能自己加 server**，
+    而打包后资源目录是只读的（解包到 _MEIPASS、退出就删）。
+    所以首启播种一份到数据目录，之后用户改的都是那一份。
+    """
+    from ..config import MCP_CONFIG
+
+    target = Path(path or MCP_CONFIG)
+    if target.exists():
+        return target, False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        return target, True
+    except OSError:
+        # 写不进去（只读介质之类）就退回随包的那份，至少功能还在
+        return target, False
+
+
+def load_config(path: Path | None = None) -> tuple[list[dict], str]:
+    """读配置。返回 (启用的 server 列表, 错误说明)。"""
+    from ..config import MCP_CONFIG
+
+    target = Path(path or MCP_CONFIG)
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return [], f"没有 {target.name}"
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [], f"配置读不出来：{exc}"
+    if not isinstance(raw, dict):
+        return [], "配置格式不对（顶层要是对象）"
+    servers = raw.get("servers")
+    if not isinstance(servers, list):
+        return [], "配置里没有 servers 列表"
+    enabled = [s for s in servers if isinstance(s, dict) and s.get("enabled")]
+    return enabled, ""
 
 
 class MCPError(Exception):
@@ -43,8 +169,24 @@ class MCPClient:
         self._reader: threading.Thread | None = None
         self._stderr_lines: list[str] = []
         self.last_error = ""
+        self._atexit_done = False
 
     # ---------------------------------------------------------------- 生命周期
+    def _register_atexit_cleanup(self) -> None:
+        """进程退出时收掉子进程，避免留孤儿。"""
+        if getattr(self, "_atexit_done", False):
+            return
+        self._atexit_done = True
+        import atexit
+
+        def _cleanup() -> None:
+            try:
+                self.stop()
+            except Exception:  # noqa: BLE001 - 退出路径上不能抛
+                pass
+
+        atexit.register(_cleanup)
+
     @property
     def running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -71,6 +213,17 @@ class MCPClient:
             return False, f"找不到可执行文件：{self.command[0]}"
         except OSError as exc:
             return False, f"启动失败：{exc}"
+
+        # **保证子进程不会变成孤儿。**
+        #
+        # MCP server 是独立进程。正常退出时 controller.shutdown() 会收掉它，
+        # 但应用被强杀、崩溃、或者某个测试忘了调 shutdown 的时候，
+        # 它会一直挂在后台（实测：连跑整套测试时机器上会攒下十几个）。
+        #
+        # atexit 在这里是合适的位置：注册一次，进程无论怎么正常结束都会收。
+        # 用 atexit 而不是 __del__ —— 后者在解释器关闭时的执行时机不确定，
+        # subprocess 相关对象那时可能已经不可用了。
+        self._register_atexit_cleanup()
 
         self._reader = threading.Thread(target=self._read_stdout, name=f"mcp-{self.name}", daemon=True)
         self._reader.start()

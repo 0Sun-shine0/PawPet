@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -76,6 +77,52 @@ def main() -> int:
     qml_files = list(app_dir.rglob("Main.qml"))
     check("QML 资源已打进包里", len(qml_files) > 0,
           f"找到 {len(qml_files)} 个 Main.qml")
+
+    # ---------------------------------------------------- 内置 MCP server
+    #
+    # **这一节的存在本身就是教训。** 随包发的 pawkit（8 个工具）是 .py
+    # 脚本、不在 import 图里，PyInstaller 的静态分析看不到它 ——
+    # 曾经有很长一段时间它压根没被打进包里，于是装出来的小爪显示
+    # 「没有内置的 server：pawkit」，MCP 那套东西一次都没生效过。
+    #
+    # 模块自检也抓不到：`--selfcheck` 只 import python 模块，
+    # 而 pawkit 是被**当脚本 spawn** 的。
+    print("\n内置 MCP server…")
+    mcp_dir = None
+    for candidate in app_dir.rglob("pawkit.py"):
+        mcp_dir = candidate.parent
+        break
+    check("pawkit.py 打进包了", mcp_dir is not None,
+          "没打进去的话「外部工具」那一栏会显示找不到 server")
+    check("没把 __pycache__ 塞给用户",
+          not any(mcp_dir.rglob("*.pyc")) if mcp_dir else False,
+          "陈旧字节码不该随包发（实测混进过一个 3.14 的 .pyc）")
+
+    # 真的当 MCP server 跑一次：喂一条 initialize，看有没有合法响应。
+    #
+    # 打包后是 GUI 子系统程序（console=False），PyInstaller 会把
+    # sys.stdout/stdin 设成 None —— 而 MCP 走的就是 stdio。没有
+    # run_pawpet.py 里的 _ensure_stdio() 兜底，这里会连上但一个工具都没有。
+    if exe.exists():
+        request = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "packtest", "version": "1"}},
+        })
+        try:
+            served = subprocess.run(
+                [str(exe), "--mcp-server", "pawkit"],
+                input=request, capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=120, cwd=str(app_dir))
+            handshake = served.stdout or ""
+            check("exe 能当 MCP server 用（窗口程序没有 stdout，靠兜底补上）",
+                  '"protocolVersion"' in handshake, handshake[:120])
+            check("握手报告了工具能力",
+                  '"tools"' in handshake and '"pawkit"' in handshake,
+                  handshake[:120])
+        except subprocess.TimeoutExpired:
+            check("exe 能当 MCP server 用", False, "握手超时（可能卡在读 stdin）")
 
     # ---------------------------------------------------------- 模块自检
     #

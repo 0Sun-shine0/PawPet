@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -133,6 +134,21 @@ class ScreenCapture:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ 抓取
+    @staticmethod
+    def _capture_hint(exc: Exception) -> str:
+        """把 mss 的底层报错翻成用户能懂、能处理的一句话。
+
+        `Windows graphics function failed (no error provided): BitBlt`
+        这种原文对用户毫无意义 —— 他不知道这是什么、也不知道该干什么。
+        而真实原因绝大多数时候只有一个：**屏幕当前看不到**
+        （锁屏了、屏保起来了、或者正在切换用户）。
+        """
+        raw = str(exc)
+        if "BitBlt" in raw or "graphics function failed" in raw:
+            return ("现在看不到屏幕内容 —— 通常是屏幕锁上了、屏保起来了，"
+                    "或者刚切过用户。解锁之后再让我看就行。")
+        return f"截屏失败：{raw}"
+
     def grab(self, monitor: int = 1, max_edge: int = MODEL_MAX_EDGE,
              with_preview: bool = True) -> Shot:
         if not self.available:
@@ -153,7 +169,23 @@ class ScreenCapture:
         try:
             raw = device.grab(target)
         except Exception as exc:  # noqa: BLE001
-            return Shot(False, f"截屏失败：{exc}")
+            # **抓不到就重试一次，然后说人话。**
+            #
+            # 实测（整套测试连跑时）：BitBlt 会在一段时间里 100% 失败，
+            # 过后又自己好了。原因是桌面进入了抓不到的状态 ——
+            # 屏保切进来、正在锁屏、或者会话在切换。Windows 不允许
+            # 捕获锁屏后的安全桌面，这是系统行为不是我们的 bug。
+            #
+            # 而用户**天天**会遇到这个（离开工位、屏保起来），所以：
+            #   1. 先重试一次 —— 瞬时抖动不该直接判死；
+            #   2. 还不行就给一句人话，而不是把 mss 的
+            #      「Windows graphics function failed (no error provided):
+            #      BitBlt」原样甩给用户。那句话既看不懂、也猜不到怎么办。
+            time.sleep(0.25)
+            try:
+                raw = device.grab(target)
+            except Exception:  # noqa: BLE001
+                return Shot(False, self._capture_hint(exc))
 
         frame = np.asarray(raw)[:, :, :3].copy()
         real_h, real_w = frame.shape[:2]

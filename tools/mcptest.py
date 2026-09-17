@@ -181,6 +181,15 @@ def main() -> int:
     real = ROOT / "pet_data.json"
     store = Store(SCRATCH / "p.json", SCRATCH / "p.bak.json")
     store.load()
+    # **关掉自动连接，这个用例要的是受控环境。**
+    #
+    # Backend 启动时会自动连上随包的 pawkit（8 个工具），那样下面
+    # 「我注册的这个 client 被路由到了吗」就测不准了 —— 计数里混进了
+    # 真实 server 的工具，断言变成对总数的猜测。
+    #
+    # 分工：这个脚本测**接线**（用假 server，环境受控）；
+    # 「装了就能用」由 mcpwiringtest.py 负责（那里就该让真的连上）。
+    store.settings["ai_mcp_enabled"] = False
     backend = Backend(store)
 
     from pawpet.ai.actions import AuditLog, DesktopActions

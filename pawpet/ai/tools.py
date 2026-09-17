@@ -513,11 +513,27 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "remove_extension",
-        "**卸掉**一个自定义工具。用户说「那个不要了」「删掉」时用它。",
+        "**卸掉**一个自定义工具。用户说「那个不要了」「删掉」时用它。"
+        "卸掉的定义会进回收站，用 restore_extension 能捞回来。",
         _schema({
             "name": {**_STRING, "description": "要卸掉的工具名"},
         }, ["name"]),
-        Risk.READ,
+        # **必须是 CONFIRM，不能是 READ。**
+        #
+        # 它删的是用户自己攒下来的东西（实测这台机器上有 17 个手工打磨的
+        # 工具），而模型只听错一句话就能毁掉一个。原来这里是 READ ——
+        # 不确认、不提示、也没有后悔药。
+        Risk.CONFIRM,
+    ),
+    ToolSpec(
+        "restore_extension",
+        "从回收站把卸掉的自定义工具**捞回来**。用户说「把那个加回来」"
+        "「刚才删错了」时用它。",
+        _schema({
+            "name": {**_STRING, "description": "要恢复的工具名"},
+        }, ["name"]),
+        # 恢复等于重新启用一段可能执行代码的定义，也要用户点头
+        Risk.CONFIRM,
     ),
     # ------------------------------------------------------------ 定制界面
     # 「通过对话改主题」的落地。
@@ -1795,12 +1811,20 @@ class ToolContext:
                          f"  用过 {ext.run_count} 次")
             if ext.description:
                 lines.append(f"      {ext.description}")
+        # 把回收站里有什么也报出来 —— 否则用户看不到「还能捞回来」这件事，
+        # 卸载就会显得不可逆，而它其实可逆。
+        from .extensions import load_trash
+
+        trashed = load_trash(self._ext_book()[0])
         lines.append("")
-        lines.append("卸掉用 remove_extension。")
+        lines.append("卸掉用 remove_extension（会先放进回收站，能加回来）。")
+        if trashed:
+            names = "、".join(str(item.get("name")) for item in trashed)
+            lines.append(f"回收站里还有：{names} —— 用 restore_extension 加回来。")
         return True, "\n".join(lines), None
 
     def _do_remove_extension(self, args: dict):
-        from .extensions import save_all
+        from .extensions import move_to_trash, save_all
 
         name = str(args.get("name") or "").strip().lower()
         if not name:
@@ -1810,10 +1834,41 @@ class ToolContext:
         if len(kept) == len(items):
             names = "、".join(item.name for item in items) or "（一个都没有）"
             return False, f"没有叫「{name}」的自定义工具。现有的：{names}", None
+
+        # **先留一手再删。** 删掉的定义进回收站，说错了还能捞回来 ——
+        # 这是目标里「回滚」的落地。回收站写失败也照样删（不能因为
+        # 保险丝坏了就办不了事），但会在结果里说清「这次没法恢复」。
+        target = next(item for item in items if item.name == name)
+        trashed, trash_msg = move_to_trash(path, target)
+
         ok, message = save_all(path, kept)
         if not ok:
             return False, message, None
-        return True, f"已卸掉「{name}」。", None
+        if trashed:
+            return True, f"已卸掉「{name}」。想加回来说一声就行。", None
+        return True, f"已卸掉「{name}」。**这次没能留备份**（{trash_msg}），加不回来了。", None
+
+    def _do_restore_extension(self, args: dict):
+        from .extensions import load_trash, save_all, take_from_trash
+
+        name = str(args.get("name") or "").strip().lower()
+        if not name:
+            return False, "要恢复哪一个？给我工具名。", None
+        path, items, _save = self._ext_book()
+
+        if any(item.name == name for item in items):
+            return False, f"「{name}」已经在列表里了，不用恢复。", None
+
+        recovered = take_from_trash(path, name)
+        if recovered is None:
+            gone = "、".join(
+                str(item.get("name")) for item in load_trash(path)) or "（空的）"
+            return False, f"回收站里没有「{name}」。里面有：{gone}", None
+
+        ok, message = save_all(path, [*items, recovered])
+        if not ok:
+            return False, message, None
+        return True, f"已把「{name}」加回来了。", None
 
     def _max_extension_level(self) -> str:
         """当前允许造到哪一档。

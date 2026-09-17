@@ -520,6 +520,85 @@ def save_all(path: Path, items: list[Extension]) -> tuple[bool, str]:
         return False, f"写不进 {path.name}：{exc}"
 
 
+# ---------------------------------------------------------------- 回收站
+#
+# **为什么要这个。** `remove_extension` 原来是 `Risk.READ` —— 不用确认、
+# 删掉就没了。用户手里可能有十几个手工打磨出来的工具（实测这台机器上
+# 有 17 个），模型听错一句话就能永久毁掉一个，而且没有任何提示。
+#
+# 目标里的「回滚」就落在这里：删掉的定义先进回收站，能捞回来。
+# 放**独立文件**而不是往 extensions.json 里塞一个 "removed" 键 ——
+# 后者要改 load_all/save_all 的读写法，而那两个函数正被 17 个真实工具
+# 依赖，动它们的风险比收益大。
+
+TRASH_FILE = "extensions.removed.json"
+
+# 回收站最多留多少个。每个定义按 1KB 估，30 个约 30KB，可以接受。
+TRASH_LIMIT = 30
+
+
+def trash_path(path: Path) -> Path:
+    """和 extensions.json 同目录的回收站文件。"""
+    return Path(path).parent / TRASH_FILE
+
+
+def load_trash(path: Path) -> list[dict]:
+    """读回收站。坏了就当空的 —— 它只是保险，不该拦住任何正常流程。"""
+    target = trash_path(path)
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    items = raw.get("removed")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and item.get("name")]
+
+
+def save_trash(path: Path, items: list[dict]) -> tuple[bool, str]:
+    target = trash_path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"removed": items[-TRASH_LIMIT:]}
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(target)
+        return True, "已保存"
+    except OSError as exc:
+        return False, f"写不进 {target.name}：{exc}"
+
+
+def move_to_trash(path: Path, ext: Extension) -> tuple[bool, str]:
+    """把一个定义放进回收站（卸掉之前先留一手）。"""
+    items = load_trash(path)
+    payload = ext.as_dict()
+    payload["removedAt"] = time.time()
+    # 同名的只留最新一条，免得反复装卸把回收站刷满
+    items = [item for item in items if item.get("name") != ext.name]
+    items.append(payload)
+    return save_trash(path, items)
+
+
+def take_from_trash(path: Path, name: str) -> Extension | None:
+    """从回收站捞一个出来（捞出来就从回收站移除）。"""
+    name = (name or "").strip().lower()
+    items = load_trash(path)
+    found = None
+    kept = []
+    for item in items:
+        if found is None and str(item.get("name") or "").lower() == name:
+            found = item
+            continue
+        kept.append(item)
+    if found is None:
+        return None
+    save_trash(path, kept)
+    return Extension.from_dict(found)
+
+
 def as_openai_tools(items: list[Extension]) -> list[dict]:
     """把装好的扩展转成给模型的工具定义。
 

@@ -123,6 +123,11 @@ def main() -> int:
     if SCRATCH.exists():
         shutil.rmtree(SCRATCH, ignore_errors=True)
     SCRATCH.mkdir(parents=True, exist_ok=True)
+    # 对话持久化之后每个 Store 需要自己的目录：
+    # conversations.json 落在 store.path.parent，共享目录会让
+    # 后面的用例「恢复」出前面的对话，断言全部看到多余消息。
+    for _tag in "abcde":
+        (SCRATCH / f"case_{_tag}").mkdir(parents=True, exist_ok=True)
 
     from PySide6.QtCore import QCoreApplication
 
@@ -167,7 +172,7 @@ def main() -> int:
     ])
     server, url = make_server(model)
 
-    store = Store(SCRATCH / "a.json", SCRATCH / "a.bak.json")
+    store = Store(SCRATCH / "case_a" / "a.json", SCRATCH / "case_a" / "a.bak.json")
     store.load()
     controller = AiController(store)
     wire(url)
@@ -231,7 +236,7 @@ def main() -> int:
         {"role": "assistant", "content": "你没回我，那我就先不动了。"},
     ])
     server2, url2 = make_server(model2)
-    store2 = Store(SCRATCH / "b.json", SCRATCH / "b.bak.json")
+    store2 = Store(SCRATCH / "case_b" / "b.json", SCRATCH / "case_b" / "b.bak.json")
     store2.load()
     controller2 = AiController(store2)
     wire(url2)
@@ -268,7 +273,7 @@ def main() -> int:
         {"role": "assistant", "content": "好的，开始整理。"},
     ])
     server3, url3 = make_server(model3)
-    store3 = Store(SCRATCH / "c.json", SCRATCH / "c.bak.json")
+    store3 = Store(SCRATCH / "case_c" / "c.json", SCRATCH / "case_c" / "c.bak.json")
     store3.load()
     controller3 = AiController(store3)
     wire(url3)
@@ -331,7 +336,7 @@ def main() -> int:
         {"role": "assistant", "content": "写好了。"},
     ])
     server4, url4 = make_server(model4)
-    store4 = Store(SCRATCH / "d.json", SCRATCH / "d.bak.json")
+    store4 = Store(SCRATCH / "case_d" / "d.json", SCRATCH / "case_d" / "d.bak.json")
     store4.load()
     controller4 = AiController(store4)
     wire(url4)
@@ -369,7 +374,7 @@ def main() -> int:
             {"role": "assistant", "content": "这段报错的意思是磁盘满了。"},
         ])
         server5, url5 = make_server(model5)
-        store5 = Store(SCRATCH / "e.json", SCRATCH / "e.bak.json")
+        store5 = Store(SCRATCH / "case_e" / "e.json", SCRATCH / "case_e" / "e.bak.json")
         store5.load()
         controller5 = AiController(store5)
         wire(url5)

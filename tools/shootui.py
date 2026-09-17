@@ -222,12 +222,22 @@ def main() -> int:
     backend.ai.confirmBatch()
     pump(20)
 
-    # 模型设置展开
+    # 历史对话面板：对话持久化之后新加的入口
     ai_page = dash.findChild(QObject, "aiPage", Qt.FindChildrenRecursively)
+    if ai_page is not None:
+        ai_page.setProperty("showHistory", True)
+        pump(40)
+        grab("11-历史对话")
+        ai_page.setProperty("showHistory", False)
+        pump(20)
+
+    # 模型设置展开
     if ai_page is not None:
         ai_page.setProperty("showSettings", True)
         pump(40)
         grab("07-ai-设置展开")
+        ai_page.setProperty("showSettings", False)
+        pump(20)
 
     # 弹窗：气泡 + 指令栏
     print("\n弹窗：")

@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 
 from ..config import (
     AI_DIR,
@@ -52,6 +52,7 @@ from .agent import (
     system_prompt,
 )
 from .client import AIClient, AiError
+from . import history as history_mod
 from .mcp import MCPClient
 from .tools import ToolContext, openai_tools
 from .vision import ScreenCapture, downscale_png
@@ -81,6 +82,8 @@ class AiController(QObject):
     modelsChanged = Signal()
     # 步骤时间线变了（「边做边说」）
     stepsChanged = Signal()
+    # 对话历史变了（切会话 / 删会话 / 新存档）
+    historyChanged = Signal()
     toastRequested = Signal(str, str)
     # 自动记忆学到了东西。和 _learnedIn 分开：
     # _learnedIn 是线程桥（工作线程 → 主线程），这个是主线程上的对外广播，
@@ -138,6 +141,35 @@ class AiController(QObject):
         # 新一轮开始时清空，不然会看到上一轮的步骤。
         self._steps: list[str] = []
 
+        # ------------------------------------------------------ 对话持久化
+        # 对话存独立文件（不放 pet_data.json —— 那个已经 560KB 且每次
+        # 全量重写）。详见 ai/history.py 的模块说明。
+        self._history_path = history_mod.default_path(store.path)
+        self._sessions: list = history_mod.load(self._history_path)
+        # 当前会话 = 最近那个（启动时接着上次说，而不是每次开新的）
+        self._current: object = self._sessions[0] if self._sessions else None
+        self._restored = False
+        if self._current is not None:
+            # 恢复的消息要把 html 重新算一遍：文件里不存 html
+            # （它是 text 的派生结果，存两份等于文件大一倍）。
+            from .markdown import to_plain, to_qt_html
+
+            for item in self._current.messages:
+                role = item.get("role") or "info"
+                text = item.get("text") or ""
+                item["html"] = (to_qt_html(text)
+                                if role in ("assistant", "error") else "")
+                item["plain"] = to_plain(text) if role == "assistant" else text
+            self._messages = list(self._current.messages)
+            self._restored = bool(self._messages)
+        # 写盘节流：一轮里可能 push 几十条（工具卡片），每条都写太浪费。
+        # 攒 2 秒写一次，退出时再补一次兜底。
+        self._history_dirty = False
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.setInterval(2000)
+        self._history_timer.timeout.connect(self._flush_history)
+
         self.actions.level = str(store.settings.get("ai_level", LEVEL_CONFIRM))
 
         self._statusIn.connect(self._apply_status)
@@ -153,14 +185,25 @@ class AiController(QObject):
 
     # ---------------------------------------------------------------- 启动语
     def _greet(self) -> None:
+        # 恢复了上次的对话就先说一句，否则用户会疑惑「这些消息哪来的」。
+        # 注意顺序：**先恢复的消息、再打招呼**，所以这句在最下面。
+        if self._restored:
+            count = len(self._messages)
+            self._push("info",
+                       f"接着上次的对话（{count} 条）。"
+                       "想从头开始就点「新对话」；以前的记录在「历史对话」里。",
+                       ephemeral=True)
+
         if not self.configured:
             self._push("error", "还没有配置模型 API Key。\n"
                                 "在下面的「模型设置」里填一个，或者把 key 写进 .env 的 OPENAI_API_KEY。\n"
-                                "任何 OpenAI 兼容的服务都可以：OpenAI、DeepSeek、Moonshot、本地 Ollama…")
+                                "任何 OpenAI 兼容的服务都可以：OpenAI、DeepSeek、Moonshot、本地 Ollama…",
+                       ephemeral=True)
         else:
             self._push("info", f"已就绪：{self.clientLabel}\n"
                                f"当前权限：{LEVEL_LABELS.get(self.actions.level, '逐步确认')}。\n"
-                               "可以直接说「帮我打开记事本写一段话」，或者「屏幕上这个报错是什么意思」。")
+                               "可以直接说「帮我打开记事本写一段话」，或者「屏幕上这个报错是什么意思」。",
+                       ephemeral=True)
 
     # ---------------------------------------------------------------- 基础状态
     @property
@@ -803,10 +846,175 @@ class AiController(QObject):
             # 「做完有交代」：干了几件事、文件存哪了、能不能撤回。
             # 只有这一轮的**最终**回答才带，中间过程不需要。
             "report": extra.get("report", ""),
+            # 临时消息（问候语、状态提示）不写进对话记录。
+            #
+            # 不标记的话：每次启动 _greet() 都 push 两条，而且它们会被
+            # 一起存进会话 —— 重启几次之后，历史里堆满「已就绪：…」
+            # 「还没有配置模型 API Key」。用户翻历史想看的是自己问过什么，
+            # 不是这些每次启动都会重新生成的提示。
+            "ephemeral": bool(extra.get("ephemeral", False)),
         }
         self._messages.append(item)
         del self._messages[:-MAX_CHAT_ITEMS]
         self.messagesChanged.emit()
+        # 落盘（节流）。这里**不是**每条都写文件，见 __init__ 里的说明。
+        self._touch_history()
+
+    # ------------------------------------------------------------ 对话持久化
+    def _touch_history(self) -> None:
+        """标脏 + 启动节流定时器。真正的写盘在 _flush_history。"""
+        self._history_dirty = True
+        timer = getattr(self, "_history_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _flush_history(self) -> None:
+        """把当前对话写回会话列表并落盘。**失败也不能影响正在跑的任务。**"""
+        if not getattr(self, "_history_dirty", False):
+            return
+        try:
+            # 临时消息（问候语这类）不进对话记录 —— 它们是「当前状态」，
+            # 每次启动都会重新生成，存下来只会越堆越多。见 _push 里的说明。
+            messages = [history_mod._trim_message(m)
+                        for m in self._messages
+                        if not m.get("ephemeral")]
+            if not messages:
+                # 空对话不用建会话 —— 否则启动一次就留一条空记录，
+                # 历史列表很快被「（没有对话内容）」刷满。
+                self._history_dirty = False
+                return
+
+            if self._current is None:
+                self._current = history_mod.new_session(messages)
+                self._sessions.insert(0, self._current)
+            else:
+                self._current.messages = messages
+                self._current.updated = time.time()
+                if not self._current.title:
+                    self._current.title = history_mod.make_title(messages)
+
+            # 单会话太长就切一个：会话列表是给人翻的，
+            # 一个几千条的会话点开就没法看了。
+            if len(messages) >= history_mod.SESSION_MAX_MESSAGES:
+                self._current = None
+
+            ok, message = history_mod.save(self._history_path, self._sessions)
+            if ok:
+                self._history_dirty = False
+            else:
+                self.last_history_error = message
+            self.historyChanged.emit()
+        except Exception:  # noqa: BLE001 - 存档失败绝不能把任务带崩
+            pass
+
+    @Property(bool, notify=historyChanged)
+    def restored(self) -> bool:
+        """这次启动是不是接着上次的对话。界面用它显示提示。"""
+        return bool(getattr(self, "_restored", False))
+
+    @Property("QVariantList", notify=historyChanged)
+    def conversations(self) -> list:
+        """历史会话列表（最近的在前），给界面画列表用。"""
+        out = []
+        for session in self._sessions:
+            if not session.messages:
+                continue
+            out.append({
+                "id": session.id,
+                "title": session.title or history_mod.make_title(session.messages),
+                "preview": session.preview(),
+                "count": len(session.messages),
+                "updated": session.updated,
+                "isCurrent": (self._current is not None
+                              and session.id == self._current.id),
+            })
+        return out
+
+    @Property(int, notify=historyChanged)
+    def conversationCount(self) -> int:
+        return len([s for s in self._sessions if s.messages])
+
+    @Slot(str)
+    def openConversation(self, session_id: str) -> None:
+        """切到某个历史会话。**会先存好当前这个**，不然切走就丢了。"""
+        if self.running:
+            self.toastRequested.emit("正在忙", "等这一轮跑完再切对话")
+            return
+        target = next((s for s in self._sessions if s.id == session_id), None)
+        if target is None:
+            return
+
+        # 先把当前会话存下来（用户可能刚问完还没到节流时间）
+        self._history_dirty = True
+        self._flush_history()
+
+        from .markdown import to_plain, to_qt_html
+
+        self._current = target
+        messages = []
+        for raw in target.messages:
+            item = dict(raw)
+            role = item.get("role") or "info"
+            text = item.get("text") or ""
+            item["html"] = (to_qt_html(text)
+                            if role in ("assistant", "error") else "")
+            item["plain"] = to_plain(text) if role == "assistant" else text
+            messages.append(item)
+        self._messages = messages
+        self._restored = True
+        self.messagesChanged.emit()
+        self.historyChanged.emit()
+        if self.runner is not None:
+            self.runner.reset()
+
+    @Slot()
+    def newConversation(self) -> None:
+        """开一个新对话。当前这个归档进历史。"""
+        if self.running:
+            self.toastRequested.emit("正在忙", "等这一轮跑完再开新对话")
+            return
+        self._history_dirty = True
+        self._flush_history()
+        self._messages = []
+        self._current = None
+        self._restored = False
+        self.messagesChanged.emit()
+        self.historyChanged.emit()
+        if self.runner is not None:
+            self.runner.reset()
+        self._push("info", "新对话开始。之前的记录在「历史对话」里。", ephemeral=True)
+
+    @Slot(str)
+    def deleteConversation(self, session_id: str) -> None:
+        """删掉一个历史会话。"""
+        before = len(self._sessions)
+        self._sessions = [s for s in self._sessions if s.id != session_id]
+        if len(self._sessions) == before:
+            return
+        if self._current is not None and self._current.id == session_id:
+            # 删的是当前这个 → 连带把界面清掉，不然会出现
+            # 「会话已经不在列表里了但消息还在屏幕上」的错位
+            self._current = None
+            self._messages = []
+            self._restored = False
+            self.messagesChanged.emit()
+        history_mod.save(self._history_path, self._sessions)
+        self.historyChanged.emit()
+
+    @Slot()
+    def clearHistory(self) -> None:
+        """清掉全部历史（保留当前对话）。"""
+        keep = self._current
+        self._sessions = [keep] if keep is not None else []
+        history_mod.save(self._history_path, self._sessions)
+        self.historyChanged.emit()
+        self.toastRequested.emit("已清空", "历史对话都删掉了，当前这段留着")
+
+    @Slot(result=str)
+    def historyFolder(self) -> str:
+        """历史文件在哪。用户想备份/看看时告诉他。"""
+        return str(self._history_path)
+
 
     # ---------------------------------------------------------------- 画面预览
     @Property(str, notify=previewChanged)
@@ -1399,8 +1607,19 @@ class AiController(QObject):
 
     @Slot()
     def clear(self) -> None:
+        """清空当前对话。
+
+        现在它同时**归档**当前会话并开一段新的 —— 清空在用户眼里就是
+        「从头开始」，那么之前那段应该能在「历史对话」里找回来，
+        而不是被无声抹掉。真正想删干净用 `clearHistory`。
+        """
+        self._history_dirty = True
+        self._flush_history()
         self._messages.clear()
+        self._current = None
+        self._restored = False
         self.messagesChanged.emit()
+        self.historyChanged.emit()
         if self.runner is not None:
             self.runner.reset()
 
@@ -1544,6 +1763,15 @@ class AiController(QObject):
         self._push("info", "已断开所有 MCP 连接")
 
     def shutdown(self) -> None:
+        # **退出前把还没落盘的对话写掉。**
+        #
+        # 写盘是节流的（2 秒一次），所以用户问完最后一句话、两秒内就关掉
+        # 程序的话，那一段会丢。退出时补一次兜底 —— 这是「对话不丢」
+        # 这个承诺最容易漏掉的一环。
+        try:
+            self._flush_history()
+        except Exception:  # noqa: BLE001 - 退出路径上不能抛
+            pass
         self.stop()
         for client in self._mcp_clients:
             client.stop()

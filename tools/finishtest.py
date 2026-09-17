@@ -260,7 +260,18 @@ def main() -> int:
     model = ScriptedModel(tool_name="ui_windows", limit=500)
     server, url = make_server(model)
 
-    store = Store(SCRATCH / "a.json", SCRATCH / "a.bak.json")
+    # 每个 Store 放**自己的子目录**。
+    #
+    # 对话持久化之后，conversations.json 落在 store.path.parent ——
+    # 两个 Store 如果同在 SCRATCH 根下，就会共享同一个对话文件，
+    # 于是第二段测试会「恢复」出第一段的对话，断言全部看到多余消息。
+    # 这是功能在正常工作（它就是要记住），测试得自己隔离。
+    dir_a = SCRATCH / "case_a"
+    dir_b = SCRATCH / "case_b"
+    dir_a.mkdir(parents=True, exist_ok=True)
+    dir_b.mkdir(parents=True, exist_ok=True)
+
+    store = Store(dir_a / "a.json", dir_a / "a.bak.json")
     store.load()
     controller = AiController(store)
     real_client = controller_module.AIClient
@@ -311,7 +322,7 @@ def main() -> int:
     model2 = ScriptedModel(tool_name="ui_windows", limit=0)
     server2, url2 = make_server(model2)
 
-    store2 = Store(SCRATCH / "b.json", SCRATCH / "b.bak.json")
+    store2 = Store(dir_b / "b.json", dir_b / "b.bak.json")
     store2.load()
     controller2 = AiController(store2)
 

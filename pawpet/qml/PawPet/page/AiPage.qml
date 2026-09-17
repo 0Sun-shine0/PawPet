@@ -17,6 +17,8 @@ Item {
     // 「想用别的服务商？」默认收起。给七家做选择题是负担不是帮助 ——
     // 默认那家（DeepSeek）能跑通，用户才有耐心看别的。
     property bool showProviders: false
+    // 「历史对话」面板。对话持久化之后，这是翻回去看的入口。
+    property bool showHistory: false
 
     // 给自测用的只读探针：两栏的真实宽度
     readonly property real leftColumnWidth: leftColumn.width
@@ -332,6 +334,7 @@ Item {
                 border.color: Theme.borderSoft
 
                 RowLayout {
+                    id: topRow
                     anchors.fill: parent
                     anchors.leftMargin: 14
                     anchors.rightMargin: 14
@@ -366,14 +369,209 @@ Item {
                         small: true
                         text: "测试连接"
                         variant: "ghost"
+                        // 窄窗口下先让位给「历史对话」和「新对话」——
+                        // 这两个是日常入口，测试连接是配好之后就不用的。
+                        // 不设这个的话，右侧按钮会把左边挤出可见区
+                        // （实测 1000px 宽时「历史对话」整个不见了）。
+                        visible: topRow.width > 520
                         enabled: !backend.ai.running
                         onClicked: backend.ai.testConnection()
+                    }
+                    // 「历史对话」：对话现在是持久化的，得有个地方翻回去
+                    PawButton {
+                        small: true
+                        text: "历史"
+                        glyph: "🕘"
+                        variant: page.showHistory ? "accent" : "ghost"
+                        enabled: !backend.ai.running
+                        onClicked: page.showHistory = !page.showHistory
+                    }
+                    // 「新对话」和「清空」是两件事：
+                    //   新对话 = 当前这段归档起来（之后还能翻到），开一段空的
+                    //   清空   = 同上（用户眼里「清空」就是从头开始，
+                    //            所以也归档，真正删干净在历史面板里）
+                    PawButton {
+                        small: true
+                        text: "新对话"
+                        variant: "ghost"
+                        enabled: !backend.ai.running && backend.ai.messageCount > 0
+                        onClicked: backend.ai.newConversation()
                     }
                     PawButton {
                         small: true
                         text: "清空"
                         variant: "ghost"
                         onClicked: backend.ai.clear()
+                    }
+                }
+            }
+
+            // -------------------------------------------------- 历史对话
+            // 对话持久化之后，这是「翻回去看上次怎么处理的」的入口。
+            // 用户的原话是「反复处理同类工单」，所以列表要能一眼看出
+            // 每个会话是干什么的（title 取第一条用户消息）。
+            Rectangle {
+                id: historyCard
+                Layout.fillWidth: true
+                visible: page.showHistory
+                implicitHeight: historyColumn.implicitHeight + 26
+                radius: Theme.radiusLg
+                color: Theme.surface
+                border.width: 1
+                border.color: Theme.border
+
+                ColumnLayout {
+                    id: historyColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 14
+                    spacing: 8
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: backend.ai.conversationCount > 0
+                                  ? ("历史对话（" + backend.ai.conversationCount + " 段）")
+                                  : "历史对话"
+                            color: Theme.text
+                            font.family: Theme.font
+                            font.pixelSize: Theme.fsSmall
+                            font.bold: true
+                        }
+                        PawButton {
+                            small: true
+                            variant: "ghost"
+                            text: "清空全部"
+                            enabled: backend.ai.conversationCount > 1
+                            onClicked: backend.ai.clearHistory()
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: backend.ai.conversationCount === 0
+                        text: "还没有历史。对话会自动存下来，关掉小爪再打开也还在。"
+                        color: Theme.textFaint
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsTiny
+                        wrapMode: Text.Wrap
+                    }
+
+                    // 最多显示最近 12 段：列表太长会把对话区顶没，
+                    // 而且再往前的记录本来也很少翻。
+                    Repeater {
+                        model: {
+                            var all = backend.ai.conversations
+                            return all.length > 12 ? all.slice(0, 12) : all
+                        }
+
+                        delegate: Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: convCol.implicitHeight + 14
+                            radius: Theme.radiusMd
+                            color: modelData.isCurrent ? Theme.surfaceHi
+                                                       : (convMouse.containsMouse
+                                                          ? Theme.surfaceHi
+                                                          : Theme.surfaceAlt)
+                            border.width: 1
+                            border.color: modelData.isCurrent
+                                          ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                                    Theme.accent.b, 0.5)
+                                          : Theme.borderSoft
+
+                            Behavior on color { ColorAnimation { duration: Theme.animFast } }
+
+                            ColumnLayout {
+                                id: convCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 8
+                                spacing: 2
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.title || "（没有标题）"
+                                        color: Theme.text
+                                        font.family: Theme.font
+                                        font.pixelSize: Theme.fsSmall
+                                        font.bold: modelData.isCurrent
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        visible: modelData.isCurrent
+                                        text: "当前"
+                                        color: Theme.accent
+                                        font.family: Theme.font
+                                        font.pixelSize: Theme.fsTiny
+                                        font.bold: true
+                                    }
+                                    Text {
+                                        text: modelData.count + " 条"
+                                        color: Theme.textFaint
+                                        font.family: Theme.font
+                                        font.pixelSize: Theme.fsTiny
+                                    }
+                                    // 删单条。放右边不抢注意力，但要用的时候找得到。
+                                    Rectangle {
+                                        implicitWidth: 18
+                                        implicitHeight: 18
+                                        radius: 9
+                                        color: delMouse.containsMouse
+                                               ? Theme.surfaceHi : "transparent"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "✕"
+                                            color: delMouse.containsMouse
+                                                   ? Theme.rose : Theme.textFaint
+                                            font.family: Theme.fontLatin
+                                            font.pixelSize: Theme.px(10)
+                                        }
+                                        MouseArea {
+                                            id: delMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: backend.ai.deleteConversation(modelData.id)
+                                        }
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.preview
+                                    color: Theme.textFaint
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.fsTiny
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            MouseArea {
+                                id: convMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                // 已经打开的那个不用再切一次（会白刷一遍界面）
+                                enabled: !modelData.isCurrent
+                                onClicked: backend.ai.openConversation(modelData.id)
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "存在本地：" + backend.ai.historyFolder()
+                        color: Theme.textFaint
+                        font.family: Theme.fontMono
+                        font.pixelSize: Theme.fsTiny
+                        elide: Text.ElideMiddle
                     }
                 }
             }

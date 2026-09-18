@@ -99,28 +99,31 @@ Item {
     // 每套形象的细节尺寸不同，集中放这里，绘制函数只读不写
     readonly property var geo: {
         switch (style) {
+        // badge（进度环）统一挪到头左上方悬浮 —— 原来在嘴的位置，
+        // 说话时嘴被徽章挡着，张嘴动画白做。左上正好空着
+        // （尾巴、思考气泡、Zzz 全在右边），跟思考气泡左右呼应。
         case "shiba":
             return { eyeY: 98, eyeLX: 78, eyeRX: 122, eyeW: 19, eyeH: 21,
                      eyeColor: "#3A2E28",
-                     badgeX: 100, badgeY: 162, badgeR: 21,
+                     badgeX: 30, badgeY: 60, badgeR: 15,
                      tailX: 146, tailY: 104, tailW: 58, tailH: 74,
                      tailOX: 6, tailOY: 58, mouthX: 100, mouthY: 122 }
         case "penguin":
             return { eyeY: 100, eyeLX: 84, eyeRX: 116, eyeW: 15, eyeH: 17,
                      eyeColor: "#2B2B33",
-                     badgeX: 100, badgeY: 172, badgeR: 21,
+                     badgeX: 32, badgeY: 56, badgeR: 16,
                      tailX: 146, tailY: 128, tailW: 56, tailH: 62,
                      tailOX: 8, tailOY: 52, mouthX: 100, mouthY: 128 }
         case "fox":
             return { eyeY: 100, eyeLX: 78, eyeRX: 122, eyeW: 19, eyeH: 21,
                      eyeColor: "#4A3327",
-                     badgeX: 100, badgeY: 162, badgeR: 21,
+                     badgeX: 28, badgeY: 54, badgeR: 15,
                      tailX: 138, tailY: 92, tailW: 62, tailH: 84,
                      tailOX: 8, tailOY: 68, mouthX: 100, mouthY: 130 }
         default: // mochi
             return { eyeY: 122, eyeLX: 76, eyeRX: 124, eyeW: 21, eyeH: 23,
                      eyeColor: "#3E3548",
-                     badgeX: 100, badgeY: 162, badgeR: 22,
+                     badgeX: 32, badgeY: 58, badgeR: 16,
                      tailX: 142, tailY: 116, tailW: 62, tailH: 78,
                      tailOX: 10, tailOY: 66, mouthX: 100, mouthY: 153 }
         }
@@ -280,6 +283,9 @@ Item {
     }
 
     // ---------------------------------------------------------------- 进度环
+    // 悬浮在头左上方的小气泡徽章（位置见 geo.badgeX/Y），右下缀两个
+    // 渐小的圆点引向头部 —— 跟思考气泡的引导圆点同一语言，
+    // 看起来是宠物「自己的」状态，而不是一张贴在脸上的贴纸。
     Item {
         id: badge
         x: root.geo.badgeX - width / 2
@@ -328,8 +334,41 @@ Item {
             text: root.running ? Math.round(root.ringProgress * 100) + "%" : root.badgeText
             color: "#6B5140"
             font.family: root.running ? Theme.fontMono : Theme.font
-            font.pixelSize: root.running ? Theme.px(11) : Theme.px(14)
+            font.pixelSize: root.running ? Theme.px(10) : Theme.px(13)
             font.bold: true
+        }
+
+        // 引向头部的两个小圆点（越靠头越小），超出 Item 边界也会被画出来。
+        // 位置按徽章宽高比例算：四套形象的耳朵/头轮廓都贴在徽章右下方，
+        // 圆点垂直略偏右下落才刚好从耳朵和身体之间的空档里穿过去。
+        //
+        // **半透明色必须写 Qt.rgba()，不能写 CSS 那种字符串。**
+        // `border.color: "rgba(108,86,64,0.35)"` 看着像 CSS，但 QML 的
+        // color 属性只认 "#rrggbb" / "#aarrggbb" / 颜色名 —— 传字符串会报
+        // 「Invalid property assignment: color expected」，**整个 Pet.qml
+        // 加载失败**，宠物直接不显示，还会级联到 Dashboard / Main /
+        // SettingsPage / PetWindow。
+        // 这个坑踩过两次了（第二次就是这两个圆点），所以把说明贴在
+        // 出事的地方，而不是隔 80 行之外。
+        Rectangle {
+            width: 6.5
+            height: 6.5
+            radius: 3.25
+            x: badge.width * 0.59
+            y: badge.height + 3
+            color: "#FFFDF7"
+            border.width: 1
+            border.color: Qt.rgba(108 / 255, 86 / 255, 64 / 255, 0.35)
+        }
+        Rectangle {
+            width: 4.5
+            height: 4.5
+            radius: 2.25
+            x: badge.width * 0.72
+            y: badge.height + 12
+            color: "#FFFDF7"
+            border.width: 1
+            border.color: Qt.rgba(108 / 255, 86 / 255, 64 / 255, 0.35)
         }
 
         SequentialAnimation on scale {

@@ -78,6 +78,41 @@ def main() -> int:
     check("QML 资源已打进包里", len(qml_files) > 0,
           f"找到 {len(qml_files)} 个 Main.qml")
 
+    # -------------------------------------------------- 隐私：别把本机数据发出去
+    #
+    # 用户明确要求过：「发的版应该是泛用户使用的，不要把我个人使用的一些
+    # 东西工具记忆什么的一起打包发版了」。
+    #
+    # 这一节盯的就是这件事。**开发机上这些文件就在项目根目录**，而打包
+    # 时的 `datas` 稍有闪失（或者有人图省事写了整目录拷贝）就会一起带走：
+    #   pet_data.json   待办/便签/记忆/知识库 —— 全是私人内容
+    #   extensions.json 使用者自己攒的自定义工具（含业务话术、本机路径）
+    #   conversations.json 和 AI 的对话原文
+    #   .env            API Key
+    #   .cache/         屏幕截图和审计日志
+    #
+    # 这些一旦发出去就收不回来，所以每一版都必须查。
+    print("\n隐私：产物里不该有本机数据…")
+    PERSONAL = [
+        "pet_data.json", "pet_data.backup.json", "extensions.json",
+        "extensions.removed.json", "conversations.json", "theme.json",
+        ".env", "ai-actions.log",
+    ]
+    leaked_files: list[str] = []
+    for name in PERSONAL:
+        hits = [p for p in app_dir.rglob(name)]
+        if hits:
+            leaked_files.append(f"{name}（{len(hits)} 个）")
+    check("产物里没有本机数据文件", not leaked_files, str(leaked_files))
+
+    cache_hits = [p for p in app_dir.rglob(".cache") if p.is_dir()]
+    check("产物里没有缓存目录（里面是屏幕截图）", not cache_hits,
+          str([str(p) for p in cache_hits][:2]))
+
+    shot_hits = [p for p in app_dir.rglob("screen.png")]
+    check("产物里没有屏幕截图", not shot_hits,
+          str([str(p) for p in shot_hits][:2]))
+
     # ---------------------------------------------------- 内置 MCP server
     #
     # **这一节的存在本身就是教训。** 随包发的 pawkit（8 个工具）是 .py

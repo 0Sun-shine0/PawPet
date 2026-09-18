@@ -1,7 +1,12 @@
 # 小爪助手 🐾
 
-一个常驻桌面的小助手：宠物只是它的脸，真正在干活的是**待办 + 番茄钟 + 提醒 + 便签 + AI 操作**。
-数据全部保存在本机，不联网、不上传。
+一个常驻桌面的小助手。
+
+**装完就能用，不用注册也不用配任何东西**：待办、番茄钟、提醒、便签
+四个功能完全离线，数据全部存在本机，不联网、不上传。
+
+AI 操作（看屏幕、替你点键鼠）是**额外**能力，需要你自己去服务商拿一个
+API Key —— 配不配都不影响上面那四个功能。
 
 界面用 **PySide6 + Qt Quick/QML**，是 GPU 渲染的矢量抗锯齿画面：
 真圆角、真阴影、60fps 缓动动画，而不是 tkinter 那种带锯齿的 GDI 线条。
@@ -96,6 +101,143 @@
 所以同一个 exe 既能当安装版也能当绿色版。
 
 也支持用环境变量 `PAWPET_HOME` 强制指定数据目录（自动化测试用这个）。
+
+### 第一次打开会看到一份上手指引
+
+三屏：怎么操作宠物 → 东西都存在本地 → 要不要配模型（**可以跳过**）。
+
+它只出现一次。跳过或者看完都会记住，之后不再打扰。想再看一遍：
+设置 → 数据 → 「再看一次上手指引」。
+
+它不依赖任何配置就能看完 —— 待办、专注、便签、提醒四个功能完全离线，
+**没配模型也是完整可用的**。
+
+### 高级模式：看不懂的先收起来
+
+设置 → 最下面 → 「高级模式」。
+
+默认**关着**。关着的时候，AI 页不显示「知识库」和「外部工具（MCP）」两块配置 ——
+这两样都要先自己准备资料、或者先知道 MCP 是什么才用得上，第一次打开看到只会
+增加理解负担。包里自带的那批只读小工具（几点、算数、生成密码、算文件校验值…）
+**不受影响，照常能用**。
+
+打开之后这两块才会出现在 AI 页，「模型设置」展开区里面。
+
+开关放在设置页最底部是故意的：越不常用的越靠后。
+
+两样东西**无论开关在哪都始终显示**，别去动它们：
+
+| | 为什么 |
+| --- | --- |
+| 模型设置 | 没配 Key 的新用户全靠它填接口地址，收了他就卡在「还没有配置模型」上出不去 |
+| 执行步数 | 一轮任务干到一半停了，用户得知道去哪儿调大 |
+
+`tools/advancedtest.py` 里有一条**反向断言**专门钉这两条：谁把「执行步数」
+顺手收进高级模式，回归会直接红。
+
+### 换电脑：导出 / 导入
+
+设置 → 数据 → 「导出备份」，得到一个 zip，里面有：
+
+| 文件 | 内容 |
+| --- | --- |
+| `pet_data.json` | 待办、便签、提醒、专注记录、设置 |
+| `extensions.json` | 你自定义的工具 |
+| `theme.json` | 自定义配色 |
+| `conversations.json` | AI 对话历史 |
+
+**`.env`（API Key）不会被打包进去** —— 那是会被随手转发的文件，
+key 不该跟着走。
+
+导入时：先只读地看一眼包里有什么（多少条待办、多少份资料），你确认之后
+才覆盖，**并且会把现有数据先备份成 `pet_data.before-import.json`**。
+包来自更新版本的小爪会直接拒绝 —— 硬塞进去有丢字段的风险。
+包里数据本身读不出来的（下到一半、手工改坏）也拒绝，**一个文件都不写**。
+
+导入完**立刻生效，不用重启** —— 界面、待办、便签、配色、AI 对话历史和
+磁盘上同时换成导入的那份。
+
+> 这一条不是小事：如果只换了磁盘、内存里还是旧数据，用户下一次随手改个
+> 设置就会把旧数据整份写回去，导入等于白做，而且全程不报错。所以
+> `Backend.reloadData()` 会把 store、五个 Model、AI 的对话历史一并换掉，
+> 并且掐掉那个「2 秒后写盘」的延迟任务 —— 它会拿着旧副本覆盖导入结果。
+> 用 `tools/reloadtest.py` 钉住这条路径。
+
+> 不做云同步是刻意的。桌面宠物的用户对「东西被传到哪去了」比效率工具
+> 更敏感，本机存储这条线不能破。
+
+### 检查更新
+
+启动几秒后静默查一次（一天最多一次），有新版本会弹一条提示，点「去下载」
+打开下载页。
+
+- **只请求一个版本号文件**，不发任何你的数据。设置 → 更新里可以关掉。
+- 不想被某个版本打扰可以点「跳过这个版本」，之后不再提示它
+  （还能在设置里恢复提示）。
+- 只做「提示 + 给链接」，**不自动替换 exe** —— 静默自我替换在 Windows 上
+  要处理一堆边角情况，收益只是省用户点两下。
+
+版本号文件是仓库根目录的 `version.json`，客户端按顺序读两个源
+（raw 上的 `version.json` → GitHub Releases API），第一个通了就用。
+
+> **发版时不用手动改它。** `tools/build.py` 会用 `config.APP_VERSION`
+> 自动同步 `version.json` 的版本号。这一条是防呆：忘了改不会报错，
+> 只会让所有老用户永远收不到更新提示 —— 那种静默失效最难发现。
+> 改的只是 `version` 字段，`note`（发布说明）是你手写的，脚本不碰。
+
+### 发一个版本（维护者）
+
+三步，第二条命令是必须的：
+
+```powershell
+# 1. 改版本号
+#    pawpet/config.py 的 APP_VERSION —— 版本号只有这一个来源
+#    （pawpet/__init__.py 里原来那个已经删掉了，别再加回来）
+
+# 2. 打包（约 8 分钟：42 个套件 + PyInstaller + 装出来的包真跑一遍）
+.venv\Scripts\python.exe tools\build.py --installer --zip
+
+# 3. 发出去（建 Release + 传包 + 同步 version.json + 回头验证）
+.venv\Scripts\python.exe tools\release.py --note "这次改了什么，一句话"
+```
+
+`release.py` 先 `--dry-run` 看一眼计划，确认了再去掉：
+
+```powershell
+.venv\Scripts\python.exe tools\release.py --note "..." --dry-run
+```
+
+**为什么第 3 步不能省。** 只跑 `build.py` 的话，包只会躺在 `dist/` 里，
+「送到用户手上」这一段原来是手工的，而手工有三处会**静默**漏掉：
+
+| 漏了会怎样 | 为什么发现不了 |
+| --- | --- |
+| 没提交 `version.json` | 客户端的首选来源一直 404。而客户端对失败是**静默**的（内网、没网都是用户的正常处境），本地跑一万次测试也不会红 |
+| 没建 Release | 「去下载」按钮指向 `releases/latest`，用户点过去是 404 |
+| 版本号没往上走 | 老用户永远看不到更新提示。包是新的、提示没有，还不报错 |
+
+`release.py` 每一步之后都会**换个身份回头验一遍**（用普通客户端的读法）：
+`releases/latest` 指向新 tag 吗、两个文件都在而且字节数对得上吗、
+raw 上的 `version.json` 读得到吗。
+
+> **顺序是刻意的：先建 Release、传完包，最后才提交 `version.json`。**
+> 反过来做，从「客户端知道有新版本」到「包传完」之间有个几分钟的窗口，
+> 窗口里用户会收到提示、点下载却是 404。先备货再挂招牌。
+
+> **`version.json` 刚提交后，raw 上可能还是旧值** —— 它前面有 CDN 缓存
+> （约 5 分钟）。那不是失败，`release.py` 也会明确这么告诉你。而且这时候
+> 更新提示照样能弹：客户端第二个来源是 Releases API，已经是新的了。
+
+第一次发版有两个前置（这个仓库都还没做）：
+
+1. **`version.json` 得先进仓库。** 它在仓库根目录，是客户端的首选来源，
+   而它现在是未跟踪状态 —— 从没提交过，所以那个来源一直 404。
+   `release.py` 会替你把它提交上去（走 Contents API，不会顺手带上别的改动）。
+2. **仓库要是**公开的**。** 私有的仓库 raw 地址返回 404，更新检查等于只剩一个源。
+
+发版前把代码提交推上去更稳（`tools/github_upload.py`，它走 `api.github.com`
+绕开被干扰的 `github.com`）。不推也能发 —— 用户下载的是 exe，里面已经带上了
+新代码；只是 Release 的 tag 会指向远程的旧提交，仓库看起来会落后。
 
 ---
 
@@ -285,12 +427,81 @@
 | **自动执行** | 只读和键鼠自动跑，执行命令仍需确认 |
 | **完全自动** | 不再询问（包括执行命令，谨慎用） |
 
+**「完全自动」有两个例外，任何档位都免不了。**
+
+这两个例外属于「静默执行一段新代码」这一类，跟「别烦我」不是同一件事：
+
+- **装自定义工具**（`install_extension`）—— 装的时候弹一次卡片
+- **跑 `code` 档自定义工具** —— **每一次运行**都单独弹一次
+
+理由很直接：`full` 的意义是「日常操作别烦我」，不是「装一段新的可执行代码
+也别问我」。给 AI 自己造出来的代码开一条静默生效的路，等于把「用户自己决定
+要不要跑这段代码」这件事从流程里删掉了。
+
+「完全自动」这个档位本该是「你信任这些**已经配好的**动作」，
+而不是「你信任**接下来将要生成的**代码」。这两件事差得很远。
+
+实现上它是一档独立的风险等级（`Risk.CRITICAL`），在 `needs_approval()`
+的**第一行**就 `return True` —— 写在后面等于没写，因为下面每一档都会给
+「完全自动」提前 `return False`。这条链以前正是从那儿钻过去的。
+
+> 顺带一提，卸工具（`remove_extension`）**不在**这两个例外里，它是普通确认，
+> 「完全自动」下不问。它删的是你自己的工具，有回收站兜底能捞回来。
+> 把每一件小事都升级成必弹卡片，结果只会是用户学会闭眼点「允许」。
+
 **三道保险：**
 1. **急停**：把鼠标快速甩到屏幕左上角，立刻中断当前操作（pyautogui FAILSAFE）。
-2. **危险命令黑名单**：`format`、`diskpart`、`shutdown`、`vssadmin delete` 之类直接拒绝，
-   模型说什么都不执行。
+2. **危险命令黑名单**：`format`、`diskpart`、`shutdown`、`vssadmin delete`、
+   `del /f /s /q C:\` 这类直接拒绝，模型说什么都不执行。
 3. **审计日志**：每次动作都记下来（谁批准的、几点几分），在 `.cache/ai-actions.log`。
    每一步也都会以卡片形式留在对话里，做过什么一目了然。
+
+> **说清楚黑名单的定位**：它是**防手滑**，不是安全边界。真正的边界是
+> 上面那张审批卡片和这个审计日志。挡的是「连问都不该问」的那一类 ——
+> 格式化磁盘、删盘根、擦分区表 —— 这些操作没有任何正常用途，
+> 所以不给模型开口子的机会。但一个会写命令的模型总有办法绕，
+> 别把它当沙箱用。
+>
+> 判定写的是「看目标，不看开关」：`rd /s /q build` 放过（常规构建清理），
+> `rd /s /q C:\Users` 拒绝。**误拦比漏拦更糟** —— 它会训练用户关掉整个黑名单。
+> 「必须拦」和「不该误伤」两张表都在 `tools/aitest.py` 里，共 46 条。
+
+### 自定义工具（通过对话给自己造工具）
+
+反复要做同一类活儿的（整理工单、按固定格式汇总、把某个目录里的日志挑出来），
+可以**直接跟小爪说**，它会给你造一个工具出来。造好的工具以后每次都能用，
+行为完全一致 —— 不再靠「每次重新理解一遍你的便签」。
+
+**三档，能力递增：**
+
+| 档位 | 做什么 | 要不要确认 |
+| --- | --- | --- |
+| **固定说法** | 一段固定指令，不碰文件、不联网 | 不用 |
+| **固定流程** | 一串**只读**步骤（读文件 / 列目录 / 正则提取 / 生成结果） | 不用 |
+| **自定义代码** | 真跑 Python | **每次运行都要确认** |
+
+流程是「造草稿 → 你看过 → 装上 → 才能用」：
+
+1. 小爪先给一份**草稿**，附上人话说明（会做什么、要问你拿哪些信息）；
+2. 草稿**还没有生效** —— 不出现在它自己的工具清单里；
+3. 你说「行」，它调 `install_extension`，这一步**弹卡片**，你点头才落盘；
+4. 之后每次调用它才真正执行。
+
+装好的工具存在数据目录的 `extensions.json` 里，导出备份会带上。
+
+**越权是硬拦截，不是提示词劝阻。** 「固定流程」档有一份能力白名单，
+步骤里出现 `write_file`、`run_command`、`click` 这种直接拒掉 ——
+校验阶段拦一次，执行阶段再拦一次（防手改配置绕过）。
+要写文件就必须用「自定义代码」档，而那一档每次运行都要你点头。
+这样「静默改你的东西」在结构上就不可能发生。
+
+**删掉能捞回来。** 卸载一个工具时，定义会先进回收站
+（`extensions.removed.json`，同名只留最新一条），说一句「把刚才那个加回来」
+就能恢复 —— 连「用过多少次」都还在。这在模型听错一句话的时候救过命。
+
+> `code` 档默认是**开**的（这是明确的选择：拿它做自己的工具，不想每次先去
+> 设置里打开）。`tools/exttest.py` 里有一条断言守着这个决定。
+> 要收紧就把 `extensions.py` 的 `MAX_LEVEL_DEFAULT` 改成 `LEVEL_RECIPE`。
 
 ### 跨会话记忆
 
@@ -309,6 +520,8 @@
 `recall_memory` / `note_task_state`），加上一条被动观察：
 **同一个程序切过去 3 次以上**就作为「常用程序」记下来 ——
 让模型每次用 `remember` 记「他用了 WPS」太浪费，那是一句废话还占一次往返。
+（记过一次就不再记：你用 `forget_memory` 把它删掉之后，
+不会下次切过去又被悄悄记回来。）
 但这些都是「锦上添花」：主力是上面那套**自动学习**。
 
 **三条硬约束**（都不是可选项，缺了就会变味）：
@@ -551,6 +764,9 @@ AI 页上有个「执行步数」下拉框，默认 **20 步**，可选 10 / 20 
 
 ### 关于 MCP
 
+> 这一整块在**高级模式关着的时候是看不到的**（见上文）。要用就先把它打开：
+> 设置 → 高级模式 → 「显示高级功能」。
+
 `mcp_servers.json` 里配本地 stdio server，把 `enabled` 改成 `true`，
 在 AI 页点「连接 MCP」。连上后这些工具会自动加进模型可用的工具列表。
 
@@ -620,6 +836,8 @@ pawpet/
   app.py                 QApplication、托盘、全局热键、心跳定时器
   backend.py             暴露给 QML 的唯一接口（改数据都走这里）
   store.py               原子写入、备份、旧版数据迁移
+  datatransfer.py        导出 / 导入备份包（zip），.env 不入包
+  update.py              版本号比较与检查更新（两种版本源，失败静默）
   models.py              待办 / 提醒 / 便签 / 专注记录 / 周统计模型
   focus.py               番茄钟引擎（墙钟恢复、自动轮转）
   reminders.py           久坐提醒（AFK + 全屏感知）与定时提醒
@@ -639,6 +857,7 @@ pawpet/
   qml/PawPet/
     Main.qml             四个窗口的根节点与信号接线
     Theme.qml            设计系统（颜色 / 字号 / 圆角 / 间距 / 缓动）
+    Onboarding.qml       首次启动的三屏上手指引（可跳过，只出现一次）
     Pet.qml              宠物本体：4 套形象的矢量绘制 + 动画
     PetEye.qml           眼睛（复用组件）
     PetWindow.qml        无边框透明置顶窗，拖动、位置记忆、单击分流
@@ -649,16 +868,24 @@ pawpet/
     page/*.qml           今日 / 专注 / 待办 / 便签 / 提醒 / AI / 设置
 
 tools/
+  regress.py             全量回归入口：42 个套件，是唯一的测试清单
   selftest.py            核心逻辑自测（92 项）
+  updatetest.py          版本号比较（20 项，重点钉「2.10 比 2.9 新」）
+  releasetest.py         发版门禁 + 更新检查的三种返回（44 项）
+  datatranstest.py       导出导入往返 + 坏包拒绝 + .env 不入包（29 项）
+  reloadtest.py          导入后内存态立刻换掉 + 坏内容的包不覆盖（43 项）
+  onboardingtest.py      上手指引与更新的 Python↔QML 接线（49 项）
+  advancedtest.py        高级模式收纳：开关走通三层、收起的东西真的收起来（45 项）
   mdtest.py              Markdown 转换器自测（51 项）
-  aitest.py              AI 模块自测（76 项）
-  memtest.py             跨会话记忆自测（76 项）
+  aitest.py              AI 模块自测（122 项）
+  memtest.py             跨会话记忆自测（87 项）
   autolearntest.py       自动记忆（小爪自己判断该记什么）自测（82 项）
   advisortest.py         失败自纠（该重试还是该换路）（85 项）
   batchtest.py           批量操作 + 合并确认（58 项）
   kbtest.py              知识库导入与检索（79 项）
-  filetest.py            本地文件读写 + 安全策略（73 项）
-  agenttest.py           Agent 端到端联调，带假模型服务器（77 项）
+  filetest.py            本地文件读写 + 安全策略（72 项）
+  agenttest.py           Agent 端到端联调，带假模型服务器（85 项）
+  exttest.py             自定义工具（二次开发）+ 权限档位矩阵（134 项）
   steptest.py            步数设置从下拉框到 Agent 的界面联调（17 项）
   smoketest.py           真实启动冒烟，含指令栏交互（41 项）
   uia_test.py            界面元素模块测试（11 项，含位置正确性与熔断检验）
@@ -681,8 +908,12 @@ tools/
   petgallery.py          把 4 套形象并排渲染出来
   crop.py                放大看截图局部
 
-  # ---- 打包相关 ----
+  # ---- 打包与发布 ----
   build.py               一键打包（exe / 安装程序 / 绿色版）
+  release.py             把打好的包发出去：建 Release + 传包 + 同步 version.json
+                         + 回头验证。发版必跑，理由见「发一个版本」
+  github_upload.py       不依赖 git push 的代码上传（走 api.github.com，
+                         绕开被干扰的 github.com）
   build/ 目录下：
     pawpet.spec          主程序的 PyInstaller 配置
     setup.spec           安装程序的 PyInstaller 配置
@@ -705,17 +936,26 @@ legacy/                  旧 tkinter 实现（保留备查，程序不再引用�
 ## 自测
 
 ```powershell
+# 跑全部（推荐）：42 个套件，约 6 分钟
+.venv\Scripts\python.exe tools\regress.py
+# 注：在 AI 沙箱里跑要加 CODEBUDDY_SAFE_DELETE_ENABLED=0，
+#     否则套件清理 .cache 时会撞上沙箱的批量删除守卫，出现一堆假失败。
+
+# 单个跑：
 .venv\Scripts\python.exe tools\selftest.py       # 核心逻辑，92 项
 .venv\Scripts\python.exe tools\mdtest.py         # Markdown 渲染，51 项
-.venv\Scripts\python.exe tools\aitest.py         # AI 模块，76 项
-.venv\Scripts\python.exe tools\memtest.py        # 跨会话记忆，76 项
+.venv\Scripts\python.exe tools\aitest.py         # AI 模块，122 项
+.venv\Scripts\python.exe tools\memtest.py        # 跨会话记忆，87 项
 .venv\Scripts\python.exe tools\autolearntest.py  # 自动记忆，82 项
 .venv\Scripts\python.exe tools\advisortest.py    # 失败自纠，85 项
 .venv\Scripts\python.exe tools\batchtest.py      # 批量操作与合并确认，58 项
 .venv\Scripts\python.exe tools\kbtest.py         # 知识库，79 项
-.venv\Scripts\python.exe tools\filetest.py       # 文件读写与安全策略，73 项
-.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，77 项
+.venv\Scripts\python.exe tools\filetest.py       # 文件读写与安全策略，72 项
+.venv\Scripts\python.exe tools\agenttest.py      # Agent 端到端，85 项
+.venv\Scripts\python.exe tools\exttest.py        # 自定义工具 + 权限档位，134 项
 .venv\Scripts\python.exe tools\steptest.py       # 步数设置界面联调，17 项
+.venv\Scripts\python.exe tools\advancedtest.py   # 高级模式收纳，45 项（会开一个屏幕外的窗口）
+.venv\Scripts\python.exe tools\releasetest.py     # 发版门禁 + 更新检查，44 项
 .venv\Scripts\python.exe tools\smoketest.py      # 真实启动，41 项
 .venv\Scripts\python.exe tools\menudiag.py       # 右键菜单，6 项（会动鼠标）
 .venv\Scripts\python.exe tools\setupui_test.py   # 安装向导布局，17 项
@@ -747,7 +987,7 @@ legacy/                  旧 tkinter 实现（保留备查，程序不再引用�
 
 ---
 
-## 四个踩过的坑（写在这里免得以后再撞）
+## 五个踩过的坑（写在这里免得以后再撞）
 
 **1. `启动小爪助手.cmd` 必须是纯 ASCII 的。**
 cmd.exe 用系统 OEM 代码页（中文 Windows 是 GBK）解析 `.cmd` 文件。UTF-8 编码的
@@ -778,6 +1018,22 @@ BOM 时行为与 `utf-8` 完全一致，所以这是纯收益。
 
 `tools\bomproof.py` 把这个 bug 和修复都演示了一遍，`selftest.py` 里也有对应的
 回归测试（手写一个带 BOM 的文件，验证不会被误判成损坏）。
+
+**5. 想在测试里量 QML 的布局，必须给一个「真实窗口 + 一次同步」。**
+两个都会踩，缺一个量出来的数字就是假的：
+
+- **光杆 Item 不算窗口。** 直接 `QQmlComponent.create()` 出来的页面没有父尺寸
+  （实测 908×590 的容器里它自己量出 0×0），布局根本不会真排一遍 —— 于是每个
+  孩子的 `y` 都是 0、`height` 一直等于 `implicitHeight`，量到的数字跟布局无关。
+  解法是 `QQuickView` + `setSource`，把页面放进真窗口（`tools\advancedtest.py`
+  里顺手把它挪到屏幕外，免得跑回归时弹用户一脸）。
+- **`processEvents()` 不够。** 布局挂在事件循环的 polish 上，不给一次真正的
+  sync 就不会跑那趟 polish。实测：改完 `visible` 之后卡片 `y` 一直是旧值、
+  右栏内容高一动不动，看着像「开关没生效」；`grabWindow()` 逼一次同步之后就都对了。
+
+还有一个连带结论：**别拿「被隐藏的那张卡自己的 height」当「有没有留空缝」的证据。**
+Qt 的 Layout 对不可见项是「跳过」——不排它、也不清它的 geometry，所以隐藏之后
+`height` 还停在上一次的值。要量的是容器的 `implicitHeight`（跳过的项不计入）。
 
 ---
 

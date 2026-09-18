@@ -14,6 +14,19 @@ Flickable {
     boundsBehavior: Flickable.StopAtBounds
     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+    // 导入/导出的结果。放在页面根节点上而不是某个布局里 ——
+    // ColumnLayout 只接受 Item 作子项，塞非可视对象进去会造成布局告警。
+    property bool transferOk: true
+    property string transferText: ""
+
+    Connections {
+        target: backend
+        function onDataTransferFinished(success, message) {
+            page.transferOk = success
+            page.transferText = message
+        }
+    }
+
     ColumnLayout {
         id: column
         x: 0
@@ -732,6 +745,180 @@ Flickable {
                     onClicked: backend.exportSummary()
                 }
                 Item { Layout.fillWidth: true }
+            }
+
+            // 导出 / 导入。
+            //
+            // 「换电脑」是最容易丢数据的一条路：用户以为东西都在软件里，
+            // 换台机器装完发现全空了。原来唯一的办法是「打开数据文件夹」
+            // 然后自己挑文件拷 —— 对普通用户等于没有。
+            Text {
+                Layout.fillWidth: true
+                text: "换电脑或重装前先导出一份。API Key 不会被打包进去。"
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.3
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                PawButton {
+                    text: "导出备份"
+                    variant: "primary"
+                    onClicked: backend.exportData()
+                }
+                PawButton {
+                    text: "从备份导入"
+                    onClicked: backend.importData()
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            // 导入导出的结果。走气泡通知 + 这里一行字 —— 气泡会自己消失，
+            // 用户回头看设置页时还能看到刚才发生了什么。
+            Text {
+                Layout.fillWidth: true
+                visible: page.transferText.length > 0
+                text: page.transferText
+                color: page.transferOk ? Theme.mint : Theme.rose
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.3
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                PawButton {
+                    text: "再看一次上手指引"
+                    variant: "ghost"
+                    onClicked: backend.resetOnboarding()
+                }
+                Item { Layout.fillWidth: true }
+            }
+        }
+
+        // ------------------------------------------------------ 更新
+        //
+        // 单独一张卡而不是塞进「关于」：检查更新是**唯一一个会因为小爪
+        // 自身而联网**的功能，桌面宠物用户对这件事敏感。给它一块自己的
+        // 地方、把「发了什么」写在旁边，比藏在关于里让人放心。
+        Card {
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.gap
+            Layout.rightMargin: Theme.gap
+            title: "更新"
+            subtitle: "自动检查有没有新版本"
+
+            PawSwitch {
+                Layout.fillWidth: true
+                text: "自动检查更新"
+                checked: backend.updateCheck
+                onToggled: backend.updateCheck = checked
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "检查时只会请求一个版本号文件，不发送任何你的数据"
+                      + "（待办、便签、对话内容都不会离开这台电脑）。"
+                      + "关掉之后一个请求都不会发。"
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.35
+            }
+
+            // 状态行：正在检查 / 已是最新 / 有新版本 N
+            Text {
+                Layout.fillWidth: true
+                visible: backend.updateStatus.length > 0
+                text: backend.updateStatus
+                color: backend.updateAvailable ? Theme.accent : Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                font.bold: backend.updateAvailable
+                wrapMode: Text.Wrap
+            }
+
+            // 新版本的说明（如果有）。version.json 里的 note 字段。
+            Text {
+                Layout.fillWidth: true
+                visible: backend.updateAvailable && backend.updateNote.length > 0
+                text: backend.updateNote
+                color: Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.35
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                PawButton {
+                    visible: backend.updateAvailable
+                    text: "去下载"
+                    variant: "primary"
+                    onClicked: backend.openUpdatePage()
+                }
+                PawButton {
+                    text: backend.updateChecking ? "检查中…" : "检查更新"
+                    enabled: !backend.updateChecking
+                    onClicked: backend.checkUpdateNow()
+                }
+                // 跳过之后给一条回来的路。没有这个按钮的话，用户点了
+                // 「跳过」就再也收不到那个版本的提示，只能等下一个版本。
+                PawButton {
+                    visible: !backend.updateAvailable
+                          && backend.updateSkipped.length > 0
+                    text: "恢复 " + backend.updateSkipped + " 的提示"
+                    variant: "ghost"
+                    small: true
+                    onClicked: backend.resumeUpdateNotice()
+                }
+                PawButton {
+                    visible: backend.updateAvailable
+                    text: "跳过这个版本"
+                    variant: "ghost"
+                    small: true
+                    onClicked: backend.skipThisVersion()
+                }
+                Item { Layout.fillWidth: true }
+            }
+        }
+
+        // ------------------------------------------------------ 高级模式
+        //
+        // 放在「关于」前面 —— 越不常用的越靠后，这是这一页的排序约定。
+        // 位置本身就是一种过滤：泛用户滚不到、也用不上。
+        Card {
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.gap
+            Layout.rightMargin: Theme.gap
+            title: "高级模式"
+            subtitle: "有些功能要先有基础才用得上，收在这里"
+
+            PawSwitch {
+                objectName: "advancedSwitch"   // 回归靠它验这个开关能走通
+                Layout.fillWidth: true
+                text: "显示高级功能"
+                checked: backend.advanced_mode
+                onToggled: backend.advanced_mode = checked
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: backend.advancedModeHint
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.Wrap
             }
         }
 

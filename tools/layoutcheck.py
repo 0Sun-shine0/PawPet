@@ -165,10 +165,32 @@ def main() -> int:
         else:
             card_h = 0
 
-        # 3. 也不许反过来把别的卡片顶出去（列高不该远超内容实际需要）
-        check(f"{width}x{height}：没有离谱的撑高",
-              col_h < 2000,
-              f"列高 {col_h:.0f}，异常")
+        # 3. 对话区必须停在它自己声明的区间里（声明在 AiPage.qml 里是
+        #    Layout.preferredHeight: 320 / Layout.minimumHeight: 220）。
+        #
+        #    当初那个 bug 就是它跑到了 995px —— 比整个列（562px）还高，
+        #    把别的卡片全顶出去了。所以直接钉它落在这个窗口里，比钉一个
+        #    「整列不超过 N px」靠谱：那个 N 是拍脑袋定的，内容一多就误报。
+        if chat is not None:
+            check(f"{width}x{height}：对话区高度锁在声明的区间里（220~320）",
+                  220 - 2 <= card_h <= 320 + 2,
+                  f"实际 {card_h:.0f}px —— 它应该由 preferredHeight/minimumHeight 定死")
+
+        # 4. 列高必须**正好**等于各卡片高度之和（含间距）—— 多出来的那一截
+        #    只可能来自某张卡片被拉伸，这正是上面那个 bug 的成因。
+        #    这条不写上限，所以内容再长也不会误报。
+        kids = [child for child in (right.children() or [])
+                if child.property("height") is not None
+                and child.property("visible")]
+        if kids:
+            spacing = right.property("spacing") or 0
+            need = sum(child.property("height") for child in kids)
+            need += spacing * max(0, len(kids) - 1)
+            off = col_h - need
+            check(f"{width}x{height}：列高 = 卡片高度之和（没有多出来的缝）",
+                  abs(off) <= 3,
+                  f"列 {col_h:.0f} vs 卡片合计 {need:.0f}（差 {off:+.0f}）"
+                  " —— 有卡片被拉伸了")
 
         # 4. 内容比视口高时应该能滚（contentHeight >= 视口）
         scrollable = content_h >= viewport_h - 1 or content_h < viewport_h

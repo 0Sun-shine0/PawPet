@@ -62,8 +62,13 @@ SUITES: list[tuple[str, str, str]] = [
     ("core", "对话持久化", "convtest.py"),
     ("core", "Markdown 渲染", "mdtest.py"),
     ("core", "字体与字形", "glyphcheck.py"),
+    ("core", "版本号比较", "updatetest.py"),
+    ("core", "更新检查与发版", "releasetest.py"),
+    ("core", "数据导出导入", "datatranstest.py"),
+    ("core", "导入后的内存重载", "reloadtest.py"),
     # ---- 界面（打包前自测原来漏了这一档）
     ("ui", "QML 加载", "qmlcheck.py"),
+    ("ui", "上手指引与更新接线", "onboardingtest.py"),
     ("ui", "界面自检", "uicheck.py"),
     ("ui", "界面缩放", "uiscaletest.py"),
     ("ui", "布局不变量", "layoutcheck.py"),
@@ -75,6 +80,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "模型配置向导", "setuptest2.py"),
     ("ui", "安装向导界面", "setupui_test.py"),
     ("ui", "设置页截图归档", "screenshothist.py"),
+    ("ui", "高级模式收纳", "advancedtest.py"),
     # ---- AI 能力
     ("ai", "AI 模块", "aitest.py"),
     ("ai", "Agent 端到端", "agenttest.py"),

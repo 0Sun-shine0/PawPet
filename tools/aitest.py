@@ -101,6 +101,7 @@ def main() -> int:
         AuditLog,
         DesktopActions,
         Risk,
+        command_rejection,
     )
     from pawpet.ai.agent import AgentRunner, StepEvent
     from pawpet.ai.client import AIClient, ChatReply, ToolCall
@@ -191,12 +192,95 @@ def main() -> int:
           all(item["function"]["parameters"].get("type") == "object" for item in converted))
 
     # ------------------------------------------------------- 危险命令拦截
+    #
+    # 两张表。**「不该误伤」和「必须拦」一样重要。**
+    #
+    # 误拦会训练用户去关掉整个黑名单 —— 那比漏拦更糟，因为最后连真正
+    # 危险的操作也拦不住了。所以下面每一条「放过」用例都是从真实工作流
+    # 里挑的：`rd /s /q build` 是常规构建清理，`notepad format_tips.txt`
+    # 是名字里恰好带 format 的普通文件。
+    #
+    # 反过来说，这张「必须拦」表每一条都对应一个**实测能绕过的写法**
+    # （加引号、重复分隔符、套一层 cmd /c、用 cmd 的 `^` 转义符、
+    # 拿 `&&` 拼接、双空格），不是随手编的。
     section("危险命令拦截")
-    for bad in ("format c:", "diskpart", "shutdown /s", "vssadmin delete shadows"):
+
+    BS = "\\"
+    must_block = [
+        (f"del /f /s /q c:{BS}", "教科书式删盘"),
+        (f'del /f /s /q "C:{BS}"', "加引号绕过"),
+        (f"del /f /s /q c:{BS}{BS}", "重复分隔符 c:\\\\"),
+        (f'cmd /c del /f /s /q "C:{BS}*"', "cmd /c 外壳 + 引号"),
+        (f"rd /s /q C:{BS}Users", "删用户目录"),
+        (f"rd /s /q C:{BS}Users{BS}", "删用户目录（带尾斜杠）"),
+        (f"rd /s /q C:{BS}Windows", "删系统目录"),
+        (f'del /f /s /q "C:{BS}Program Files"', "删 Program Files"),
+        ("vssadmin  delete shadows /all /quiet", "双空格绕过"),
+        ("shutdown /s /t 0", "关机"),
+        (f"cipher /w:C:{BS}", "擦盘"),
+        (f"reg delete HKLM{BS}SOFTWARE /f", "删注册表"),
+        ("^f^o^r^m^a^t c:", "cmd 的 ^ 转义符"),
+        (f"echo hi && del /f /s /q C:{BS}", "&& 拼接"),
+        (f"echo hi ; rd /s /q C:{BS}Windows", "; 拼接"),
+        (f"cmd /c powershell -NoProfile -Command Remove-Item -Recurse -Force C:{BS}",
+         "cmd + powershell 套两层"),
+        (f"powershell -Command Remove-Item -Recurse -Force C:{BS}Windows",
+         "powershell 直接写"),
+        ("format c:", "格式化 C 盘"),
+        ("mkfs.ext4 /dev/sda1", "格式化文件系统"),
+        ("diskpart", "磁盘分区工具"),
+        ("bcdedit /set safeboot minimal", "改启动配置"),
+        (f"takeown /f C:{BS}Windows", "夺取系统目录所有权"),
+        ("net user hacker /add", "新建系统账户"),
+        ("schtasks /create /tn x /tr y", "新建计划任务"),
+        ("attrib +s +h secret.txt", "改文件系统属性"),
+        ("dd if=/dev/zero of=/dev/sda", "裸写磁盘"),
+        ("rm -rf /", "Unix 根目录"),
+        ("rm -rf ~", "Unix 家目录"),
+    ]
+    for bad, why in must_block:
         result = actions.run_command(bad)
-        check(f"拒绝 {bad!r}", result.ok is False, result.message[:40])
-    result = actions.open_app("format c:")
-    check("拒绝 open_app 里的危险命令", result.ok is False)
+        check(f"拒绝「{why}」", result.ok is False, f"{bad[:46]!r} → {result.message[:30]}")
+
+    # 文案必须告诉用户下一步能干什么，不能只说「不行」。
+    # 注意这里要拿 run_command 的 message —— command_rejection 返回的是
+    # 短原因（"格式化磁盘"），不是给用户看的那句话。
+    rejected = actions.run_command("format c:")
+    check("拒绝文案说清了原因", "格式化磁盘" in rejected.message, rejected.message[:40])
+    check("拒绝文案给了下一步", "手动执行" in rejected.message, rejected.message[:60])
+
+    # open_app 走的是另一条路（可能是 URL，也可能是程序名）。
+    # 非 URL 的要过黑名单；URL 绝不能过 —— 不然
+    # `https://例.com/?q=del+/s` 这种正常链接会被误杀。
+    check("open_app 里藏的危险命令也被拒", actions.open_app("format c:").ok is False)
+    check("open_app 放行正常 URL",
+          command_rejection("https://example.com/?q=del+/f") is None)
+
+    # 这一张表**不能**走 run_command —— 它们真的会被执行。
+    # 所以只问拦截函数本身：必须一律返回 None（不拦）。
+    must_pass = [
+        "notepad format_tips.txt",          # 名字里带 format
+        "notepad",
+        "calc",
+        "rd /s /q build",                   # 常规构建清理
+        f"rd /s /q C:{BS}Windows.old",      # 常见的清理对象，不能跟 c:\windows 一起拒
+        f"rd /s /q C:{BS}Users{BS}我{BS}AppData{BS}Local{BS}Temp{BS}x",
+        f"del /f /s /q D:{BS}项目{BS}旧版本",  # 非系统盘的具体目录，DANGER 级会弹卡片问
+        "rm -rf node_modules",
+        f"rm -rf ~/Downloads/tmp",
+        "del temp.txt",
+        "del /q *.tmp",
+        f"dir c:{BS}",
+        "pip install requests",
+        "echo hello",
+        "type a.txt",
+        "git status",
+        "python -V",
+        "https://example.com/?q=del+/f",    # URL 里带 del
+    ]
+    for good in must_pass:
+        check(f"不误伤 {good[:44]!r}", command_rejection(good) is None,
+              f"被拒：{command_rejection(good)}")
 
     # ------------------------------------------------------- 剪贴板往返
     section("剪贴板与中文输入")

@@ -48,10 +48,31 @@ MAX_LIST_ENTRIES = 300            # 列目录最多 300 项
 #  敏感路径：这些地方**永远不读也不写**
 # ==========================================================================
 def _env_path(name: str, *parts: str) -> Path | None:
+    """取一个系统目录。环境变量拿不到时**按标准位置兜底**，返回 None 是最后手段。
+
+    为什么不能只用环境变量：`_secret_dirs()` 是「凭据位置一律拒读写」那条
+    红线，而它是**在导入时按环境变量算出来的**。APPDATA / LOCALAPPDATA
+    只要缺失（精简版环境、某些启动器/服务方式拉起、被沙箱剥掉的环境），
+    浏览器那几条就**静默从拒读清单里消失** —— 界面一切正常，只是 AI 从此
+    读得到 Firefox 的 profiles.ini 和 Chrome 的 Login Data。
+
+    这类「守卫自己悄悄失效」比没有守卫更危险，因为没人会去复核它。
+    所以这里按 Windows 的标准布局兜底一次，环境变量只是第一优先。
+
+    只兜 Windows：其它平台这两条路径本来就不存在，`_existing()` 会过滤掉。
+    """
     base = os.environ.get(name)
-    if not base:
+    if base:
+        return Path(base).joinpath(*parts)
+
+    home = Path.home()
+    fallback = {
+        "APPDATA": home / "AppData" / "Roaming",
+        "LOCALAPPDATA": home / "AppData" / "Local",
+    }.get(name)
+    if fallback is None:
         return None
-    return Path(base).joinpath(*parts)
+    return fallback.joinpath(*parts)
 
 
 def _secret_dirs() -> list[Path]:

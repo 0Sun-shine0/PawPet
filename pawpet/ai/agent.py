@@ -852,9 +852,12 @@ class AgentRunner:
         if spec is None and call.name.startswith("ext_"):
             # 用户自定义工具（note / recipe / code）不在内置 TOOL_INDEX 里，
             # 这里按它的档位合成一个 spec：
-            #   code 档执行的是用户自己写的 Python，必须让用户确认；
+            #   code 档执行的是用户自己写的 Python，**每一次都要单独确认**
+            #   —— 所以给 CRITICAL 而不是 CONFIRM。CONFIRM 在「完全自动」
+            #   和「自动执行」两档下是自动放行的，那等于把「要不要跑这段
+            #   代码」这个问题从流程里删了。
             #   note / recipe 是纯文本 / 只读流程，直接执行。
-            risk = Risk.CONFIRM
+            risk = Risk.CRITICAL    # 兜底走最保守：拿不到档位就当它是 code
             try:
                 store = getattr(getattr(self, "context", None), "store", None)
                 base = getattr(store, "path", None)
@@ -930,8 +933,12 @@ class AgentRunner:
         # danger 级例外：执行命令这种事**绝不合并**。
         # 它要是藏在批量的第 7 条里，用户很可能没细看就一起批了。
         if self.actions.needs_approval(spec.risk):
-            if spec.risk == Risk.DANGER:
-                # 高危操作单独问（不参与合并），描述用 human 不是原始 JSON
+            if spec.risk in (Risk.DANGER, Risk.CRITICAL):
+                # 高危操作单独问（不参与合并），描述用 human 不是原始 JSON。
+                #
+                # critical 同理、而且更该单独问：装一个新工具、或者跑一段
+                # 自动生成的代码，藏在批量的第 7 条里被一起批掉，
+                # 就等于没问过。
                 approved = bool(self.callbacks.request_approval(ApprovalRequest(
                     tool_name=call.name, risk=spec.risk,
                     summary=human, arguments=call.arguments,

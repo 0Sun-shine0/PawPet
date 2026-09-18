@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -36,6 +37,13 @@ class Risk:
     READ = "read"        # 只观察，不改变任何东西
     CONFIRM = "confirm"  # 会动你的屏幕/键鼠，需要确认
     DANGER = "danger"    # 会影响系统或文件，默认禁用
+    # 永远要问的那一类，**「完全自动」也不例外**。
+    #
+    # 为什么必须有这一档：`full` 的意义是「日常操作别烦我」，
+    # 不是「装一段新的可执行代码也别问我」。给 AI 造出来的代码开一条
+    # 静默生效的路，等于把「用户自己决定要不要跑这段代码」这件事
+    # 从流程里删掉了 —— 而代码里三处文案都承诺了会弹卡片。
+    CRITICAL = "critical"
 
 
 # 自动放行等级：越高越宽松
@@ -51,6 +59,199 @@ LEVEL_LABELS = {
     LEVEL_FULL: "完全自动",
 }
 
+# 从紧到松的顺序。需要「比较两个等级哪个更宽松」的地方用它 ——
+# 例如导入备份时判断「这份备份想把权限调松吗」。用标签表推导不出来
+# 顺序（dict 的键序是插入序，靠它等于靠巧合）。
+LEVEL_ORDER = (LEVEL_READ_ONLY, LEVEL_CONFIRM, LEVEL_AUTO, LEVEL_FULL)
+
+
+# ==========================================================================
+#  命令硬拦截
+# ==========================================================================
+# **这不是安全边界，是「手滑」边界。**
+#
+# 任何黑名单都能被绕过 —— 把命令拼进变量、用 PowerShell 别名、
+# base64 编码后 decode 再执行……所以真正的边界是 `Risk.DANGER`：
+# 这条命令得让用户点头（`open_app` / `run_command` 都是 DANGER 级）。
+# 黑名单只负责挡掉那些**连问都不该问**的明显毁灭性操作 —— 让用户面对一张
+# 「格式化 D 盘」的确认卡片自己去判断，本身就是把风险推给了他。
+#
+# 但既然写了，就不能写得一眼假。原来那版拿**原始字符串**做子串匹配，于是：
+#
+#   * 加引号就过：`del /f /s /q "C:\"`
+#   * 多打一个空格就过：`vssadmin  delete shadows`
+#   * 包一层就过：`cmd /c del /f /s /q "C:\*"`
+#   * 反向误伤：`open_app("notepad format_tips.txt")` 被当成格式化
+#   * 而且 `open_app` 和 `run_command` **各有一份内容不同的清单**，各自
+#     漏了对方有的条目（`reg delete` 只在 open_app 里、`vssadmin delete`
+#     只在 run_command 里）—— 换个工具调同一条命令，拦截结果就不一样
+#
+# 现在统一成一份，流程是：**归一化 → 按 shell 分隔符拆段 → 剥掉外壳 →
+# 逐段按词边界匹配**。拆段是因为 `echo hi && del /f /s /q C:\` 这种
+# 组合命令，整串匹配会漏；逐段匹配才拦得住。
+
+# 会被硬拒的模式（在归一化后的单个片段上匹配）。
+# 左边是正则，右边是给用户看的原因 —— 报错要能指导下一步，
+# 只说「被拒绝了」等于没说。
+#
+# 分成两类：
+#   A 类 = 命令词本身就是毁灭性的，出现就拒
+#   B 类 = 动词本身没事，配上特定目标才有事（比如 `cipher` 无害，
+#          `cipher /w` 是擦盘）
+# 「删除动作 + 目标是盘根/系统目录」是第三类，单独写在 command_rejection
+# 里 —— 它要看目标，不是看开关。
+_BLOCKED_COMMANDS: tuple[tuple[str, str], ...] = (
+    # ---- A 类
+    # 要求前后是分隔符，避免 `notepad format_tips.txt` 被误伤
+    (r"(?:^|[\s|;&/])format(?:\.(?:com|exe))?(?=[\s|;&]|$)", "格式化磁盘"),
+    (r"(?:^|[\s|;&/])mkfs(?:\.\w+)?(?=[\s|;&]|$)", "格式化文件系统"),
+    (r"(?:^|[\s|;&/])diskpart(?=[\s|;&]|$)", "磁盘分区工具"),
+    (r"(?:^|[\s|;&/])bcdedit(?=[\s|;&]|$)", "改启动配置"),
+    (r"(?:^|[\s|;&/])shutdown(?=[\s|;&]|$)", "关机或重启"),
+    (r"(?:^|[\s|;&/])takeown(?=[\s|;&]|$)", "夺取文件所有权"),
+    (r"(?:^|[\s|;&/])(?:clear-disk|initialize-disk|format-volume)(?=[\s|;&]|$)",
+     "清盘或格式化"),
+    (r"(?:^|[\s|;&/])(?:stop-computer|restart-computer)(?=[\s|;&]|$)", "关机或重启"),
+    (r"\bdd\b[^|;&]*\bif=", "裸写磁盘"),
+    (r":\(\)\s*\{[^}]*\}\s*;\s*:", "fork 炸弹"),
+    # ---- B 类
+    (r"\bvssadmin\b[^|;&]*\bdelete\b", "删除卷影副本（勒索软件的标准第一步）"),
+    (r"\bcipher\b[^|;&]*\s/w", "擦除磁盘空闲空间"),
+    (r"\breg\b[^|;&]*\b(?:delete|add)\b", "改注册表"),
+    (r"\bnet\s+user\b[^|;&]*\s/add\b", "新建系统账户"),
+    (r"\bnet\s+localgroup\b[^|;&]*\s/add\b", "改用户组"),
+    (r"\bicacls\b[^|;&]*\s/grant\b", "改文件访问权限"),
+    (r"\battrib\b[^|;&]*[+-][sh]\b", "改文件的系统/隐藏属性"),
+    (r"\bschtasks\b[^|;&]*\s/create\b", "新建计划任务"),
+)
+
+# shell 的外壳，剥掉之后继续检查里面那条。
+#
+# 为什么要剥：`cmd /c <危险命令>` 和直接写 <危险命令> 是同一件事，
+# 不剥的话前面套一层就绕过去了。剥三层是因为 `cmd /c powershell -c ...`
+# 这种套娃真的有人写。
+_WRAPPERS: tuple[re.Pattern, ...] = (
+    re.compile(r"^cmd(?:\.exe)?\s*/(?:c|k)\s+"),
+    # `powershell -Command X` / `powershell -NoProfile -Command X` /
+    # `powershell -c X` 都要认。中间那串开关是可选的。
+    re.compile(r"^powershell(?:\.exe)?\s+(?:[^|;&]*?\s+)?-(?:c|command)\b\s*"),
+    re.compile(r"^(?:bash|sh|zsh)\s+-c\s+"),
+    re.compile(r"^wsl(?:\.exe)?(?:\s+--)?\s*(?:bash|sh)?\s*-c\s+"),
+)
+
+# shell 里一条命令可以塞多条。按这些分隔符拆开逐段检查。
+_SEPARATORS = re.compile(r"&&|\|\||[|;&\n]")
+
+# 会「删东西」的动词。只有它出现时才去检查目标 ——
+# `dir c:\` 也要碰盘根，但那不是删除。
+_DESTRUCTIVE = re.compile(
+    r"\b(?:del|erase|rd|rmdir|rm|remove-item|ri|format|mkfs)\b"
+)
+
+# 盘根：`c:` / `c:\` / `c:\\` / `c:\*`
+#
+# `[\\/]*` 而不是 `[\\/]?` —— Windows 会把重复的分隔符当同一个，
+# `del /f /s /q C:\\` 和 `del /f /s /q C:\` 是同一件事。
+_DRIVE_ROOT = re.compile(r"(?:^|[\s|;&])([a-z]:[\\/]*\*?)(?=$|[\s|;&])")
+
+# Unix 风格的根。小爪跑在 Windows 上，但用户可能在 Git Bash / WSL 里用，
+# 而 `rm -rf /` 一样是灾难。规则同 Windows：**看目标**，不是看到 `-rf` 就拒 ——
+# `rm -rf node_modules` 是日常，`rm -rf /` 不是。
+_ROOT_UNIX = re.compile(r"(?:^|[\s|;&])(/(?:\*)?|~/?(?:\*)?)(?=$|[\s|;&])")
+
+# 整棵子树都不该被删的地方。
+#
+# 末尾的 `(?=$|[\\/*\s|;&])` 是个**词边界**：`c:\windows` 要拒，但
+# `c:\windows.old` 不拒 —— 后者是很常见的清理对象，一起拒了就是误伤。
+_PROTECTED_TREE = re.compile(
+    r"[a-z]:[\\/]+(?:windows|program files(?:\s*\(x86\))?|programdata|"
+    r"system volume information|\$recycle\.bin|recovery|perflogs|boot)"
+    r"(?=$|[\\/*\s|;&])"
+)
+
+# `c:\users` 单独处理：**只保护它自己，不保护下面具体用户自己的目录**。
+# `rd /s /q c:\users` 是灾难，`rd /s /q c:\users\我\Downloads\tmp` 是日常清理。
+_PROTECTED_USERS = re.compile(r"[a-z]:[\\/]+users[\\/]*\*?(?=$|[\s|;&])")
+
+
+def normalise_command(command: str) -> str:
+    """把命令压成「最坏情况的写法」再拿去匹配。
+
+    四件事，每一件都对应一个实测能绕过的写法：
+
+    * 去掉 `^` —— cmd 的转义符，`^f^o^r^m^a^t` 真的能跑
+    * 去掉引号 —— `del /f /s /q "C:\\"` 和 `del /f /s /q C:\\` 是同一件事
+    * 空白压成一个空格 —— `vssadmin  delete`（两个空格）原来就漏了
+    * 转小写
+    """
+    text = str(command or "").lower()
+    text = text.replace("^", "")
+    text = re.sub(r"[\"']", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _strip_wrappers(segment: str) -> str:
+    """剥掉 `cmd /c` / `powershell -c` 这类外壳，最多三层。"""
+    for _ in range(3):
+        before = segment
+        for pattern in _WRAPPERS:
+            segment = normalise_command(pattern.sub("", segment))
+        if segment == before or not segment:
+            break
+    return segment
+
+
+def command_rejection(command: str) -> str | None:
+    """这条命令该不该硬拒。返回原因；None = 不拦。
+
+    **只在归一化后的文本上判**，所以调用方不需要先做什么预处理。
+    """
+    text = normalise_command(command)
+    if not text:
+        return None
+
+    for raw in _SEPARATORS.split(text):
+        segment = _strip_wrappers(raw.strip())
+        if not segment:
+            continue
+
+        for pattern, reason in _BLOCKED_COMMANDS:
+            if re.search(pattern, segment):
+                return reason
+
+        # ---- 第三类：删除动作 + 目标是盘根 / 系统目录
+        #
+        # **看目标，不看开关。**
+        #
+        # 一开始我写的是「出现 rd /s 就拒」，测出来立刻误伤了
+        # `rd /s /q build` —— 那是常规的构建清理。这种误伤比漏拦更糟：
+        # 它会训练用户去关掉整个黑名单，最后连真正危险的也不拦了。
+        #
+        # 反过来，对盘根或系统目录做递归删除**没有任何正常用途**。
+        # 所以规则收敛成「删东西 + 目标是这些地方」，两个方向都有例子：
+        #   rd /s /q build            → 放过（常规清理）
+        #   rd /s /q "C:\Users"       → 拒
+        #   del /f /s /q "C:\*"       → 拒
+        #   del /f /s /q D:\项目\旧版  → 放过（DANGER 级本来就会弹卡片问）
+        if _DESTRUCTIVE.search(segment):
+            match = _DRIVE_ROOT.search(segment) or _ROOT_UNIX.search(segment)
+            if match:
+                return f"对盘根 {match.group(1)} 做删除操作"
+            if _PROTECTED_TREE.search(segment):
+                return "删除系统目录"
+            if _PROTECTED_USERS.search(segment):
+                return "删除用户目录"
+
+    return None
+
+
+def _rejection_message(reason: str) -> str:
+    """把拒绝原因写成人话。**必须告诉用户下一步能干什么。**"""
+    return (f"这条命令包含「{reason}」，属于不可逆的系统级操作，已被拒绝执行。"
+            "这类操作在黑名单里是硬拦截，模型说什么都不放行。"
+            "如果你确实要做，请自己在终端里手动执行。")
+
 
 @dataclass
 class ActionResult:
@@ -60,6 +261,7 @@ class ActionResult:
 
     def as_text(self) -> str:
         return self.message or ("完成" if self.ok else "失败")
+
 
 
 class AuditLog:
@@ -136,6 +338,15 @@ class DesktopActions:
 
     # --------------------------------------------------------------- 安全策略
     def needs_approval(self, risk: str) -> bool:
+        # **这一条必须放在最前面。**
+        #
+        # 下面每一档都会给 FULL 提前 return False，所以写在后面等于没写 ——
+        # 而「完全自动」正是这段逻辑唯一会漏掉它的场景。原来 code 档
+        # 自我扩权的闭环就是从这儿钻过去的：造草稿是 READ（不问）→
+        # 安装是 CONFIRM（full 下不问）→ 调用时合成 CONFIRM（full 下不问）
+        # → 子进程跑任意 Python。全程一张卡片都没有。
+        if risk == Risk.CRITICAL:
+            return True
         if risk == Risk.READ:
             return False
         if risk == Risk.CONFIRM:
@@ -468,11 +679,17 @@ class DesktopActions:
         command = (command or "").strip()
         if not command:
             return ActionResult(False, "没有给出要打开的目标")
-        lowered = command.lower()
-        blocked = ("format", "diskpart", "shutdown", "reg delete", "rm -rf",
-                   "del /f", "rd /s", "cipher /w")
-        if any(bad in lowered for bad in blocked):
-            return ActionResult(False, "这个命令在禁用列表里，拒绝执行")
+
+        # 只检查「当作命令跑」的那条路。
+        #
+        # URL 直接走 os.startfile，它不会变成 shell 里的命令，所以不该拿
+        # 命令黑名单去量它 —— 否则 `https://例.com/?q=del+/s` 这种网址
+        # 会被误拦。非 URL 走的是 shell=True，那就必须查。
+        if not command.startswith(("http://", "https://")):
+            reason = command_rejection(command)
+            if reason:
+                return ActionResult(False, _rejection_message(reason))
+
         try:
             if command.startswith(("http://", "https://")):
                 os.startfile(command)  # noqa: S606 - 用户明确要求打开 URL
@@ -488,11 +705,9 @@ class DesktopActions:
         command = (command or "").strip()
         if not command:
             return ActionResult(False, "没有给出命令")
-        lowered = command.lower()
-        blocked = ("format ", "diskpart", "shutdown", "rm -rf /", "del /f /s /q c:",
-                   "rd /s /q c:", "cipher /w", "vssadmin delete")
-        if any(bad in lowered for bad in blocked):
-            return ActionResult(False, "这个命令在禁用列表里，拒绝执行")
+        reason = command_rejection(command)
+        if reason:
+            return ActionResult(False, _rejection_message(reason))
         try:
             completed = subprocess.run(
                 command, shell=True, capture_output=True, text=True,

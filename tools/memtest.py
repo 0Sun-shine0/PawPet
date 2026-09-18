@@ -302,6 +302,92 @@ def main() -> int:
           legacy.settings.get("pet_style") == "mochi",
           str(legacy.settings.get("pet_style")))
 
+    # ================================================== 八之二、共享容器
+    print("\n=== 八之二、state['memory'] 是公共抽屉，写记忆不能整份替换 ===")
+
+    # 这个 bug 的现场：MemoryBook.save() 原来写的是
+    #     state["memory"] = memory.as_dict()
+    # 看着很自然，其实会丢数据 —— Memory.as_dict() 只吐
+    # facts / aliases / tasks / updated 四个键，赋值又把底下**别的键整份删掉**。
+    #
+    # 而 state["memory"] 不止 Memory 在写：tools.py 的 _observe_app
+    # 会在同一个字典里放 app_usage（用户常用哪些程序）。
+    # 于是计数刚够阈值、正要记下「常用程序：WPS」的那一下就把表清空了，
+    # 此后 AI 每调一次 remember / forget 也清一次 —— **而且不报错**。
+    shared_path = SCRATCH / "shared.json"
+
+    shared = Store(shared_path, SCRATCH / "shared.backup.json")
+    shared.load()
+    shared.memory["app_usage"] = {"wps": {"count": 6, "last": 1.0, "label": "WPS"}}
+    MemoryBook(shared).add_fact("他喜欢深色主题", "preference", 2)
+    check("写事实不会吃掉 app_usage",
+          "wps" in (shared.memory.get("app_usage") or {}),
+          f"memory 的键：{sorted(shared.memory.keys())}")
+
+    shared_reread = Store(shared_path, SCRATCH / "shared.backup.json")
+    shared_reread.load()
+    check("app_usage 也一起落盘了",
+          "wps" in (shared_reread.memory.get("app_usage") or {}),
+          f"盘上的键：{sorted(shared_reread.memory.keys())}")
+
+    MemoryBook(shared).add_alias("那个表格", "WPS")
+    check("记叫法也不会吃掉 app_usage",
+          "wps" in (shared.memory.get("app_usage") or {}))
+
+    MemoryBook(shared).forget("他喜欢深色主题")
+    check("忘记也不会吃掉 app_usage",
+          "wps" in (shared.memory.get("app_usage") or {}))
+
+    # ---- 被动观察：到阈值要记下来；记过一次就不再重复
+    from pawpet.ai.tools import ToolContext
+
+    obs_path = SCRATCH / "observe.json"
+    obs_store = Store(obs_path, SCRATCH / "observe.backup.json")
+    obs_store.load()
+    context = ToolContext(None, None, obs_store)
+
+    for _ in range(2):
+        context._observe_app("WPS 文字")
+    check("没够阈值时不记", not any("常用程序" in f.text
+                                    for f in MemoryBook(obs_store).load().facts))
+
+    context._observe_app("WPS 文字")
+    facts = [f.text for f in MemoryBook(obs_store).load().facts]
+    check("够阈值了记下常用程序", any("常用程序：WPS 文字" in t for t in facts),
+          str(facts))
+    check("计数表还在（没被 add_fact 冲掉）",
+          "wps 文字" in (obs_store.memory.get("app_usage") or {}),
+          str(obs_store.memory.get("app_usage")))
+    check("frequent_apps 读得到", context.frequent_apps() == [("WPS 文字", 3)],
+          str(context.frequent_apps()))
+
+    # 继续观察两次：不该再记一条
+    for _ in range(2):
+        context._observe_app("WPS 文字")
+    facts_after = [f.text for f in MemoryBook(obs_store).load().facts if
+                   "常用程序" in f.text]
+    check("记过之后不再重复记", len(facts_after) == 1, str(facts_after))
+
+    # 用户明确说「别记了」，就不能再被观察悄悄记回来
+    MemoryBook(obs_store).forget("常用程序：WPS 文字")
+    context._observe_app("WPS 文字")
+    check("被忘掉的常用程序不会被悄悄记回来",
+          not any("常用程序" in f.text for f in MemoryBook(obs_store).load().facts),
+          str([f.text for f in MemoryBook(obs_store).load().facts]))
+
+    # 计数从阈值上方开始（最现实的一条路：导入旧备份）也要能补记
+    skip_path = SCRATCH / "skip.json"
+    skip_store = Store(skip_path, SCRATCH / "skip.backup.json")
+    skip_store.load()
+    skip_store.memory["app_usage"] = {
+        "excel": {"count": 8, "last": 1.0, "label": "Excel"}}
+    skip_context = ToolContext(None, None, skip_store)
+    skip_context._observe_app("Excel")
+    check("计数从阈值上方开始时也能补记",
+          any("常用程序：Excel" in f.text
+              for f in MemoryBook(skip_store).load().facts),
+          str([f.text for f in MemoryBook(skip_store).load().facts]))
+
     # ================================================== 九、清空
     print("\n=== 九、清空 ===")
 

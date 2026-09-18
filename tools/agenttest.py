@@ -731,6 +731,153 @@ def main() -> int:
         finally:
             task_server.shutdown()
 
+        # ================================ 场景九：P0 —— 完全自动档也免不了
+        #
+        # 原来那条漏洞链：造草稿是 READ（不问）→ 安装是 CONFIRM（full 下不问）
+        # → 调用时合成 CONFIRM（full 下不问）→ 子进程跑任意 Python。
+        # 全程一张卡片都没有，而 install_extension 的说明里明明写着
+        # 「会弹一张卡片让用户确认」。承诺和实现对不上，就是缺陷。
+        #
+        # 修法是把这条链路整段挂到 Risk.CRITICAL 上，而 CRITICAL 在
+        # needs_approval 的第一行就 return True —— 任何档位都拦不住它。
+        # 这一组就是在**真实 runner** 上验证那件事，不只是验常量。
+        print("\n=== 场景九：完全自动档下「装工具 / 跑自定义代码」仍然要弹卡片 ===")
+
+        from pawpet.ai.actions import LEVEL_FULL
+        from pawpet.ai.extensions import (
+            LEVEL_CODE,
+            Extension,
+            load_all as load_ext,
+            save_all as save_ext,
+        )
+
+        full_store = Store(scratch / "full.json", scratch / "full.bak.json")
+        full_store.load()
+        # extensions.json 的路径是从 store.path 的**父目录**推的，
+        # 所以这套数据天然落在 scratch 里，不会碰到用户的真工具。
+        full_actions = DesktopActions(AuditLog())
+        full_actions.level = LEVEL_FULL          # ← 最宽松的一档，正是漏过 P0 的那档
+        full_context = ToolContext(ScreenCapture(), full_actions, full_store)
+
+        asked: list[dict] = []
+        full_events: list[StepEvent] = []
+
+        class FullRecorder:
+            def on_status(self, text): pass
+            def on_event(self, event): full_events.append(event)
+            def on_image(self, png, note): pass
+            def on_finished(self, text): pass
+            def on_error(self, text):
+                full_events.append(StepEvent(kind="error", text=text))
+            def request_approval(self, request):
+                asked.append({"tool": request.tool_name, "risk": request.risk})
+                # 一律拒绝：这样不会有任何东西真的被装上或执行。
+                # 这一组验的就是「有没有问」，不是「装上之后怎么样」。
+                return False
+
+        book = scratch / "extensions.json"
+
+        # --- 5.1 安装本身必须问
+        install_model = FakeModel([
+            tool_call("g1", "install_extension", {"draft": {
+                "name": "p0_probe", "title": "P0 探针", "description": "回归用",
+                "level": "recipe",
+                "steps": [{"op": "list_dir", "path": "{p}"}],
+            }}),
+            {"content": "好，先放着。"},
+        ])
+        install_server, install_url = make_server(install_model)
+        try:
+            install_client = AIClient(api_key="sk-fake", model="fake",
+                                      base_url=install_url, timeout=20)
+            runner_full = AgentRunner(install_client, full_context, full_actions,
+                                      FullRecorder(), max_steps=4)
+            runner_full.run("给我造一个整理目录的工具并装上")
+
+            check("full 档下 install_extension 弹了卡片",
+                  [a["tool"] for a in asked] == ["install_extension"],
+                  str(asked))
+            check("卡片上的级别是 critical（不是 confirm）",
+                  bool(asked) and asked[0]["risk"] == "critical", str(asked))
+            check("拒绝之后没有落盘",
+                  not book.exists()
+                  or "p0_probe" not in [e.name for e in load_ext(book)],
+                  str([e.name for e in load_ext(book)]) if book.exists() else "文件不存在")
+        finally:
+            install_server.shutdown()
+
+        # --- 5.2 已经装好的 code 档工具，调用时也必须问
+        #
+        # 这一条是闭环的另一半：光把「安装」挂上 CRITICAL 还不够，
+        # 运行那段代码同样得问 —— 否则用户装了之后，
+        # 每次「完全自动」跑它都是一次静默的任意代码执行。
+        save_ext(book, [Extension(
+            name="p0_coder", title="P0 代码工具", description="回归用",
+            level=LEVEL_CODE, code="print('这段代码不该被执行到')",
+            approved=True,
+        )])
+
+        asked.clear()
+        full_events.clear()
+        code_model = FakeModel([
+            tool_call("g2", "ext_p0_coder", {}),
+            {"content": "好。"},
+        ])
+        code_server, code_url = make_server(code_model)
+        try:
+            code_client = AIClient(api_key="sk-fake", model="fake",
+                                   base_url=code_url, timeout=20)
+            runner_code = AgentRunner(code_client, full_context, full_actions,
+                                      FullRecorder(), max_steps=4)
+            runner_code.run("跑一下我那个 P0 代码工具")
+
+            check("full 档下调用 code 档自定义工具弹了卡片",
+                  [a["tool"] for a in asked] == ["ext_p0_coder"], str(asked))
+            check("卡片上的级别是 critical",
+                  bool(asked) and asked[0]["risk"] == "critical", str(asked))
+            check("拒绝之后那段代码没被执行",
+                  not any("不该被执行到" in e.text for e in full_events),
+                  str([e.text[:40] for e in full_events]))
+        finally:
+            code_server.shutdown()
+
+        # --- 5.3 对照：note / recipe 档在 full 下**不该**被拦
+        #
+        # 没有这一条，5.1/5.2 就可能被「把所有自定义工具都升级成 CRITICAL」
+        # 这种偷懒改法骗过 —— 那样用户每调一次自己的小工具都要点一次卡片，
+        # 最后他还是会把权限开到 full 并且学会闭眼点「允许」。
+        asked.clear()
+        save_ext(book, [Extension(
+            name="p0_reader", title="P0 只读工具", description="回归用",
+            level="recipe", steps=[{"op": "list_dir", "path": "{p}"}],
+            approved=True,
+        )])
+        recipe_model = FakeModel([
+            tool_call("g3", "ext_p0_reader", {"p": str(scratch)}),
+            {"content": "好。"},
+        ])
+        recipe_server, recipe_url = make_server(recipe_model)
+        try:
+            recipe_client = AIClient(api_key="sk-fake", model="fake",
+                                     base_url=recipe_url, timeout=20)
+            runner_recipe = AgentRunner(recipe_client, full_context, full_actions,
+                                        FullRecorder(), max_steps=4)
+            runner_recipe.run("列一下那个目录")
+
+            check("full 档下 recipe 档自定义工具不弹卡片（别把所有东西都升级）",
+                  asked == [], str(asked))
+        finally:
+            recipe_server.shutdown()
+
+        # --- 5.4 审计日志要如实记下「谁批的」
+        #
+        # 上面两次都被拒了，日志里应该是 denied —— 如果哪一天有人把
+        # CRITICAL 的判断挪回后面，这里会先于用户发现。
+        log = full_actions.audit.recent(50)
+        denied = [e for e in log if e["approved"] == "denied"]
+        check("被拒的高危操作在审计里记成 denied",
+              len(denied) >= 2, str([(e["action"], e["approved"]) for e in log]))
+
         # 关掉记忆之后，一个字都不该进提示词
         silent = format_for_prompt(Memory())
         check("空记忆渲染成空串（不注入空壳）", silent == "", repr(silent))

@@ -41,6 +41,10 @@ def default_settings() -> dict:
         "always_on_top": True,
         "fade_when_idle": True,
         "autostart": False,
+        # 高级模式。默认关 —— 关着的时候设置面板只显示泛用户看得懂的东西
+        # （AI 页的知识库、外部工具 MCP 配置会藏起来）。
+        # 判断口径是「第一次打开会不会看不懂」，不是「我用不用得上」。
+        "advanced_mode": False,
         "move_step": 24,
         "hotkey_dashboard": "ctrl+alt+p",
         "hotkey_focus": "ctrl+alt+t",
@@ -82,6 +86,24 @@ def default_settings() -> dict:
         "hotkey_ask": "ctrl+alt+space",
         # ---- 宠物形象 ----
         "pet_style": "mochi",
+        # ---- 首次启动引导 ----
+        # 引导只该出现一次。用设置项而不是「检测数据文件是否为空」：
+        # 老用户升级上来时数据文件是满的，但引导从没看过 —— 按数据判空
+        # 会让他们永远看不到（或者反过来，删掉数据就重新弹）。
+        # 设置项语义明确：用户点过「开始用」或「跳过」就置真，不再打扰。
+        # 设置页里可以手动再打开一次。
+        "onboarding_done": False,
+        # ---- 检查更新 ----
+        # 默认开。这是唯一一个会因为小爪自身而上网的设置项，所以要能关，
+        # 而且文案里必须说清「只发了什么」—— 桌面宠物用户对偷偷联网敏感。
+        # 检查请求只带版本号，不带任何用户数据。
+        "update_check": True,
+        # 上次检查的时间戳。用来做「一天最多查一次」的节流。
+        "update_last_check": 0.0,
+        # 用户点过「跳过这个版本」的那个版本号。
+        # 存下来是为了不反复提醒同一个版本 —— 被同一个弹窗烦第三次的用户
+        # 会去关掉整个检查功能，那比没这功能还糟。
+        "update_skipped_version": "",
     }
 
 
@@ -126,7 +148,6 @@ class Store:
         self.path = Path(path)
         self.backup_path = Path(backup)
         self._lock = threading.RLock()
-        self._dirty = False
         self.state: dict = default_state()
         self.migrated_from: str | None = None
         # 主文件读失败时的原始异常信息，用来给用户一个准确的解释
@@ -248,6 +269,27 @@ class Store:
         return state
 
     # ------------------------------------------------------------------ 保存
+    #
+    # 关于「要不要加节流 / debounce」——**评估过，不需要，别再加回来**。
+    #
+    # 这里原本有个 `self._dirty` 标志，设了但从来没人读，是个死字段，
+    # 已删。留着它比没有更糟：它看起来像个「脏了才写」的节流开关，
+    # 后来的人会以为它在工作。（写这份注释之前我就这么以为过。）
+    #
+    # 删掉它的依据是量出来的，不是感觉：
+    #   * 一次 save() 约 27ms，且**与文件大小无关** ——
+    #     557KB 端到端 27.3ms，23KB 端到端 26.7ms。缩小 24 倍只快 0.6ms。
+    #   * 大头是「新建文件」这个动作本身（22.85ms），不是字节数。
+    #     覆盖一个已存在的文件只要 4.51ms。差出来的 ~18ms 是杀软对新建
+    #     文件的实时扫描 —— os.replace 会把 tmp 移走，所以下次 save()
+    #     面对的仍然是新文件，每次都吃一次扫描。fsync 不是瓶颈。
+    #   * 空闲 20 秒，save() 调用 0 次。番茄钟 / 提醒 / 切窗口全是用户触发。
+    #   * 唯一真正高频的写者是 AI 对话历史，而它已经做了 2 秒防抖
+    #     （见 ai/controller.py 的 _touch_history / _flush_history），
+    #     而且写的是独立文件，根本不走这里。
+    #
+    # 所以节流省的是 0 次调用，拆文件省的是 0.6ms。debounce 还会带来一个
+    # 真实的新风险：崩在 flush 之前就丢数据。拿 0.6ms 换这个是亏的。
     def save(self) -> bool:
         with self._lock:
             payload = copy.deepcopy(self.state)
@@ -269,7 +311,6 @@ class Store:
                 except OSError:
                     pass
             os.replace(tmp, self.path)
-            self._dirty = False
             return True
         except OSError:
             try:

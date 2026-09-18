@@ -744,9 +744,36 @@ Item {
                         visible: !backend.ai.configured
                         spacing: 8
 
+                        // 先安抚，再给步骤。
+                        //
+                        // 原来这里第一句就是「第一次用？两步：拿 Key → 粘到
+                        // 下面」—— 对泛用户来说那是「不配就没法用」的意思，
+                        // 而这是整个产品唯一需要花钱花时间配置的地方。
+                        // 实际上待办/专注/便签/提醒根本不依赖它，先把这句话
+                        // 说清楚，用户才愿意往下看。
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: notNeeded.implicitHeight + 16
+                            radius: Theme.radiusSm
+                            color: Theme.mintSoft
+
+                            Text {
+                                id: notNeeded
+                                anchors.centerIn: parent
+                                width: parent.width - 16
+                                text: "不配也能用：待办、专注、便签、提醒都是本机的，"
+                                      + "跟这里没关系。配了之后小爪才多出「看屏幕、替你操作」的能力。"
+                                color: Theme.mint
+                                font.family: Theme.font
+                                font.pixelSize: Theme.fsTiny
+                                wrapMode: Text.Wrap
+                                lineHeight: 1.35
+                            }
+                        }
+
                         Text {
                             Layout.fillWidth: true
-                            text: "第一次用？两步：拿 Key → 粘到下面"
+                            text: "想解锁 AI 能力？两步：拿 Key → 粘到下面"
                             color: Theme.text
                             font.family: Theme.font
                             font.pixelSize: Theme.fsSmall
@@ -1209,7 +1236,14 @@ Item {
                     // -------------------------------------------------- 知识库
                     // 导入自己的资料，AI 回答时能引用。
                     // 正文**不会**全塞进对话 —— 按需检索，所以可以导很多。
+                    //
+                    // **只在高级模式下显示。** 这个功能要先自己把资料转成
+                    // md 再导进来，泛用户看到只会问「这是什么」。开关在
+                    // 设置页的「高级模式」。
                     Rectangle {
+                        id: kbCard
+                        objectName: "kbCard"      // 回归靠它验高级模式的显隐
+                        visible: backend.advanced_mode
                         Layout.fillWidth: true
                         implicitHeight: kbColumn.implicitHeight + 20
                         radius: Theme.radiusMd
@@ -1354,9 +1388,16 @@ Item {
             //
             // 做成独立小卡片而不是塞进设置里：连接状态是动态的，
             // 用户要能一眼看到「连上没有、有几个工具」。
+            //
+            // **但现在整张卡片归到高级模式下。** 上面那个理由是「用户要能
+            // 一眼看到」—— 那是**会用 MCP 的用户**的需求。对泛用户，
+            // 一屏出现「MCP」「server」「工具名」只会增加理解负担，
+            // 而 MCP 开关本身默认就是开的，包里的 pawkit 照常生效，
+            // 不看这个卡片一点也不影响使用。
             Rectangle {
                 id: mcpCard
                 objectName: "mcpCard"
+                visible: backend.advanced_mode
                 Layout.fillWidth: true
                 implicitHeight: mcpColumn.implicitHeight + (page.showMcpDetail ? 26 : 18)
                 radius: Theme.radiusLg

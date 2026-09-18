@@ -177,6 +177,16 @@ class TaskModel(QAbstractListModel):
         self.changed.emit()
         self._store.save()
 
+    def reload(self) -> None:
+        """把 _visible 重新按 store 里的数据算一遍。
+
+        给「导入备份」用：store 被整个换掉之后，_visible 还指着旧数据的
+        那批 dict，界面会继续显示导入前的内容。
+        """
+        self._rebuild()
+        self.countsChanged.emit()
+        self.changed.emit()
+
     def _index_of(self, task_id: str) -> int:
         for row, task in enumerate(self._visible):
             if task.get("id") == task_id:
@@ -374,6 +384,12 @@ class ReminderModel(QAbstractListModel):
         self.changed.emit()
         self._store.save()
 
+    def reload(self) -> None:
+        """重新按 store 里的提醒算一遍 _visible。见 TaskModel.reload。"""
+        self._rebuild()
+        self.countsChanged.emit()
+        self.changed.emit()
+
     def _find(self, reminder_id: str) -> dict | None:
         for item in self._store.reminders:
             if item.get("id") == reminder_id:
@@ -539,6 +555,18 @@ class NoteModel(QAbstractListModel):
         self._rebuild()
         self.changed.emit()
         self._store.save()
+
+    def reload(self) -> None:
+        """重新按 store 里的便签算一遍 _visible。见 TaskModel.reload。
+
+        比别的模型多一步 `_ensure_seed()`：导入的备份里如果一条便签都没有
+        （用户就是没写过），界面会停在一个空编辑器上，连「新建」的落点都
+        找不到。_ensure_seed 保证至少有一条可以写的便签。
+        """
+        self._ensure_seed()
+        self._current = 0
+        self._rebuild()
+        self.changed.emit()
 
     @Slot(str, str)
     def add(self, title: str = "", text: str = "") -> None:

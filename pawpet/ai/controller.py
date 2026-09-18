@@ -1120,7 +1120,14 @@ class AiController(QObject):
         if path:
             self._preview_path = path
             self.previewChanged.emit()
-        self._push("info", f"{shot.message}")
+        # **ephemeral：这是状态行，不是对话内容。**
+        #
+        # 界面加载预览时就会调这个方法 —— 不加标记的话，**每次启动都会往
+        # 对话记录里塞一条「已捕获屏幕 1920x1080…」**。实测：全新安装
+        # （谁的数据都没有）第一次启动就生成了 conversations.json，
+        # 里面只有这一条。用户翻「历史对话」该看到自己问过什么，
+        # 不是启动日志；预览本身由预览面板显示，不需要在对话里再说一遍。
+        self._push("info", f"{shot.message}", ephemeral=True)
 
     # ---------------------------------------------------------------- 审批流
     @Property("QVariantMap", notify=approvalChanged)

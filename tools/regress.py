@@ -28,6 +28,7 @@ r"""全量回归：一个入口跑完所有套件，输出压到最短。
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -66,6 +67,8 @@ SUITES: list[tuple[str, str, str]] = [
     ("core", "更新检查与发版", "releasetest.py"),
     ("core", "数据导出导入", "datatranstest.py"),
     ("core", "导入后的内存重载", "reloadtest.py"),
+    # 发版红线：别人装完必须是干净的新装（不带本机的工具/记忆/对话）
+    ("core", "新装干净性", "freshstarttest.py"),
     # ---- 界面（打包前自测原来漏了这一档）
     ("ui", "QML 加载", "qmlcheck.py"),
     ("ui", "上手指引与更新接线", "onboardingtest.py"),
@@ -116,6 +119,101 @@ GROUP_ORDER = ["core", "ui", "ai", "pet", "reg"]
 
 # 单个套件最多等多久。有窗口/子进程的套件慢一些，给足。
 TIMEOUT = 900
+
+# 需要「小爪正在运行」的套件。
+#
+# `uia_test` 里有几条要按标题找「小爪」窗口来读控件 —— 应用没开着就会
+# 报「找不到小爪窗口」。这不是代码问题，但它会让回归的结果**取决于
+# 跑之前应用恰好在不在运行**：同一份代码，开着应用是绿的、关着是红的。
+# 这种随机变红比没有测试更糟（会让人开始忽略红色）。
+#
+# 所以由 regress 自己按需拉起一个实例：跑之前起、跑完收掉，
+# 用独立的数据目录和单实例后缀，跟用户自己开着的那份互不干扰。
+NEEDS_APP = {"uia_test.py"}
+APP_HOME = ROOT / ".cache" / "regress-app"
+
+
+class AppInstance:
+    """按需启动的小爪实例，给需要窗口的套件用。
+
+    **不是「跑之前起一次」，而是「每次需要之前确保它在」。**
+    第一版在整轮开头起一次就完事，结果全量跑时 uia_test 报「找不到小爪
+    窗口」—— 单跑却没问题，说明中间有什么把它弄没了（某个套件清理进程，
+    或者它自己退了）。与其去猜是谁干的，不如让每个需要的套件都自己确认
+    一次：**不依赖「五分钟前起的东西现在还活着」这个假设。**
+    """
+
+    def __init__(self) -> None:
+        self.process: subprocess.Popen | None = None
+        self.started_by_us = False
+        # 把应用输出留下来：它要是崩了，这里能看到为什么
+        self.log_path = LOG_DIR / "regress-app.log"
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def ensure(self) -> str:
+        """确保在跑。已经在跑就直接返回，否则拉起一个。"""
+        if self.is_alive():
+            return "已在运行"
+        return self.start()
+
+    def start(self) -> str:
+        """拉起一个实例。返回一句说明（给输出用）。"""
+        pythonw = PYTHON.with_name("pythonw.exe")
+        exe = pythonw if pythonw.exists() else PYTHON
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        env = dict(os.environ)
+        env["PAWPET_HOME"] = str(APP_HOME)
+        # 独立单实例命名空间：不然会跟用户正在跑的那份撞上，
+        # 新实例会立刻静默退出，套件又会报「找不到窗口」
+        env["PAWPET_INSTANCE_SUFFIX"] = "regress-app"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env.pop("OPENAI_API_KEY", None)
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            log_handle = open(self.log_path, "w", encoding="utf-8",
+                              errors="replace")
+            self.process = subprocess.Popen(
+                [str(exe), str(ROOT / "run_pawpet.py")],
+                cwd=str(ROOT), env=env,
+                stdout=log_handle, stderr=subprocess.STDOUT,
+                creationflags=creationflags)
+        except OSError as exc:
+            return f"起不来（{exc}）"
+
+        self.started_by_us = True
+        # 等窗口出来。宠物窗 + 工作台要初始化 Qt，给它足够时间。
+        time.sleep(12)
+        if self.process.poll() is not None:
+            tail = ""
+            try:
+                tail = self.log_path.read_text(encoding="utf-8",
+                                               errors="replace")[-300:]
+            except OSError:
+                pass
+            return (f"启动后立刻退出了（退出码 {self.process.returncode}）"
+                    f"{'：' + tail.strip() if tail.strip() else ''}")
+        return "已拉起"
+
+    def stop(self) -> None:
+        if self.process is None or not self.started_by_us:
+            return
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=15)
+        except Exception:  # noqa: BLE001
+            try:
+                self.process.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        self.process = None
+        self.started_by_us = False
 
 
 # ==========================================================================
@@ -212,19 +310,30 @@ def main() -> int:
     passed = 0
     started = time.time()
 
-    for group, label, script in selected:
-        code, elapsed, output = run_suite(script, LOG_DIR / f"{script}.log")
-        ok = code == 0
-        if ok:
-            passed += 1
-        else:
-            failures.append((script, label, summarize(output, code)))
-        if not args.quiet:
-            mark = "ok " if ok else "XX "
-            # 名字对齐，一屏能扫完
-            print(f"  {mark} {label:14s} {elapsed:6.1f}s  {script}")
-        if not ok and args.stop_on_fail:
-            break
+    # 有套件需要「小爪正在运行」就在它前面确认一次。
+    # 不这样做的话，回归的结果会取决于跑之前应用恰好在不在运行 ——
+    # 同一份代码时绿时红，那种信号比没有信号更糟。
+    app_instance = AppInstance()
+    try:
+        for group, label, script in selected:
+            if script in NEEDS_APP:
+                note = app_instance.ensure()
+                if not args.quiet:
+                    print(f"       （{label} 需要小爪在运行：{note}）")
+            code, elapsed, output = run_suite(script, LOG_DIR / f"{script}.log")
+            ok = code == 0
+            if ok:
+                passed += 1
+            else:
+                failures.append((script, label, summarize(output, code)))
+            if not args.quiet:
+                mark = "ok " if ok else "XX "
+                # 名字对齐，一屏能扫完
+                print(f"  {mark} {label:14s} {elapsed:6.1f}s  {script}")
+            if not ok and args.stop_on_fail:
+                break
+    finally:
+        app_instance.stop()
 
     total_time = time.time() - started
     minutes = int(total_time // 60)

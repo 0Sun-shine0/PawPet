@@ -360,6 +360,40 @@ def main() -> int:
                 strays.append(f"{path.relative_to(ROOT)}:{lineno}")
     check("pawpet 包里没有第二份版本号定义", strays == [], str(strays))
 
+    # ==================================================== 八、发版不许让仓库分叉
+    #
+    # **这一节是 v2.2.0 发版时踩的坑。**
+    #
+    # `publish_version_file` 原来直接用 Contents API 在远端建一个提交，
+    # 本地仓库看不到它 —— 两边历史分叉。而这台机器 `git push` / `git fetch`
+    # 走 443 直连不通（所以才需要 github_upload.py 这个工具），
+    # 分叉**没法自动收敛**。
+    #
+    # 后果实测到了：发完版想推下一个提交，被安全机制拦下
+    # 「远端已有 1 个父提交的真实历史，用 API 覆盖会丢东西」——
+    # 也就是每发一次版，仓库就再也推不动。
+    #
+    # 修法是走「写本地 → 本地提交 → 上传」，远端那个提交和本地同 SHA。
+    # 这是结构性约束，用真实网络测代价太大，所以**查源码**：
+    # 这个函数里不该再出现 Contents API 的写入调用。
+    print("\n=== 八、发版会让仓库分叉吗 ===")
+    release_src = (ROOT / "tools" / "release.py").read_text(encoding="utf-8")
+    start = release_src.find("def publish_version_file")
+    end = release_src.find("\ndef ", start + 10)
+    publish_body = release_src[start:end if end > 0 else len(release_src)]
+
+    check("找到 publish_version_file", start > 0, "函数没了？")
+    check("不再用 Contents API 直写远端（那会让本地看不到那个提交）",
+          "contents/version.json" not in publish_body
+          and '"PUT"' not in publish_body,
+          "又出现 Contents API 写入了")
+    check("走的是本地提交 + 上传",
+          "gh_upload" in publish_body and "git" in publish_body,
+          "没看到本地提交或上传调用")
+    check("只 add version.json（不把用户其他未提交改动卷进去）",
+          '"add", "version.json"' in publish_body,
+          "add 的范围看着不对")
+
     # ==================================================== 收尾
     print(f"\n{'=' * 52}")
     if FAILED:

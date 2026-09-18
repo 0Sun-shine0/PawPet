@@ -125,7 +125,14 @@ Item {
                      eyeColor: "#3E3548",
                      badgeX: 32, badgeY: 58, badgeR: 16,
                      tailX: 142, tailY: 116, tailW: 62, tailH: 78,
-                     tailOX: 10, tailOY: 66, mouthX: 100, mouthY: 153 }
+                     tailOX: 10, tailOY: 66,
+                     // mouthY 是「说话时张开的嘴」贴的位置，必须跟着
+                     // paintMochi 里那个 ω 的弧线走。
+                     // 规律（另外三只都遵守）：弧线中心 y + 2 ——
+                     //   柴犬 弧 120 → 122 ／ 狐狸 弧 128 → 130
+                     // 麻薯的嘴改成并排 ω 之后弧线从 151 挪到了 157；
+                     // 这里要是还留 153，张嘴就会盖住鼻子。
+                     mouthX: 100, mouthY: 159 }
         }
     }
 
@@ -998,11 +1005,24 @@ Item {
         polygon(ctx, [94, 145, 106, 145, 100, 152], "#D9767E", null, 0)
         ctx.strokeStyle = "#9C7A80"
         ctx.lineWidth = 2.1
+        // 从鼻尖引一小段下来，再分成左右两瓣 —— 就是猫嘴那个「ω」。
+        //
+        // **这里原来是两个同心弧**（圆心都是 (100,151)，半径 7.5 和 15）：
+        // 大弧套小弧，看着像信号格或者双彩虹，不像嘴 —— 四只里只有麻薯
+        // 是这么画的，所以它显得比柴犬、狐狸差。
+        //
+        // 现在跟柴犬/狐狸用同一套公式：竖线从鼻尖到嘴，两瓣圆心在
+        // 鼻尖左右各偏 5、半径 6.5（它们用的是偏 5 / 半径 6，
+        // 麻薯脸更大一点，等比放大一丝）。
         ctx.beginPath()
-        ctx.arc(100, 151, 7.5, 0.18 * Math.PI, 0.82 * Math.PI, false)
+        ctx.moveTo(100, 152)
+        ctx.lineTo(100, 157)
         ctx.stroke()
         ctx.beginPath()
-        ctx.arc(100, 151, 15, 0.22 * Math.PI, 0.78 * Math.PI, false)
+        ctx.arc(94.5, 157, 6.5, 0, 0.9 * Math.PI, false)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.arc(105.5, 157, 6.5, 0.1 * Math.PI, Math.PI, false)
         ctx.stroke()
 
         // 胡须

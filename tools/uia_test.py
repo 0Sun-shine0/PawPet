@@ -47,28 +47,83 @@ TESTS: list[tuple[str, str, int, str]] = [
     ''', 15, "能按标题定位"),
 
     ("按坐标反查控件", '''
+        import time, tkinter as tk
         from pawpet.ai import uia
-        c = uia.get_client()
-        ok, result = uia.call_with_timeout(lambda: c.element_at(960, 540), 6)
-        if not ok:
-            print(f"RESULT: fail {result}")
-        elif result is None:
-            print("RESULT: fail 该坐标没有元素")
-        else:
-            print(f"RESULT: ok {result.summary()[:80]}")
-    ''', 20, "0.5s 内应返回真实控件"),
+
+        # **查自己建的窗口，不查屏幕正中央。**
+        #
+        # 原来这里查的是 `element_at(960, 540)` —— 屏幕正中那个点。
+        # 那儿是哪个程序就查哪个：用户开着钉钉/飞书/IDEA/ToDesk 的时候，
+        # 命中的可能是某个 UIA 提供程序响应很慢的窗口，于是查询超时、
+        # 断言失败、套件变红 —— 而模块本身没问题（超时保护正常工作，
+        # 这正是 uia.py 的设计目标）。
+        #
+        # 断言「屏幕上某个固定坐标一定能读到控件」等于断言「用户的桌面
+        # 保持某种状态」，那不是我们该负责的东西。自己造窗口，坐标已知、
+        # 控件已知，结果就与环境无关了。
+        root = tk.Tk()
+        root.title("PawPetUiaAt")
+        root.geometry("260x120+120+120")
+        root.attributes("-topmost", True)
+        label = tk.Label(root, text="PawPet坐标反查目标")
+        label.pack(pady=10)
+        root.update()
+        time.sleep(1.0)
+
+        try:
+            label.update_idletasks()
+            lx = label.winfo_rootx() + label.winfo_width() // 2
+            ly = label.winfo_rooty() + label.winfo_height() // 2
+
+            c = uia.get_client()
+            # **直接在主线程调，不套 call_with_timeout。**
+            # Tk 建窗口时会在这个线程初始化 COM/消息循环；再把 UIA 对象
+            # 拿到别的线程用会互相打架，反查就偶发超时（同下面
+            # 「读取真实控件的名字和位置」那条的说明）。真要挂死由外层
+            # 子进程的超时兜住 —— 这个套件本来就是每个用例跑在子进程里的。
+            t = time.time()
+            result = c.element_at(lx, ly)
+            el = time.time() - t
+            if result is None:
+                print("RESULT: fail 该坐标没有元素")
+            else:
+                print(f"RESULT: ok {result.summary()[:70]}（{el:.1f}s）")
+        finally:
+            root.destroy()
+    ''', 20, "查自己窗口的坐标，必须读到真实控件"),
 
     ("读焦点元素", '''
+        import time, tkinter as tk
         from pawpet.ai import uia
-        c = uia.get_client()
-        ok, result = uia.call_with_timeout(lambda: c.focused(), 6)
-        if not ok:
-            print(f"RESULT: fail {result}")
-        elif result is None:
-            print("RESULT: ok 当前没有焦点元素（正常）")
-        else:
-            print(f"RESULT: ok {result.summary()[:80]}")
-    ''', 20, "0.5s 内应返回"),
+
+        # 同理：原来的 `c.focused()` 读的是**用户当前的焦点窗口**，
+        # 完全取决于他开着什么、刚点过哪里。改成先把自己造的窗口顶上来
+        # 并设焦点，再读 —— 这时读到的应该是我们自己的控件。
+        # 同样在主线程直接调（见上一条关于 Tk 与 COM 的说明）。
+        root = tk.Tk()
+        root.title("PawPetUiaFocus")
+        root.geometry("240x110+520+120")
+        root.attributes("-topmost", True)
+        entry = tk.Entry(root, width=22)
+        entry.insert(0, "PawPet焦点目标")
+        entry.pack(pady=14)
+        root.update()
+        entry.focus_force()
+        root.update()
+        time.sleep(1.0)
+
+        try:
+            c = uia.get_client()
+            t = time.time()
+            result = c.focused()
+            el = time.time() - t
+            if result is None:
+                print("RESULT: ok 当前没有焦点元素（正常）")
+            else:
+                print(f"RESULT: ok {result.summary()[:70]}（{el:.1f}s）")
+        finally:
+            root.destroy()
+    ''', 20, "查自己窗口的焦点，应能返回"),
 
     ("读某个窗口的控件树", '''
         from pawpet.ai import uia
@@ -89,7 +144,37 @@ TESTS: list[tuple[str, str, int, str]] = [
     ("超时保护确实生效", '''
         import time
         from pawpet.ai import uia
-        # 故意传一个会卡死的函数，验证超时保护能拦住它
+
+        # **要用「必定卡住」的函数来测，不能用「可能卡住」的。**
+        #
+        # 这个测试原来传的是「在桌面根上 FindAll」——注释写着「已知会卡死」，
+        # 于是断言 `not ok`（必须超时）。但那句话是**环境观察**，不是保证：
+        # 桌面上的窗口一变（或者 Windows 版本不同），这个调用可能一两秒就
+        # 正常返回，于是断言失败、套件变红 —— 而我们的超时机制其实一点
+        # 问题都没有。实测就撞上了：某次它 1.1 秒返回 ok=True。
+        #
+        # 断言「某个调用会卡死」等于断言「环境保持原样」，那不是我们该
+        # 负责的东西。要测的是**超时机制本身灵不灵**，所以这里用一个
+        # 保证超过时限的函数（sleep），结果与环境无关、必然可判。
+        def slow():
+            time.sleep(30)
+            return "不该走到这里"
+
+        t = time.time()
+        ok, msg = uia.call_with_timeout(slow, 1.5)
+        el = time.time() - t
+        good = (not ok) and el < 5.0 and "超时" in str(msg)
+        print(f"RESULT: {'ok' if good else 'fail'} "
+              f"ok={ok} 用时{el:.1f}s msg={str(msg)[:50]}")
+    ''', 20, "应当在 1.5 秒后放弃而不是永久卡死"),
+
+    ("桌面根 FindAll 的现状（只观察，不判成败）", '''
+        import time
+        from pawpet.ai import uia
+
+        # 这条**只报告不判定** —— 保留它是因为这个观察对维护有价值：
+        # 「桌面根 FindAll 会不会卡死」决定了 uia 里那些规避写法还有没有
+        # 必要。但它随环境变化，不能当断言用（见上一条的说明）。
         def hang():
             import ctypes
             c = uia.get_client()
@@ -97,7 +182,6 @@ TESTS: list[tuple[str, str, int, str]] = [
             uia._call(c._automation, uia.IA_CREATE_TRUE_CONDITION, ctypes.c_long,
                       (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(cond))
             arr = ctypes.c_void_p()
-            # 在桌面根上 FindAll —— 已知会卡死
             return uia._call(c._root_ptr, uia.EL_FIND_ALL, ctypes.c_long,
                              (ctypes.c_int, ctypes.c_void_p,
                               ctypes.POINTER(ctypes.c_void_p)),
@@ -106,11 +190,9 @@ TESTS: list[tuple[str, str, int, str]] = [
         t = time.time()
         ok, msg = uia.call_with_timeout(hang, 3.0)
         el = time.time() - t
-        # 期望：3 秒后放弃，ok=False，且进程还活着能继续打印
-        good = (not ok) and el < 6.0 and "超时" in str(msg)
-        print(f"RESULT: {'ok' if good else 'fail'} "
-              f"ok={ok} 用时{el:.1f}s msg={str(msg)[:50]}")
-    ''', 20, "应当在 3 秒后放弃而不是永久卡死"),
+        state = "超时了（符合当初的观察）" if not ok else "正常返回了（环境已变）"
+        print(f"RESULT: ok 用时{el:.1f}s，{state}")
+    ''', 20, "只报告，不判成败"),
 
     ("读取真实控件的名字和位置（关键验证）", '''
         import os, time, tkinter as tk

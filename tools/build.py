@@ -184,38 +184,21 @@ def main() -> int:
         # 文件安全策略）出问题不会被发现 —— 而那些恰恰是最容易悄悄坏掉、
         # 打出发给别人又不会立刻暴露的部分。
         #
-        # 加新套件的原则：**「坏了用户会看到」的就加进来**。
-        # 全跑一遍也就几分钟，比发一个坏包出去便宜得多。
-        suites = [
-            # ---- 核心
-            ("核心逻辑", "selftest.py"),
-            ("Markdown 渲染", "mdtest.py"),
-            ("字体与字形", "glyphcheck.py"),
-            # ---- AI 能力
-            ("AI 模块", "aitest.py"),
-            ("Agent 端到端", "agenttest.py"),
-            ("跨会话记忆", "memtest.py"),
-            ("自动记忆", "autolearntest.py"),
-            ("知识库", "kbtest.py"),
-            ("失败自纠", "advisortest.py"),
-            ("批量与合并确认", "batchtest.py"),
-            ("文件读写安全", "filetest.py"),
-            ("工具消息历史", "historytest.py"),
-            # ---- 这一轮的对外能力
-            ("模型配置向导", "setuptest2.py"),
-            ("界面配色定制", "themetest.py"),
-            ("自定义工具", "exttest.py"),
-            ("MCP 接线", "mcptest.py"),
-            ("MCP 可达性", "mcpwiringtest.py"),
-            ("宠物情绪动画", "moodtest.py"),
-            ("对话持久化", "convtest.py"),
-            ("可用性功能", "featuretest.py"),
-            # ---- 曾经真出过的 bug，钉住别再回来
-            ("轮次串台", "turntest.py"),
-            ("任务收尾", "finishtest.py"),
-            ("步数上限", "steptest.py"),
-            ("用户反馈三问题", "fixtest.py"),
-        ]
+        # **清单从 regress.py 导入，不在这里再抄一份。**
+        #
+        # 以前这里有一份 24 个的硬编码清单，而实际回归用的是 33 个 ——
+        # 差的 9 个正好是 QML/界面那批。也就是说打包前自测**发现不了
+        # QML 语法错误**（实测踩过：一个 rgba 写法炸掉 Pet.qml，
+        # 而那 9 个里有 4 个会红）。清单只留一份，就不会再漂。
+        try:
+            sys.path.insert(0, str(ROOT / "tools"))
+            from regress import SUITES  # noqa: PLC0415
+
+            suites = [(label, script) for _group, label, script in SUITES]
+        except Exception as exc:  # noqa: BLE001
+            log(f"  [XX] 读不到套件清单（tools/regress.py）：{exc}")
+            return 1
+
         failures: list[str] = []
         for label, script in suites:
             path = ROOT / "tools" / script

@@ -73,8 +73,43 @@ def read_version_file() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def collect_assets(version: str) -> list[tuple[Path, str]]:
+def remote_name(local: Path, version: str) -> str:
+    """上传到 Release 时用的文件名 —— **必须是纯 ASCII**。
+
+    为什么不能直接用本地文件名（实测踩的坑）：
+
+    `小爪助手-安装程序.exe` 传上去会变成 **`-.exe`** —— 中文全没了。
+    用户下载到的就是一个叫 `-.exe` 的文件，完全看不出是什么。
+
+    查证过程：URL 编码本身是**对的**（`urllib.parse.quote` 往返无误、
+    发出去是纯 ASCII），问题在 GitHub 侧。做了个受控实验上传小文件：
+
+        测试-中文名.txt      →  -.txt
+        测试-手动utf8-q.txt  →  -.utf8-q.txt
+
+    两种编码方式（`quote` 默认 和 `quote(safe="")`）都被剥光，
+    所以不是我们编码错了 —— **GitHub 会把 `?name=` 里的非 ASCII
+    字符直接丢掉**（是丢弃，不是乱码：`测试` 变成空，`-` 和 `.txt` 保留）。
+    换编码技巧绕不过「按字符过滤」这件事。
+
+    于是：本地文件保留中文名（用户在 dist/ 里看着顺眼），
+    上传时换成 ASCII 名。顺带这也是更稳的选择 —— 中文文件名在部分
+    浏览器和下载工具里会出现乱码或截断，而用户群体里什么环境都有。
+    """
+    suffix = local.suffix.lower()
+    if suffix == ".exe":
+        return f"PawPet-Setup-{version}.exe"
+    if suffix == ".zip":
+        return f"PawPet-Portable-{version}.zip"
+    # 兜底：把非 ASCII 字符去掉，至少不会变成空名字
+    stem = "".join(ch for ch in local.stem if ord(ch) < 128) or "PawPet"
+    return f"{stem}{local.suffix}"
+
+
+def collect_assets(version: str) -> list[tuple[Path, str, str]]:
     """要上传的文件：安装包（主）、绿色版（备）。
+
+    返回 (本地路径, 上传用的 ASCII 名, 给人看的说明)。
 
     安装包排第一个 —— GitHub Releases 页面上文件的顺序就是上传顺序，
     用户第一眼要看到的是「双击就能装」的那个。
@@ -83,16 +118,16 @@ def collect_assets(version: str) -> list[tuple[Path, str]]:
         (DIST / INSTALLER_NAME, "双击安装。装到用户目录，不会碰你的数据。"),
         (DIST / f"小爪助手-{version}-绿色版.zip", "不想装？解压即用。"),
     ]
-    assets: list[tuple[Path, str]] = []
+    assets: list[tuple[Path, str, str]] = []
     for path, label in candidates:
         if path.exists() and path.stat().st_size > 0:
-            assets.append((path, label))
+            assets.append((path, remote_name(path, version), label))
         else:
             print(f"  [!!] 找不到 {path.name}（跳过）")
     return assets
 
 
-def check_local(version: str, need_upload: bool) -> tuple[bool, list[tuple[Path, str]]]:
+def check_local(version: str, need_upload: bool) -> tuple[bool, list[tuple[Path, str, str]]]:
     """本地检查。返回 (能不能继续, 要上传的文件)。"""
     ok = True
 
@@ -115,10 +150,13 @@ def check_local(version: str, need_upload: bool) -> tuple[bool, list[tuple[Path,
         print(f"       先跑：.venv\\Scripts\\python.exe tools\\build.py --installer --zip")
         return False, []
 
-    for path, _label in assets:
+    for path, upload_as, _label in assets:
         size = path.stat().st_size
         age_days = (time.time() - path.stat().st_mtime) / 86400
         print(f"  [ok] {path.name}  {human(size)}")
+        if upload_as != path.name:
+            # 让「本地叫什么 / 传上去叫什么」一眼可见 —— 用户下载到的是后者
+            print(f"       上传为 {upload_as}（附件名必须 ASCII，见 remote_name）")
         if age_days > 3:
             # 只警告不阻止：产物可能是几天前打的，照样能发。
             # 但「我明明重新打包了，怎么还是旧包」这种困惑值得先提醒一句。
@@ -192,15 +230,19 @@ def check_remote_assets(release_body: dict,
     remote = {a.get("name"): a.get("size")
               for a in (release_body.get("assets") or [])
               if isinstance(a, dict)}
-    for path, _label in assets:
+    for path, upload_as, _label in assets:
         size = path.stat().st_size
-        if path.name not in remote:
-            problems.append(f"Release 上没有 {path.name}")
-        elif remote[path.name] != size:
-            problems.append(f"{path.name} 大小不一致：本地 {size}，"
-                            f"远程 {remote[path.name]}")
+        # **按上传名查，不是按本地名。** 两者的区别就是这轮修的那个 bug：
+        # 本地叫「小爪助手-安装程序.exe」，上传用的 ASCII 名是
+        # 「PawPet-Setup-2.2.0.exe」。用本地名去查永远查不到，
+        # 于是回验会一直报「Release 上没有 …」—— 而其实传上去了。
+        if upload_as not in remote:
+            problems.append(f"Release 上没有 {upload_as}")
+        elif remote[upload_as] != size:
+            problems.append(f"{upload_as} 大小不一致：本地 {size}，"
+                            f"远程 {remote[upload_as]}")
         else:
-            good.append(path.name)
+            good.append(upload_as)
     return problems, good
 
 
@@ -268,23 +310,26 @@ def asset_url(owner: str, repo: str, release_id: int, name: str) -> str:
 
 
 def upload_asset(owner: str, repo: str, token: str, release_id: int,
-                 path: Path, label: str) -> bool:
+                 path: Path, upload_as: str, label: str) -> bool:
     """把一个文件传到 Release 上。
 
     传二进制不能走 `github_upload.request()` —— 那个函数会把 payload
     做 json.dumps，二进制内容过不了。所以这里手工发。
+
+    `upload_as` 是附件在 Release 上的名字，**必须 ASCII**
+    （见 remote_name 的说明）。
     """
     from github_upload import GitHubError
 
     size = path.stat().st_size
-    url = asset_url(owner, repo, release_id, path.name)
+    url = asset_url(owner, repo, release_id, upload_as)
     request = urllib.request.Request(url, method="POST", data=path.read_bytes())
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("Accept", "application/vnd.github+json")
     request.add_header("User-Agent", "pawpet-releaser/1.0")
 
-    print(f"  上传 {path.name}（{human(size)}）…")
+    print(f"  上传 {path.name} → {upload_as}（{human(size)}）…")
     started = time.time()
     try:
         # 上百 MB，超时要给足。实测 120MB 在家里宽带上一两分钟。
@@ -305,7 +350,16 @@ def upload_asset(owner: str, repo: str, token: str, release_id: int,
     if uploaded is not None and int(uploaded) != size:
         print(f"  [XX] 大小对不上：本地 {size}，远程 {uploaded}")
         return False
-    print(f"  [ok] {path.name}  ({elapsed:.0f}s)")
+
+    # **核对名字。** 这是踩过的坑：GitHub 会把非 ASCII 字符剥掉，
+    # 「小爪助手-安装程序.exe」变成「-.exe」。上传返回 201、大小也对，
+    # 只有名字是错的 —— 不查这一项，用户就会下载到一个叫「-.exe」的文件。
+    landed = str(result.get("name") or "")
+    if landed and landed != upload_as:
+        print(f"  [XX] 附件名被改了：想要 {upload_as!r}，实际 {landed!r}")
+        return False
+
+    print(f"  [ok] {landed or upload_as}  ({elapsed:.0f}s)")
     return True
 
 
@@ -510,8 +564,12 @@ def main() -> int:
         print(f"  · 只把 version.json 同步到 {version}")
     else:
         print(f"  · 建 tag {tag} + Release「小爪助手 {version}」")
-        for path, _label in assets:
-            print(f"  · 上传 {path.name}（{human(path.stat().st_size)}）")
+        for path, upload_as, _label in assets:
+            size = human(path.stat().st_size)
+            if upload_as != path.name:
+                print(f"  · 上传 {path.name}（{size}）→ 附件名 {upload_as}")
+            else:
+                print(f"  · 上传 {path.name}（{size}）")
         print(f"  · 最后提交 version.json → {version}")
         print("\n  （顺序是刻意的：先把包备好，再让客户端知道有新版本）")
 
@@ -538,9 +596,9 @@ def main() -> int:
             return 1
 
         print("\n=== 6. 上传产物 ===")
-        failed = [path.name for path, label in assets
+        failed = [upload_as for _path, upload_as, _label in assets
                   if not upload_asset(args.owner, args.repo, token,
-                                      release_id, path, label)]
+                                      release_id, _path, upload_as, _label)]
         if failed:
             print(f"\n  [XX] 有文件没传上去：{', '.join(failed)}")
             print("       先别提交 version.json —— 否则用户会看到更新提示却下不到包。")
@@ -584,23 +642,27 @@ def _git_dirty() -> int:
     return len([ln for ln in result.stdout.splitlines() if ln.strip()])
 
 
-def _release_body(version: str, note: str, assets: list[tuple[Path, str]]) -> str:
+def _release_body(version: str, note: str,
+                  assets: list[tuple[Path, str, str]]) -> str:
     """Release 页面上的正文。
 
     下载页是**唯一**一个用户会认真读的页面（他要点下载，视线必然落在这里），
     所以把「装哪个、怎么装」直接写在这儿，别指望他去翻 README。
+
+    **文件名要用上传后的 ASCII 名**（`upload_as`），不是本地名 ——
+    用户点下载拿到的是前者，写成本地中文名就对不上了。
     """
     lines = [f"### 小爪助手 {version}", ""]
     if note:
         lines += [note, ""]
     lines += ["#### 下载哪个", ""]
-    for path, label in assets:
-        lines.append(f"- **{path.name}**（{human(path.stat().st_size)}）— {label}")
+    for path, upload_as, label in assets:
+        lines.append(f"- **{upload_as}**（{human(path.stat().st_size)}）— {label}")
     lines += [
         "",
         "#### 安装",
         "",
-        "双击 `小爪助手-安装程序.exe`。装到你的用户目录，**不会碰你的数据**；",
+        "双击 `PawPet-Setup` 那个 exe。装到你的用户目录，**不会碰你的数据**；",
         "卸载走「设置 → 应用」，卸载也不会删数据。",
         "",
         "> Windows 可能会弹「已保护你的电脑」—— 那是因为这个版本还没有代码签名。",

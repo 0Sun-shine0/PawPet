@@ -87,8 +87,8 @@ def main() -> int:
             exe = fake_dist / release.INSTALLER_NAME
             exe.write_bytes(b"x" * 100)
             picked = release.collect_assets("9.9.9")
-            check("有安装包就挑得到", [p.name for p, _l in picked] == [exe.name],
-                  str([p.name for p, _l in picked]))
+            check("有安装包就挑得到", [p.name for p, _u, _l in picked] == [exe.name],
+                  str([p.name for p, _u, _l in picked]))
 
             # 顺序有实际意义：Releases 页面上文件的排列就是上传顺序，
             # 用户第一眼要看到「双击就能装」的那个。
@@ -96,27 +96,66 @@ def main() -> int:
             zip_path.write_bytes(b"y" * 50)
             picked = release.collect_assets("9.9.9")
             check("安装包排在绿色版前面（下载页第一眼看到的是它）",
-                  [p.name for p, _l in picked] == [exe.name, zip_path.name],
-                  str([p.name for p, _l in picked]))
+                  [p.name for p, _u, _l in picked] == [exe.name, zip_path.name],
+                  str([p.name for p, _u, _l in picked]))
 
             # 0 字节的文件是残包，不能当成功
             zip_path.write_bytes(b"")
             picked = release.collect_assets("9.9.9")
-            check("0 字节的产物不算数", [p.name for p, _l in picked] == [exe.name],
-                  str([p.name for p, _l in picked]))
+            check("0 字节的产物不算数",
+                  [p.name for p, _u, _l in picked] == [exe.name],
+                  str([p.name for p, _u, _l in picked]))
         finally:
             release.DIST = original_dist
+
+    # ==================================================== 二之二、附件名
+    #
+    # **这一节是踩坑之后加的。** 第一版直接用本地文件名上传，而本地名是
+    # 中文的 —— GitHub 会把 `?name=` 里的非 ASCII 字符**全部剥掉**：
+    #
+    #     小爪助手-安装程序.exe  →  -.exe
+    #
+    # 上传返回 201、大小也对，只有名字是错的，所以本地怎么测都发现不了，
+    # 用户下载到的是一个叫「-.exe」的文件。
+    #
+    # 做了受控实验确认（两种编码方式都被剥光，是 GitHub 侧按字符过滤）：
+    #     测试-中文名.txt      →  -.txt
+    #     测试-手动utf8-q.txt  →  -.utf8-q.txt
+    #
+    # 所以上传名必须纯 ASCII。这里把它钉死。
+    print("\n=== 二之二、附件名必须纯 ASCII（中文会被 GitHub 剥光）===")
+
+    for local_name, expect in (
+        ("小爪助手-安装程序.exe", "PawPet-Setup-2.2.0.exe"),
+        ("小爪助手-2.2.0-绿色版.zip", "PawPet-Portable-2.2.0.zip"),
+    ):
+        got = release.remote_name(Path(local_name), "2.2.0")
+        check(f"{local_name} → {expect}", got == expect, f"实际 {got!r}")
+        check(f"{expect} 是纯 ASCII", got.isascii(), got)
+        # 后缀不能丢：丢了用户双击不了也解压不了
+        check(f"{expect} 后缀保住了",
+              got.lower().endswith(Path(local_name).suffix.lower()), got)
+        # 版本号要在名字里：用户下多个版本时能分清
+        check(f"{expect} 带版本号", "2.2.0" in got, got)
+
+    # 兜底分支也不能产出空名字或非 ASCII
+    odd = release.remote_name(Path("中文名.rar"), "1.0")
+    check("陌生后缀走兜底分支也不崩、且是 ASCII", odd.isascii() and odd, odd)
 
     # ==================================================== 三、上传地址
     print("\n=== 三、上传地址：主机名错了只会拿到 404 ===")
 
-    url = release.asset_url("owner", "repo", 42, "小爪助手-安装程序.exe")
+    url = release.asset_url("owner", "repo", 42, "PawPet-Setup-2.2.0.exe")
     check("走的是 uploads.github.com，不是 api.github.com",
           url.startswith("https://uploads.github.com/"), url)
     check("带上 release id", "/releases/42/" in url, url)
-    check("中文文件名被转义（不转义会 400）",
-          "%" in url and "小爪助手" not in url, url)
     check("带 ?name= 否则页面上显示成 assets", "?name=" in url, url)
+    check("ASCII 名字原样带过去（不用转义）",
+          url.endswith("?name=PawPet-Setup-2.2.0.exe"), url)
+    # 万一有人又传了中文名，url 里也必须是转义过的 —— 不转义会 400
+    url_cn = release.asset_url("owner", "repo", 42, "小爪助手.exe")
+    check("真传了中文名也不会拼出非法 URL",
+          "%" in url_cn and "小爪助手" not in url_cn, url_cn)
 
     # ==================================================== 四、远程核对
     print("\n=== 四、远程核对：传上去的和本地必须一模一样 ===")
@@ -126,7 +165,8 @@ def main() -> int:
         b = Path(tmp) / "b.zip"
         a.write_bytes(b"1" * 100)
         b.write_bytes(b"2" * 200)
-        assets = [(a, "装"), (b, "解压")]
+        # (本地路径, 上传用的名字, 说明)
+        assets = [(a, "a.exe", "装"), (b, "b.zip", "解压")]
 
         problems, good = release.check_remote_assets(
             {"assets": [{"name": "a.exe", "size": 100},
@@ -154,16 +194,41 @@ def main() -> int:
         check("返回里没有 assets 键也不崩（照样两条都报）",
               len(problems) == 2 and good == [], str(problems))
 
+        # **按上传名查，不是按本地名。** 本地叫「小爪助手-安装程序.exe」、
+        # 传上去叫「PawPet-Setup-2.2.0.exe」—— 用本地名查永远查不到，
+        # 回验会一直误报「Release 上没有」。
+        local_cn = Path(tmp) / "小爪助手-安装程序.exe"
+        local_cn.write_bytes(b"z" * 300)
+        cn_assets = [(local_cn, "PawPet-Setup-2.2.0.exe", "装")]
+        problems, good = release.check_remote_assets(
+            {"assets": [{"name": "PawPet-Setup-2.2.0.exe", "size": 300}]},
+            cn_assets)
+        check("上传名和本地名不同时，按上传名核对", problems == [], str(problems))
+        problems, _g = release.check_remote_assets(
+            {"assets": [{"name": "小爪助手-安装程序.exe", "size": 300}]},
+            cn_assets)
+        check("远程用本地中文名反而是错的（会被判没传）",
+              len(problems) == 1, str(problems))
+
+
     # ==================================================== 五、发布说明
     print("\n=== 五、发布说明：下载页是唯一会被认真读的页面 ===")
 
     with tempfile.TemporaryDirectory() as tmp:
         exe = Path(tmp) / release.INSTALLER_NAME
         exe.write_bytes(b"x" * 2048)
-        body = release._release_body("2.2.0", "修了三个问题", [(exe, "双击装")])
+        # (本地路径, 上传用的 ASCII 名, 说明)
+        upload_as = release.remote_name(exe, "2.2.0")
+        body = release._release_body("2.2.0", "修了三个问题",
+                                     [(exe, upload_as, "双击装")])
         check("写了版本号", "2.2.0" in body)
         check("写进了这次的一句话说明", "修了三个问题" in body)
-        check("点出了要下载哪个文件", release.INSTALLER_NAME in body)
+        # **要写上传后的名字**：用户点下载拿到的是那个，
+        # 写成本地中文名就对不上了。
+        check("点出了要下载哪个文件（用的是上传后的 ASCII 名）",
+              upload_as in body, body[:300])
+        check("下载说明里不该出现本地中文名",
+              release.INSTALLER_NAME not in body, body[:300])
         check("带上了文件大小（用户能判断下载对不对）", "2.0 KB" in body, body[:200])
         # SmartScreen 那一句不能删：没签名的新版本首次运行必弹红字，
         # 不告诉用户怎么过，他会以为装了个病毒。

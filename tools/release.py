@@ -365,12 +365,28 @@ def upload_asset(owner: str, repo: str, token: str, release_id: int,
 
 def publish_version_file(owner: str, repo: str, token: str, version: str,
                          note: str) -> bool:
-    """最后一步：把 version.json 提交上去。
+    """最后一步：把 version.json 更新出去。
 
-    用 Contents API 而不是 git push —— 只动这一个文件，不会把本地
-    其他没提交的改动（可能是不想发的）顺手带上去。
+    **走「本地提交 → 上传」，不用 Contents API 直接写远端。**
+
+    原来的实现是直接调 Contents API 在远端建一个提交，注释里写的理由是
+    「只动这一个文件，不会把本地其他没提交的改动顺手带上去」—— 意图没错，
+    但代价很实在：**本地仓库看不到那个提交，历史和远端分叉了**。
+
+    而这台机器 `git push` / `git fetch` 走 443 直连是不通的（所以才需要
+    `github_upload.py` 这个工具），也就是说分叉**没法自动收敛**。
+    后果实测到了：发完 v2.2.0 之后想推下一个提交，
+
+        [XX] 远端已有 1 个父提交的真实历史，用 API 覆盖会丢东西，已中止。
+
+    于是每发一次版，仓库就再也推不动，得手工做一次历史手术。
+
+    现在改成：把 version.json 写进本地、本地提交、再用 github_upload
+    上传。这样**远端那个提交和本地是同一个 SHA**，两边永远一致。
+    原来担心的「顺手带上去别的改动」也不会发生 —— 这个函数只
+    `git add version.json`，其他未提交的文件不进这个提交。
     """
-    from github_upload import request_with_retry
+    from github_upload import upload as gh_upload
 
     data = read_version_file()
     data["version"] = version
@@ -379,33 +395,63 @@ def publish_version_file(owner: str, repo: str, token: str, version: str,
     data.setdefault("url", f"https://github.com/{owner}/{repo}/releases/latest")
     data.setdefault("note", "")
 
-    payload = {
-        "message": f"chore: 更新 version.json 到 {version}",
-        "content": base64.b64encode(
-            (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        ).decode("ascii"),
-        "branch": "main",
-    }
-
-    # 文件已存在时必须带上它的 sha，否则 GitHub 会拒绝（409）。
-    # 第一次发版时它是 404 —— 那就是纯创建，不带 sha。
-    status, existing = request_with_retry(
-        "GET", f"/repos/{owner}/{repo}/contents/version.json?ref=main", token)
-    if status == 200 and isinstance(existing, dict) and existing.get("sha"):
-        payload["sha"] = existing["sha"]
-        action = "更新"
-    else:
-        action = "创建"
-
-    status, body = request_with_retry(
-        "PUT", f"/repos/{owner}/{repo}/contents/version.json", token, payload)
-    if status not in (200, 201):
-        detail = body.get("message", str(body)[:200]) \
-            if isinstance(body, dict) else str(body)[:200]
-        print(f"  [XX] 提交 version.json 失败（{status}）：{detail}")
+    # 1) 写本地。格式和 build.py 对齐（末尾换行、缩进 2）。
+    try:
+        VERSION_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+    except OSError as exc:
+        print(f"  [XX] 写不了本地 version.json：{exc}")
         return False
-    print(f"  [ok] 已在 main 上{action} version.json（{version}）")
+    print(f"  [ok] 本地 version.json 已更新（{version}）")
+
+    # 2) 本地提交。**只 add 这一个文件** —— 用户工作区里可能有别的东西
+    #    还没准备好发，不能被这个提交卷进去。
+    message = f"chore: 更新 version.json 到 {version}"
+    for argv in (["add", "version.json"],
+                 ["-c", "user.name=0Sun-shine0",
+                  "-c", "user.email=0Sun-shine0@users.noreply.github.com",
+                  "commit", "-m", message]):
+        try:
+            done = subprocess.run(["git", *argv], cwd=str(ROOT),
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"  [XX] git {argv[0]} 失败：{exc}")
+            return False
+        if done.returncode != 0:
+            # 「没有东西可提交」说明本地已经是对的（重跑发版时会出现），
+            # 这不是失败 —— 继续上传就行。
+            blob = (done.stdout or "") + (done.stderr or "")
+            if "nothing to commit" in blob or "无文件要提交" in blob:
+                print("  （本地已经是这个版本号，跳过提交）")
+                break
+            print(f"  [XX] git {argv[0]} 失败：{blob.strip()[:200]}")
+            return False
+    print(f"  [ok] 本地已提交（{message}）")
+
+    # 3) 上传。这一步会把远端推到和本地同一个提交上。
+    print("  上传到远端…")
+    code = gh_upload(owner, repo, token, "main",
+                     _local_commit_info("HEAD"))
+    if code != 0:
+        print("  [XX] 上传 version.json 失败")
+        return False
+    print(f"  [ok] 远端 main 已同步（{version}）")
     return True
+
+
+def _local_commit_info(ref: str = "HEAD") -> dict:
+    """把本地提交读成 github_upload 要的结构。
+
+    直接复用那个工具自己的 `local_commit_info`，别在这儿抄一份 ——
+    抄了以后它改了这边就对不上，而「提交内容和本地不一致」正是
+    最难查的一类问题。
+    """
+    from github_upload import local_commit_info
+
+    return local_commit_info(ref)
 
 
 # ==========================================================================

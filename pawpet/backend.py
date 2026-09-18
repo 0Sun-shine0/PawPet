@@ -100,6 +100,12 @@ class Backend(QObject):
     upcomingChanged = Signal()
     # 用户改了界面配色。QML 的 Theme 单例订阅它，改完立刻生效、不用重启。
     themeChanged = Signal()
+    # 上手指引该弹出来了。由启动流程发出，QML 的引导窗口订阅它。
+    onboardingRequested = Signal()
+    # 数据导入导出有了结果（成功/失败都要告诉用户，不能静默）。
+    dataTransferFinished = Signal(bool, str)
+    # 自动更新检查完（无论有没有新版）。QML 订阅它刷新「关于」那一块。
+    updateChecked = Signal()
 
     # --------------------------------------------------------------- 构造
     def __init__(self, store, parent=None) -> None:
@@ -133,6 +139,13 @@ class Backend(QObject):
         self._command_bar_visible = False
         self._pet_visible = True
         self._user_away = False
+
+        # 更新检查的在途结果。都是内存态的 —— 关掉程序就重来，
+        # 没必要落盘（落盘反而会给用户「它在惦记什么」的感觉）。
+        self._latest: dict = {}
+        self._update_checking = False
+        # 工作线程写好、主线程取走。见 _start_update_check 的说明。
+        self._update_pending: dict | None = None
 
         self._focus.completed.connect(self._on_focus_completed)
         self._focus.tick.connect(self._on_focus_tick)
@@ -323,6 +336,17 @@ class Backend(QObject):
     daily_goal_minutes = _setting_property("daily_goal_minutes", int, settingsChanged)
     quiet_when_fullscreen = _setting_property("quiet_when_fullscreen", bool, settingsChanged)
     autostart = _setting_property("autostart", bool, settingsChanged)
+    # 高级模式。关着（默认）时，设置面板里那些只有作者会用的东西不显示：
+    # AI 页的知识库、外部工具（MCP）配置。
+    #
+    # 判断依据是「泛用户第一次打开会不会看不懂」——
+    # 知识库要自己准备 md 文件再导入，MCP 更是要用户先知道 MCP 是什么。
+    # 这两块连作者自己都关着，摆在默认界面里只是噪音。
+    #
+    # **注意不要顺手把「执行步数」也藏进来**：`tools/steptest.py` 靠
+    # `stepBox` 这个 objectName 找控件，藏了测试会红 —— 而且步数是有
+    # 实际用处的（一轮干到一半停了，用户得知道去哪儿调）。
+    advanced_mode = _setting_property("advanced_mode", bool, settingsChanged)
     move_step = _setting_property("move_step", int, settingsChanged)
     hotkey_dashboard = _setting_property("hotkey_dashboard", str, settingsChanged)
     hotkey_focus = _setting_property("hotkey_focus", str, settingsChanged)
@@ -334,6 +358,10 @@ class Backend(QObject):
     # 那张卡片有 300px 高，每次开面板都挡在那里确实很占视野。
     # 收起之后输入行会出现「✨ 现成任务」按钮，随时能调回来。
     aiTemplatesHidden = _setting_property("ai_templates_hidden", bool, settingsChanged)
+    # 上手指引看过了没有。详见 pawpet/qml/PawPet/Onboarding.qml 顶部的说明。
+    onboardingDone = _setting_property("onboarding_done", bool, settingsChanged)
+    # 检查更新。关掉之后一个网络请求都不会发 —— 设置页的文案里写明了这点。
+    updateCheck = _setting_property("update_check", bool, settingsChanged)
 
     def _on_setting_changed(self, key: str) -> None:
         if key == "sound_enabled":
@@ -372,6 +400,187 @@ class Backend(QObject):
     @Property(str, constant=True)
     def version(self) -> str:
         return APP_VERSION
+
+    # ------------------------------------------------------- 上手指引
+    @Slot()
+    def showOnboarding(self) -> None:
+        """把上手指引调出来。
+
+        两个调用方：启动流程（只在没看过时调）和设置页里的「再看一次」。
+        由信号驱动而不是直接控制窗口 —— Python 侧不持有 QML 窗口引用，
+        和气泡、工作台保持同一种接线方式。
+        """
+        self.onboardingRequested.emit()
+
+    @Slot(bool)
+    def finishOnboarding(self, done: bool = True) -> None:
+        """引导结束。
+
+        `done` 目前只用于区分「走完三屏」和「中途跳过」—— 两种都要置位，
+        否则用户每次启动都会被再弹一次。参数留着是为了以后想在
+        「走完」时做点别的（比如自动打开工作台）不必改接口。
+        """
+        self._store.settings["onboarding_done"] = True
+        self.settingsChanged.emit()
+        self.flush()
+
+    @Slot()
+    def resetOnboarding(self) -> None:
+        """设置页里的「再看一次」。
+
+        **不动 onboarding_done。** 早先的写法是把它置回 False 再显示，
+        但那样一旦用户看完直接杀进程（没走关闭流程），下次启动会又弹
+        一遍 —— 「我明明看过了」比「我看不到」更烦人。
+        这里只负责显示，置位的事交给 finishOnboarding。
+        """
+        self.onboardingRequested.emit()
+
+    # --------------------------------------------------------- 检查更新
+    """整个流程刻意分成「后台线程查」+「主线程发信号」两半。
+
+    为什么不直接在后台线程里 emit 信号：PySide6 里信号跨线程 emit 时，
+    Qt 判定连接类型靠的是 QObject 的线程亲和性，而纯 Python 线程没有
+    注册到 Qt 线程体系 —— 有可能被判成 DirectConnection，于是在工作
+    线程里直接去碰 QML 对象。那种崩溃是偶发的，测试很难复现。
+
+    所以工作线程只往 self._update_pending 放结果（Python 层面赋值是
+    原子的），由主线程的下一次 refresh_dynamic() 取走并发信号。
+    refresh_dynamic 每秒被调一次，用户感知不到这一秒的延迟。"""
+
+    @Property(bool, notify=updateChecked)
+    def updateChecking(self) -> bool:
+        return self._update_checking
+
+    @Property(bool, notify=updateChecked)
+    def updateAvailable(self) -> bool:
+        if not self._latest:
+            return False
+        # 用户点过「跳过这个版本」的就不再提示。反复推同一个版本，
+        # 最后的结果是他去设置里把整个检查功能关掉 —— 那更糟。
+        skipped = str(self._store.settings.get("update_skipped_version") or "")
+        return str(self._latest.get("version") or "") != skipped
+
+    @Property(str, notify=updateChecked)
+    def latestVersion(self) -> str:
+        return str(self._latest.get("version") or "")
+
+    @Property(str, notify=updateChecked)
+    def updateNote(self) -> str:
+        return str(self._latest.get("note") or "")
+
+    @Property(str, notify=settingsChanged)
+    def updateSkipped(self) -> str:
+        """被用户跳过提示的那个版本号。空串 = 没有跳过任何版本。
+
+        notify 挂 settingsChanged 而不是 updateChecked：它的来源是设置项，
+        不是检查结果。
+        """
+        return str(self._store.settings.get("update_skipped_version") or "")
+
+    @Property(str, notify=updateChecked)
+    def updateStatus(self) -> str:
+        """给设置页「关于」那一行用的一句话状态。"""
+        if self._update_checking:
+            return "正在检查…"
+        if not self._latest:
+            last = float(self._store.settings.get("update_last_check") or 0.0)
+            if last <= 0:
+                return ""       # 还没查过，不显示任何东西
+            return "已是最新版本"
+        version = str(self._latest.get("version") or "")
+        if not self.updateAvailable:
+            return f"已忽略 {version}（可在下方重新开启提示）"
+        return f"有新版本 {version} 可以下载"
+
+    @Slot()
+    def checkUpdateIfDue(self) -> None:
+        """启动时调。遵守「一天最多查一次」的节流，尊重用户的开关。"""
+        from . import update as update_mod
+
+        if not bool(self._store.settings.get("update_check", True)):
+            return
+        last = float(self._store.settings.get("update_last_check") or 0.0)
+        if time.time() - last < update_mod.CHECK_INTERVAL:
+            return
+        self._start_update_check(manual=False)
+
+    @Slot()
+    def checkUpdateNow(self) -> None:
+        """设置页里手动点「检查更新」。不看节流，也不看开关 ——
+        用户主动点的动作，就算他关着自动检查也该执行。"""
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual: bool) -> None:
+        import threading
+
+        if self._update_checking:
+            return
+        self._update_checking = True
+        self.updateChecked.emit()
+
+        def worker() -> None:
+            from . import update as update_mod
+
+            try:
+                result = update_mod.check(APP_VERSION)
+            except Exception:  # noqa: BLE001 - 检查更新绝不能把程序搞崩
+                result = {"ok": False, "found": None}
+            # 只赋值，不发信号 —— 见上面那段说明
+            self._update_pending = {"result": result, "manual": manual}
+
+        threading.Thread(target=worker, name="pawpet-update", daemon=True).start()
+
+    def _drain_update(self) -> None:
+        """主线程侧：把工作线程查到的结果搬出来。见 _start_update_check 的说明。"""
+        pending = self._update_pending
+        if pending is None:
+            return
+        self._update_pending = None
+        self._update_checking = False
+
+        result = pending.get("result") or {}
+        found = result.get("found")
+        self._latest = found if isinstance(found, dict) else {}
+
+        self._store.settings["update_last_check"] = time.time()
+        self.updateChecked.emit()
+
+        # 手动检查必须有回音 —— 点了按钮什么都不发生，用户会以为坏了。
+        # 自动检查则一声不吭：没新版是常态，没必要每次都告诉他。
+        if pending.get("manual"):
+            if not result.get("ok"):
+                self.info("检查更新失败", "没连上。可能是网络或代理的问题，稍后再试。")
+            elif self._latest:
+                self.info("有新版本",
+                          f"{self._latest.get('version')} 可以下载了。设置 → 关于里有入口。")
+            else:
+                self.info("已是最新版本", f"当前 {APP_VERSION}，没有更新的版本。")
+
+    @Slot()
+    def openUpdatePage(self) -> None:
+        from . import update as update_mod
+
+        url = str(self._latest.get("url") or "") or update_mod.DOWNLOAD_PAGE
+        QDesktopServices.openUrl(QUrl(url))
+
+    @Slot()
+    def skipThisVersion(self) -> None:
+        """「跳过这个版本」：记下版本号，之后不再为它提示。"""
+        version = str(self._latest.get("version") or "")
+        if not version:
+            return
+        self._store.settings["update_skipped_version"] = version
+        self.settingsChanged.emit()
+        self.flush()
+        self.updateChecked.emit()
+
+    @Slot()
+    def resumeUpdateNotice(self) -> None:
+        """设置页里的「重新开启提示」—— 把跳过的版本清掉。"""
+        self._store.settings["update_skipped_version"] = ""
+        self.settingsChanged.emit()
+        self.flush()
+        self.updateChecked.emit()
 
     @Property(str, notify=clockChanged)
     def clockText(self) -> str:
@@ -640,6 +849,21 @@ class Backend(QObject):
             return True
 
     @Property(str, notify=settingsChanged)
+    def advancedModeHint(self) -> str:
+        """高级模式开关下面那行说明。
+
+        做成随开关变的动态文案，而不是写死一句「显示高级功能」——
+        用户拨完开关得立刻知道**到底多了/少了什么**，不然这个开关
+        对他来说就是个不知道后果的按钮。
+        """
+        if self.advanced_mode:
+            return ("已打开 —— AI 页会多出「知识库」和「外部工具（MCP）」两块配置。"
+                    "两块都在「模型设置」展开之后才能看到。")
+        return ("关着的时候，AI 页不显示「知识库」和「外部工具（MCP）」的配置 ——"
+                "它们要先自己准备资料、或者先知道 MCP 是什么才用得上。"
+                "包里自带的那些只读小工具不受影响，照常能用。")
+
+    @Property(str, notify=settingsChanged)
     def uiScaleHint(self) -> str:
         scale = self.uiScale
         percent = int(round(scale * 100))
@@ -748,6 +972,9 @@ class Backend(QObject):
         self.clockChanged.emit()
         self.sitChanged.emit()
         self._refresh_upcoming()
+        # 后台线程查到的更新结果在这里搬到主线程发信号。
+        # 放这个函数里是因为它已经被每秒调一次 —— 不额外起定时器。
+        self._drain_update()
 
     @Property(str, notify=settingsChanged)
     def dataPath(self) -> str:
@@ -875,6 +1102,223 @@ class Backend(QObject):
         target = ROOT / "README.md"
         if target.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    # --------------------------------------------------- 数据导出 / 导入
+    """为什么走 Python 的原生对话框而不是纯 QML：
+
+    QML 的文件对话框要 QtQuick.Dialogs 模块，它不在 Essentials 里 ——
+    打包时大概率会漏，装到用户机器上就是「按钮点了没反应」。
+    QFileDialog 是 QtWidgets 静态方法，app.py 本来就导入 QtWidgets
+    （QApplication / QMenu / QSystemTrayIcon 都来自它），零新增依赖。
+
+    注意两个 Slot 都是**阻塞**的：QFileDialog 的静态方法会开自己的事件
+    循环，用户不点完不返回。这里不会卡死界面 —— 它跑在主线程但 Qt 会把
+    事件继续分发下去，是标准做法。"""
+
+    @Slot()
+    def exportData(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        from . import datatransfer as transfer
+        from .store import SCHEMA_VERSION
+
+        dialog = self._file_dialog(
+            QFileDialog.AcceptSave, "导出小爪数据",
+            str(ROOT / transfer.default_export_name()), "压缩包 (*.zip)",
+        )
+        dialog.setDefaultSuffix("zip")
+        if dialog.exec() != QFileDialog.Accepted:
+            return      # 用户取消了，什么都不做也不提示
+        files = dialog.selectedFiles()
+        if not files:
+            return
+
+        ok, message = transfer.export_bundle(
+            ROOT, files[0], app_version=APP_VERSION, schema_version=SCHEMA_VERSION,
+        )
+        self.dataTransferFinished.emit(ok, message)
+        self.info("导出完成" if ok else "导出失败", message)
+
+    @Slot()
+    def importData(self) -> None:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from . import datatransfer as transfer
+        from .store import SCHEMA_VERSION
+
+        dialog = self._file_dialog(
+            QFileDialog.AcceptOpen, "选择小爪备份", str(ROOT), "压缩包 (*.zip)",
+        )
+        if dialog.exec() != QFileDialog.Accepted:
+            return
+        files = dialog.selectedFiles()
+        if not files:
+            return
+        path = files[0]
+
+        # 先看一眼包里有什么。这一步只读，不落地。
+        try:
+            info = transfer.inspect_bundle(path, schema_version=SCHEMA_VERSION)
+        except transfer.BundleError as exc:
+            self.dataTransferFinished.emit(False, str(exc))
+            self.info("导入失败", str(exc))
+            return
+
+        counts = info.get("counts") or {}
+        detail_lines = [
+            f"来源版本：{info.get('appVersion') or '未知'}",
+            f"包含文件：{'、'.join(info.get('files') or [])}",
+        ]
+        if counts:
+            detail_lines.append(
+                "内容：" + "、".join(
+                    f"{counts.get(k, 0)} 项{label}"
+                    for k, label in (("tasks", "待办"), ("notes", "便签"),
+                                     ("reminders", "提醒"),
+                                     ("knowledge", "资料"))
+                    if counts.get(k)
+                )
+            )
+
+        # 覆盖不可逆，必须让用户看清楚再点。这也顺带说明「会先备份」——
+        # 用户知道有后路，才敢点确定。
+        box = QMessageBox()
+        self._keep_on_top(box)
+        box.setWindowTitle("确认导入")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("导入会用备份里的内容覆盖现在的数据。")
+        box.setInformativeText(
+            "\n".join(detail_lines)
+            + f"\n\n现有数据会先备份到 {transfer.PRE_IMPORT_BACKUP}，"
+              "导入后立刻生效，不用重启。"
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        if box.exec() != QMessageBox.Ok:
+            return
+
+        ok, message = transfer.import_bundle(ROOT, path, info)
+        if ok:
+            # 导入只换了磁盘上的文件。内存里还全是旧数据 —— 不重载的话，
+            # 用户下一次改设置（flush）就把旧数据整份写回去，导入白做。
+            message += self.reloadData()
+        self.dataTransferFinished.emit(ok, message)
+        self.info("导入完成" if ok else "导入失败", message)
+
+    @Slot(result=str)
+    def reloadData(self) -> str:
+        """把内存里的数据换成磁盘上的（导入备份之后调）。
+
+        返回一句给用户看的话。**必须整条链都换**，只换 store 是不够的：
+        各个 Model 自己缓存了一份 _visible、AI 侧缓存了一份对话历史，
+        它们都会在下次保存时把旧内容写回磁盘。
+
+        顺序有讲究：先换 store（后面所有刷新都依赖它），再换 Model，
+        最后才发信号。反过来 QML 会在数据还没换好的瞬间重算一遍绑定，
+        显示的是「新列表配旧计数」这种半成品。
+        """
+        # 重载前的权限等级要在这里抓一份 —— 下面 self._store.load() 会把
+        # settings 整个换成导入的那份，之后就取不到「用户原本的等级」了。
+        level_before = self._ai.actions.level
+
+        # ---- 1. 主数据
+        # 重载前先清掉上一次读盘留下的状态：`load_error` 会一直被 store 留着
+        # （它只在读失败时被赋值，成功时不清），`migrated_from` 同理。不清的话
+        # 用户「原来数据坏了 → 导入一份好备份」之后，设置页还挂着
+        # 「主数据文件无法解析」这条已经过期的提示。
+        self._store.load_error = ""
+        self._store.migrated_from = None
+        self._store.load()
+
+        # ---- 2. 界面配色（数据目录里的 theme.json）
+        from . import theme as theme_mod
+
+        try:
+            self._theme_overrides = theme_mod.load(THEME_FILE)
+        except Exception:  # noqa: BLE001 - 配色读不出来就用默认，不影响数据
+            self._theme_overrides = {}
+
+        # ---- 3. AI 的权限等级：可以跟着备份走，但**不会因为导入而变松**。
+        #
+        # 备份文件是能被别人发给你的。`ai_level` 决定 AI 能不能不问自答地
+        # 操作这台机器，「完全自动」那一档等于把键盘鼠标交出去。导入要是
+        # 无条件采纳文件里的等级，一个被转发的 zip 就能静默把权限拉满 ——
+        # 用户只会看到「导入完成」四个字。
+        #
+        # 所以取「导入前」和「备份里」两者中更紧的那个。用户真想放宽，
+        # 设置页上一句话就能改，而且那是他主动做的。
+        from .ai import LEVEL_ORDER
+
+        def _rank(level: str) -> int:
+            # 不认识的等级按默认档算 —— 不能因为读到个野值就当成最松的
+            return (LEVEL_ORDER.index(level) if level in LEVEL_ORDER
+                    else LEVEL_ORDER.index("confirm"))
+
+        level_after = str(self._store.settings.get("ai_level") or "")
+        tighter = min((level_before, level_after), key=_rank)
+        if tighter != level_after:
+            # 写回 store：界面上的等级 = 真正生效的等级，不能只改内存里
+            # 那个 actions.level，否则显示和实际对不上。
+            self._store.settings["ai_level"] = tighter
+        self._ai.actions.level = tighter
+
+        # ---- 4. 各 Model 自己缓存的 _visible
+        # SessionModel / WeekModel 的公开入口叫 refresh()，其余三个叫 reload()。
+        self._tasks.reload()
+        self._reminders.reload()
+        self._notes.reload()
+        self._sessions.refresh()
+        self._week.refresh()
+
+        # ---- 5. AI 侧：对话历史是启动时读进内存的副本，且有 2 秒的
+        # 延迟写盘在跑，不重载的话它会把导入的对话覆盖回去。
+        self._ai.reloadHistory()
+        self._ai.memoryChanged.emit()
+
+        # ---- 6. 音效开关跟着新设置走（原来只在启动时同步过一次）
+        self._sound.enabled = bool(self._store.settings.get("sound_enabled", True))
+
+        # ---- 7. 广播。settingsChanged 覆盖所有由设置派生的 Property，
+        # petStyleChanged 是独立信号（宠物形象），两个都要发。
+        self.settingsChanged.emit()
+        self.petStyleChanged.emit()
+        self.themeChanged.emit()
+        self.memoryChanged.emit()
+        self._refresh_upcoming()
+        self.clockChanged.emit()
+        self.sitChanged.emit()
+
+        return " 已经重新载入，现在就是导入后的内容了。"
+
+    @staticmethod
+    def _keep_on_top(widget) -> None:
+        """让对话框一定在宠物窗口上面。
+
+        这不是洁癖。宠物窗口是 Qt.WindowStaysOnTopHint + 无边框的顶层
+        窗口，用户开着「始终显示在最前面」时它盖在所有东西上面 ——
+        文件对话框如果不置顶，就会**被宠物挡在下面**。用户点导出，
+        以为没反应，其实对话框在宠物背后等他。
+        """
+        from PySide6.QtCore import Qt
+
+        widget.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+
+    @classmethod
+    def _file_dialog(cls, mode, title: str, directory: str, name_filter: str):
+        """建一个置顶的文件对话框。
+
+        刻意不用 QFileDialog.getSaveFileName 这类静态方法：它们不接受
+        窗口标志，也就没法置顶 —— 原因见 _keep_on_top。
+        """
+        from PySide6.QtWidgets import QFileDialog
+
+        dialog = QFileDialog(None, title, directory, name_filter)
+        dialog.setAcceptMode(mode)
+        dialog.setFileMode(QFileDialog.ExistingFile
+                           if mode == QFileDialog.AcceptOpen
+                           else QFileDialog.AnyFile)
+        cls._keep_on_top(dialog)
+        return dialog
 
     @Slot()
     def exportSummary(self) -> None:

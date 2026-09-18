@@ -623,7 +623,28 @@ class MemoryBook:
             return Memory()
 
     def save(self, memory: Memory) -> None:
-        self._store.state["memory"] = memory.as_dict()
+        """把记忆写回 Store。**合并，不是整份替换。**
+
+        原来这里是 `self._store.state["memory"] = memory.as_dict()`，
+        看着很自然，其实是个数据丢失 bug：`Memory.as_dict()` 只吐
+        `facts` / `aliases` / `tasks` / `updated` 四个键，赋值又会把
+        `state["memory"]` 底下**别的键整份删掉**。
+
+        而 `state["memory"]` 是个**公共抽屉**，不止 Memory 在往里放东西 ——
+        `tools.py` 的 `_observe_app` 会在同一个字典里写 `app_usage`
+        （记用户常用哪些程序）。于是：
+
+        * 计数刚够阈值、正要写下「常用程序：WPS」的那一下，
+          就把整个 `app_usage` 清空了；
+        * 此后 AI 每调一次 `remember` / `forget` / 记叫法，同样清一次。
+
+        现象是「被动学常用程序」这件事基本不生效，`frequent_apps()`
+        长期返回空 —— **而且全程不报错**，所以很难发现。
+
+        `update()` 只覆盖 Memory 自己那几个键，抽屉里别人的东西不动。
+        """
+        raw = self._store.memory
+        raw.update(memory.as_dict())
         self._store.save()
 
     # 常用的「读-改-写」组合

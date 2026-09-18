@@ -801,10 +801,23 @@ class KnowledgeBase:
         return docs
 
     def save(self, docs: list[Doc]) -> None:
-        self._store.state["knowledge"] = {
+        """把文档列表写回 Store。**合并，不是整份替换。**
+
+        这里原来写的是 `state["knowledge"] = {...}`。今天这么写没问题
+        （`knowledge` 底下确实只有 `docs` / `updated`），但那是巧合，
+        不是设计 —— `state["memory"]` 就是同一个写法翻的车：
+        `MemoryBook.save()` 整份替换 memory 字典，把 `_observe_app`
+        存在同一层的 `app_usage` 悄悄删干净了，全程不报错。
+        （细节见 `pawpet/ai/memory.py` 里 `MemoryBook.save` 的注释。）
+
+        所以这里提前改成合并：以后谁往 `knowledge` 里加第二个键，
+        都不会被一次保存抹掉。
+        """
+        raw = self._store.knowledge
+        raw.update({
             "docs": [doc.as_dict() for doc in docs],
             "updated": _now(),
-        }
+        })
         self._store.save()
 
     def add(self, incoming: list[Doc]) -> list[Doc]:

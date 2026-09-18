@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -70,6 +71,49 @@ def dir_size(path: Path) -> int:
         except OSError:
             pass
     return total
+
+
+def sync_version_file() -> str:
+    """把仓库里 version.json 的版本号对齐到代码里的 VERSION。
+
+    **为什么要在打包时自动做。** 发版时最典型的失误是改了
+    `pawpet/config.py` 的 APP_VERSION 却忘了改 `version.json` ——
+    后果是新版本发出去了、老用户的「检查更新」却永远不提示。
+    而且它**不报错**：客户端拿到版本号、比一下、发现不新、静默返回。
+    这种静默失效最难发现，索性让机器来保证。
+
+    只改 version 字段，url 和 note 原样保留 —— note 是发布说明，
+    是给人写的，不该被脚本抹掉。
+    """
+    path = ROOT / "version.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        log(f"  [!!] version.json 读不出来，按空的重建")
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    previous = str(data.get("version") or "")
+    if previous == VERSION:
+        return ""
+
+    data["version"] = VERSION
+    # 缺失时补上默认值，不动已经写好的
+    data.setdefault("url", "https://github.com/0Sun-shine0/PawPet/releases/latest")
+    data.setdefault("note", "")
+
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return f"  [XX] version.json 写不进去（{exc}）—— 检查更新会失效，记得手动改"
+
+    if previous:
+        return f"  [ok] version.json：{previous} → {VERSION}（记得连同它一起提交）"
+    return f"  [ok] version.json：新建，版本 {VERSION}"
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 1800) -> int:
@@ -167,6 +211,9 @@ def main() -> int:
         step("0. 清理过期产物")
         for name in stale:
             log(f"  已删除旧产物：{name}")
+
+    step("0.5 同步版本号文件")
+    log(sync_version_file() or "  [ok] version.json 已是最新，无需改动")
 
     step("1. 环境检查")
     problems = check_prerequisites()

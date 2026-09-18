@@ -26,6 +26,17 @@ QtObject {
         petWindow: root.petWindow
     }
 
+    /* 上手指引。常驻在根节点上但不显示 —— 由 backend 的
+       onboardingRequested 信号调出来（启动时只在「没看过」的情况下发，
+       设置页的「再看一次」也会发）。
+
+       注意它是 Window 而不是 Dashboard 里的一层蒙版：首启时用户看到的
+       只有宠物，工作台还没打开过，把引导做进工作台等于「先开一个大窗口
+       再在它上面盖一层」，又重又费解。 */
+    property Onboarding onboardingWindow: Onboarding {
+        objectName: "onboardingWindow"
+    }
+
     property Connections link: Connections {
         target: backend
 
@@ -42,6 +53,10 @@ QtObject {
 
         function onHideDashboardRequested() {
             root.dashboardWindow.hide()
+        }
+
+        function onOnboardingRequested() {
+            root.onboardingWindow.start()
         }
     }
 }

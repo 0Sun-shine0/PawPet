@@ -15,6 +15,7 @@ from .actions import (
     LEVEL_CONFIRM,
     LEVEL_FULL,
     LEVEL_LABELS,
+    LEVEL_ORDER,
     LEVEL_READ_ONLY,
     AuditLog,
     DesktopActions,
@@ -29,6 +30,6 @@ from .vision import ScreenCapture, Shot
 __all__ = [
     "AIClient", "AiError", "AgentCallbacks", "AgentRunner", "ApprovalRequest",
     "AuditLog", "DesktopActions", "LEVEL_AUTO", "LEVEL_CONFIRM", "LEVEL_FULL",
-    "LEVEL_LABELS", "LEVEL_READ_ONLY", "MCPClient", "MCPError", "Risk",
-    "ScreenCapture", "Shot", "StepEvent", "ToolContext", "openai_tools",
+    "LEVEL_LABELS", "LEVEL_ORDER", "LEVEL_READ_ONLY", "MCPClient", "MCPError",
+    "Risk", "ScreenCapture", "Shot", "StepEvent", "ToolContext", "openai_tools",
 ]

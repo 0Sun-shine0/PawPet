@@ -18,10 +18,22 @@
                 本质是「给模型的一段固定指令」，最安全。
 * `recipe` —— 一串**只读**步骤：读文件、列目录、正则提取、生成回复。
                 能覆盖大多数「整理 / 汇总 / 起草」类需求。
-* `code`   —— 真生成 Python。**默认关闭**，要用户显式打开。
+* `code`   —— 真生成 Python。**每一次运行都要单独确认**，
+                不能因为权限调到「完全自动」就静默跑起来
+                （见 actions.Risk.CRITICAL）。
                 理由：这是「用户让 AI 造的东西在用户电脑上执行任意代码」。
-                对泛用户我认为不可接受；给愿意承担的人留个开关，
-                但每一次运行都要单独确认。
+                对泛用户我认为不可接受；给愿意承担的人留开关。
+
+关于 `code` 档默认开还是关
+--------------------------
+**当前默认是开的**（`MAX_LEVEL_DEFAULT = LEVEL_CODE`），这是使用者明确的
+要求 —— 他自己要拿 code 档做工具，受不了每次先去设置里打开。`tools/exttest.py`
+里有一条断言专门守着这个决定，别再「顺手修回去」。
+
+这一段的旧版本写的是「code 默认关闭，要用户显式打开」，和常量矛盾。
+评审报告据此把它当成一个 P0 缺陷（`docs/评审-小爪AI-Agent层.md`），
+**那个判断是错的** —— 常量是有意的，错的是这段过期的说明文字。
+已按实际值改正（2026-09-18）。
 
 **越权是硬拦截，不是提示词劝阻。** 每个级别有一个能力白名单，
 recipe 步骤里出现 `write_file` 这种直接拒掉 —— 和 advisor 的止损一个思路：
@@ -56,7 +68,12 @@ LEVEL_HINTS = {
     LEVEL_CODE: "运行你自己写的代码。能力最强，但请只在你信任的代码上用",
 }
 
-# 允许的最高级别。code 默认关掉 —— 见文件开头的说明。
+# 允许的最高级别。
+#
+# **= LEVEL_CODE 是使用者明确要求的**（他要自己用 code 档造工具，不想每次先
+# 去设置里打开）。tools/exttest.py 里有断言守着这个值。
+# 之前这里的注释写的是「code 默认关掉」，和常量本身矛盾 —— 那是过期说明，
+# 已按实际值改正。要收紧就把这里改成 LEVEL_RECIPE。
 MAX_LEVEL_DEFAULT = LEVEL_CODE
 _LEVEL_RANK = {LEVEL_NOTE: 0, LEVEL_RECIPE: 1, LEVEL_CODE: 2}
 
@@ -122,7 +139,7 @@ class Extension:
     steps: list[dict] = field(default_factory=list)
     # note / recipe 都要声明参数，模型按这个传
     parameters: dict = field(default_factory=dict)
-    # code 档用这个（默认关）
+    # code 档用这个
     code: str = ""
     created: float = 0.0
     updated: float = 0.0

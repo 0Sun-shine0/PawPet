@@ -140,8 +140,9 @@ def test_privilege_escalation() -> None:
     # 而不是假设它必须是关的 —— 免得以后有人看到「默认开着」以为是 bug
     # 又给改回去。
     #
-    # 真正要守住的是**别的**东西（下面两条），那些没变：
-    #   * code 档执行必须走确认（agent 那边合成 spec 时给 CONFIRM）；
+    # 真正要守住的是**别的**东西（见 test_critical_risk），那些没变：
+    #   * code 档执行必须走确认 —— 而且是**任何权限档位都不能免**的
+    #     CRITICAL，不是「完全自动下自动放行」的 CONFIRM；
     #   * 越权仍然硬拦。
     from pawpet.ai.extensions import MAX_LEVEL_DEFAULT
 
@@ -161,6 +162,105 @@ def test_privilege_escalation() -> None:
     check("明确打开后 code 档可以过",
           Extension(name="coder", title="t", description="d",
                     level=LEVEL_CODE, code="print(1)").problems("code") == [])
+
+
+def test_critical_risk() -> None:
+    print("\n=== 二之二、CRITICAL：『完全自动』也免不了的那一档 ===")
+    from pawpet.ai.actions import (
+        LEVEL_AUTO,
+        LEVEL_CONFIRM,
+        LEVEL_FULL,
+        LEVEL_ORDER,
+        LEVEL_READ_ONLY,
+        AuditLog,
+        DesktopActions,
+        Risk,
+    )
+    from pawpet.ai.tools import TOOL_INDEX
+
+    labels = {
+        LEVEL_READ_ONLY: "只读",
+        LEVEL_CONFIRM: "逐步确认",
+        LEVEL_AUTO: "自动执行",
+        LEVEL_FULL: "完全自动",
+    }
+
+    def probe(level: str) -> DesktopActions:
+        item = DesktopActions(AuditLog())
+        item.level = level
+        return item
+
+    # ---- 1. 风险 × 档位全矩阵。
+    #
+    # 这一组**把原有语义钉死**，免得修 P0 的时候顺手把别的档位改松了。
+    # 注意 CONFIRM 在 auto / full 下**确实不问** —— 这不是 bug，
+    # 是这两档存在的意义（日常动作别烦我）。真正有问题的是「跑一段
+    # 新造出来的代码」也被算进了 CONFIRM。
+    matrix = [
+        (LEVEL_READ_ONLY, Risk.READ, False),
+        (LEVEL_CONFIRM, Risk.READ, False),
+        (LEVEL_AUTO, Risk.READ, False),
+        (LEVEL_FULL, Risk.READ, False),
+        (LEVEL_READ_ONLY, Risk.CONFIRM, True),
+        (LEVEL_CONFIRM, Risk.CONFIRM, True),
+        (LEVEL_AUTO, Risk.CONFIRM, False),
+        (LEVEL_FULL, Risk.CONFIRM, False),
+        (LEVEL_READ_ONLY, Risk.DANGER, True),
+        (LEVEL_CONFIRM, Risk.DANGER, True),
+        (LEVEL_AUTO, Risk.DANGER, True),
+        (LEVEL_FULL, Risk.DANGER, False),
+    ]
+    for level, risk, want in matrix:
+        got = probe(level).needs_approval(risk)
+        check(f"{labels[level]} × {risk} → {'要问' if want else '不问'}",
+              got is want, f"实际 {got}")
+
+    # ---- 2. critical 在任何档位下都要问。
+    #
+    # 这是 P0 修复的核心。原来那条链是：
+    #   造草稿（READ，不问）→ 安装（CONFIRM，full 下不问）
+    #   → 调用时合成 CONFIRM（full 下不问）→ 子进程跑任意 Python。
+    # 全程一张卡片都没有，而 install_extension 的说明里明明写着
+    # 「会弹一张卡片让用户确认」。承诺和实现对不上，就是缺陷。
+    for level in LEVEL_ORDER:
+        got = probe(level).needs_approval(Risk.CRITICAL)
+        check(f"{labels[level]} 下 critical 仍然要问", got is True, f"实际 {got}")
+
+    check("LEVEL_ORDER 是从紧到松的（导入备份比松紧靠它）",
+          LEVEL_ORDER == (LEVEL_READ_ONLY, LEVEL_CONFIRM, LEVEL_AUTO, LEVEL_FULL),
+          str(LEVEL_ORDER))
+    check("critical 不在 LEVEL_ORDER 里（它说的是风险，不是权限档位）",
+          Risk.CRITICAL not in LEVEL_ORDER, str(LEVEL_ORDER))
+    check("critical 是个独立的值，没和 confirm 撞上",
+          Risk.CRITICAL != Risk.CONFIRM, Risk.CRITICAL)
+
+    # ---- 3. 只读模式下 critical 直接拦下（连问都不问）
+    for risk in (Risk.CONFIRM, Risk.DANGER, Risk.CRITICAL):
+        check(f"只读模式下 {risk} 被直接拦下",
+              probe(LEVEL_READ_ONLY).blocked(risk) is True, risk)
+    check("只读模式下读操作不拦",
+          probe(LEVEL_READ_ONLY).blocked(Risk.READ) is False)
+
+    # ---- 4. 装工具这一档必须挂 CRITICAL。
+    #
+    # 原来它是 CONFIRM，而 CONFIRM 在 auto / full 下不问 —— 于是
+    # 「安装」这一步在用户以为「完全自动只是少点几下」的时候静默通过了。
+    check("install_extension 是 CRITICAL（不是 CONFIRM）",
+          TOOL_INDEX["install_extension"].risk == Risk.CRITICAL,
+          str(TOOL_INDEX["install_extension"].risk))
+
+    # 卸掉用户攒下来的工具仍然是 CONFIRM（不进 critical）——
+    # 别因为修 P0 把普通的确认动作也升级成「每次单独弹卡」，
+    # 那会把用户烦到直接开 full。
+    check("remove_extension 保持 CONFIRM（没被顺手升级）",
+          TOOL_INDEX["remove_extension"].risk == Risk.CONFIRM,
+          str(TOOL_INDEX["remove_extension"].risk))
+
+    # ---- 5. 装/卸/恢复之外的只读扩展工具不受影响
+    for name in ("list_extensions", "propose_extension"):
+        check(f"{name} 仍然是 READ（不打扰用户）",
+              TOOL_INDEX[name].risk == Risk.READ,
+              str(TOOL_INDEX[name].risk))
 
 
 def test_step_params() -> None:
@@ -657,6 +757,7 @@ def main() -> int:
 
     test_validation()
     test_privilege_escalation()
+    test_critical_risk()
     test_step_params()
     test_remove_restore()
     test_user_extensions()

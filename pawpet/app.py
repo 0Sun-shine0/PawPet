@@ -105,6 +105,14 @@ class PawPetApp(QObject):
 
         self._greet()
 
+        # 检查更新放在最后、延后几秒：它要走网络（最坏两个源各超时 6 秒），
+        # 而启动阶段用户最关心的是宠物有没有出来。延后启动能让
+        # 「宠物已经在桌面上」和「后台在查更新」两件事不互相干扰。
+        #
+        # 具体要不要真的发请求由 checkUpdateIfDue 自己判断（一天一次 +
+        # 用户开关），这里只负责在合适的时机叫它一声。
+        QTimer.singleShot(4000, self._backend.checkUpdateIfDue)
+
     # ------------------------------------------------------------- 心跳
     def _tick(self) -> None:
         self._backend.focus.poll()
@@ -119,8 +127,24 @@ class PawPetApp(QObject):
     def _greet(self) -> None:
         note = self._backend.migrationNote
         if note:
+            # 迁移提示优先。走这条路时不弹引导 —— 两个窗口同时出现会打架，
+            # 而且刚升级完的用户最关心的是「我的数据还在不在」。
+            #
+            # 刻意**不**在这里补一次 onboarding_done：引导留到下次启动再弹，
+            # 那时迁移提示已经不会再出现了，两件事自然错开。
             self._backend.info("数据已升级", note)
-        elif not self._store.settings.get("autostart", False):
+            return
+
+        # 首次启动：走引导，不弹「小爪已就位」气泡。
+        # 引导里已经讲了「双击打开工作台」，再叠一个气泡是重复打扰。
+        #
+        # 延后 600ms 是为了让顺序看起来自然：宠物先落到桌面上，引导再浮起来。
+        # 立刻弹的话，用户会先看到一张卡片，然后才注意到后面还有只宠物。
+        if not self._store.settings.get("onboarding_done", False):
+            QTimer.singleShot(600, self._backend.showOnboarding)
+            return
+
+        if not self._store.settings.get("autostart", False):
             pending = self._backend.pendingCount
             body = f"还有 {pending} 件待办在等你。" if pending else "双击小爪打开工作台，右键有快捷菜单。"
             self._backend.info("小爪已就位", body)

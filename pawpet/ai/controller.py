@@ -150,22 +150,9 @@ class AiController(QObject):
         # 全量重写）。详见 ai/history.py 的模块说明。
         self._history_path = history_mod.default_path(store.path)
         self._sessions: list = history_mod.load(self._history_path)
-        # 当前会话 = 最近那个（启动时接着上次说，而不是每次开新的）
-        self._current: object = self._sessions[0] if self._sessions else None
         self._restored = False
-        if self._current is not None:
-            # 恢复的消息要把 html 重新算一遍：文件里不存 html
-            # （它是 text 的派生结果，存两份等于文件大一倍）。
-            from .markdown import to_plain, to_qt_html
-
-            for item in self._current.messages:
-                role = item.get("role") or "info"
-                text = item.get("text") or ""
-                item["html"] = (to_qt_html(text)
-                                if role in ("assistant", "error") else "")
-                item["plain"] = to_plain(text) if role == "assistant" else text
-            self._messages = list(self._current.messages)
-            self._restored = bool(self._messages)
+        self._messages: list[dict] = []
+        self._adopt_sessions()
         # 写盘节流：一轮里可能 push 几十条（工具卡片），每条都写太浪费。
         # 攒 2 秒写一次，退出时再补一次兜底。
         self._history_dirty = False
@@ -204,6 +191,55 @@ class AiController(QObject):
         # 这也是原来最大的缺口：connectMcp() 有定义但**没有任何调用点**，
         # 于是 pawkit 那 8 个工具一次都没在真实对话里出现过。
         self._auto_connect_mcp()
+
+    # ---------------------------------------------------------- 对话历史装载
+    def _adopt_sessions(self) -> None:
+        """把 `self._sessions` 里最近那个会话接成当前会话。
+
+        抽出来是因为有两条路径要用：启动时读一次，导入备份后要再读一次
+        （见 `reloadHistory`）。两条路径必须做完全一样的事，否则会出现
+        「刚导入的对话能看见，但接着说话就串到旧会话里」这种诡异现象。
+        """
+        # 当前会话 = 最近那个（启动时接着上次说，而不是每次开新的）
+        self._current: object = self._sessions[0] if self._sessions else None
+        self._restored = False
+        self._messages = []
+        if self._current is None:
+            return
+        # 恢复的消息要把 html 重新算一遍：文件里不存 html
+        # （它是 text 的派生结果，存两份等于文件大一倍）。
+        from .markdown import to_plain, to_qt_html
+
+        for item in self._current.messages:
+            role = item.get("role") or "info"
+            text = item.get("text") or ""
+            item["html"] = (to_qt_html(text)
+                            if role in ("assistant", "error") else "")
+            item["plain"] = to_plain(text) if role == "assistant" else text
+        self._messages = list(self._current.messages)
+        self._restored = bool(self._messages)
+
+    @Slot()
+    def reloadHistory(self) -> None:
+        """把 conversations.json 重新读进内存（导入备份之后调）。
+
+        为什么非做不可：`_sessions` / `_messages` 是**启动时读进内存的副本**。
+        导入备份只换了磁盘上的文件，内存里还是旧的，而 `_flush_history`
+        （任何一条消息变化，2 秒后触发）会把旧的内存副本整份写回去 ——
+        等于把用户刚导入的对话原样抹掉，他连「导入失败」的提示都看不到。
+
+        所以顺序是**先停定时器、再清脏标记、最后才重读**：反过来的话，
+        定时器仍有机会在这两步之间抢到一次写盘。
+        """
+        self._history_timer.stop()
+        self._history_dirty = False
+        try:
+            self._sessions = history_mod.load(self._history_path)
+        except Exception:  # noqa: BLE001 - 读不动就当没有历史，不能带崩整个重载
+            self._sessions = []
+        self._adopt_sessions()
+        self.historyChanged.emit()
+        self.messagesChanged.emit()
 
     # ---------------------------------------------------------------- 启动语
     def _greet(self) -> None:

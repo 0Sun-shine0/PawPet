@@ -446,10 +446,13 @@ TOOLS: list[ToolSpec] = [
     # 为什么值得做：用户现在的做法是把流程写在便签里，每次让小爪读了
     # 再重新理解。同一条流程跑两次结果不会完全一样。做成工具 = 写死一次。
     #
-    # 三档能力，默认只开前两档（见 extensions.py）：
+    # 三档能力（见 extensions.py）。**输入给模型的说明书里不写「code 默认
+    # 关着」了 —— 那句和实际不符**（常量就是 code，见 extensions.py）。
+    # 但「别主动提」保留：code 是能力最强也最需要用户自己想清楚的一档，
+    # 该模型顺着用户的话提，不该它来推销。
     #   note   固定说法 —— 一段提示词，不碰任何东西
     #   recipe 固定流程 —— 一串**只读**步骤
-    #   code   自定义代码 —— 默认关闭，开了也要每次运行单独确认
+    #   code   自定义代码 —— 安装和每次运行都要用户确认
     ToolSpec(
         "propose_extension",
         "**给用户造一个新工具**。用户反复做同一类事、或者明确说"
@@ -461,7 +464,7 @@ TOOLS: list[ToolSpec] = [
         f"  · {LEVEL_RECIPE}：固定流程。一串**只读**步骤"
         "（read_file / list_dir / regex_find / pick_lines / template / "
         "join / truncate / count）\n"
-        f"  · {LEVEL_CODE}：自定义代码。默认关着，别主动提\n"
+        f"  · {LEVEL_CODE}：自定义代码。能力最强的一档，别主动提\n"
         "**优先用 recipe**，它够用而且一定安全。\n"
         "参数要声明清楚：用户需要提供什么（比如文件路径、工单内容）。",
         _schema({
@@ -502,7 +505,17 @@ TOOLS: list[ToolSpec] = [
             "draft": {"type": "object", "description":
                       "propose_extension 返回的草稿对象，原样传回来"},
         }, ["draft"]),
-        Risk.CONFIRM,
+        # **CRITICAL，不是 CONFIRM。**
+        #
+        # 这个工具的字面承诺就是「会弹一张卡片让用户确认」，而 CONFIRM 在
+        # 「自动执行」和「完全自动」两档下**不问**（actions.needs_approval）。
+        # 于是当时那条链是：造草稿不问 → 安装不问 → 调用也不问 → 子进程跑
+        # 任意 Python，一张卡片都不弹，和承诺完全相反。
+        #
+        # 换成 CRITICAL 之后它在**任何**权限档位下都要问一次。安装是一次性
+        # 动作（一个工具装一次），换来的是「用户亲手过一遍这段代码要干什么」，
+        # 这个代价不高。
+        Risk.CRITICAL,
     ),
     ToolSpec(
         "list_extensions",
@@ -1338,11 +1351,25 @@ class ToolContext:
             self.store.memory["app_usage"] = dict(ordered[:20])
             apps = self.store.memory["app_usage"]
 
-        # 到阈值了，作为一条「环境」类记忆写下来
-        if entry["count"] == threshold:
+        # 够阈值了，作为一条「环境」类记忆写下来。
+        #
+        # 判定是 `count >= threshold and not noted`，**不是 `count == threshold`**。
+        # 两处都有理由：
+        #
+        # * 用 `>=` 而不是 `==` —— 计数一旦从阈值上方开始（最现实的一条
+        #   路是用户导入了一份旧备份，里面 app_usage 已经攒到 8 次），
+        #   `== 3` 永远不成立，这条记忆就再也写不进来了。
+        # * 但要配一个 `noted` 标记 —— 光用 `>=` 的话，用户要是用 forget
+        #   明确删掉了「常用程序：WPS」，下次切到 WPS 又会被记回来，
+        #   和「用户说别记了就别记」直接冲突。
+        #   所以只在「还没记过」时补记，记过就不再碰。
+        if entry["count"] >= threshold and not entry.get("noted"):
             try:
                 from .memory import MemoryBook
 
+                # 先置位再写：紧接着的 add_fact 会 save 整个 store，
+                # 这个标记跟着一起落盘。反过来的话就白设了。
+                entry["noted"] = True
                 # MemoryBook.add_fact 自己会 save，所以上面只更新计数、
                 # 不单独存一次盘 —— 切个窗口写两次盘是没必要的开销。
                 MemoryBook(self.store).add_fact(
@@ -1350,7 +1377,8 @@ class ToolContext:
                     confidence=2, source="observed")
                 return
             except Exception:  # noqa: BLE001 - 观察失败绝不能影响正在做的事
-                pass
+                # 没记成，把标记撤回来，下次还试
+                entry["noted"] = False
 
         self.store.save()
 
@@ -1873,9 +1901,9 @@ class ToolContext:
     def _max_extension_level(self) -> str:
         """当前允许造到哪一档。
 
-        `ai_extension_level` 默认是 recipe —— **code 档默认关着**。
-        理由是「用户让 AI 造的东西在用户电脑上执行任意代码」这件事，
-        对泛用户不可接受；给愿意承担的人留开关，但默认不打开。
+        `ai_extension_level` 没设时用 `MAX_LEVEL_DEFAULT`，**当前是 code**
+        （使用者明确要求的，见 extensions.py 里那个常量的说明）。
+        想收紧就在设置里写 `ai_extension_level = recipe`，或者改那个常量。
         """
         from .extensions import MAX_LEVEL_DEFAULT
 

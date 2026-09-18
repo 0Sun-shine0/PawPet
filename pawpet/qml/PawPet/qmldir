@@ -15,6 +15,7 @@ PetWindow 1.0 PetWindow.qml
 BubbleWindow 1.0 BubbleWindow.qml
 CommandBar 1.0 CommandBar.qml
 Dashboard 1.0 Dashboard.qml
+Onboarding 1.0 Onboarding.qml
 
 TodayPage 1.0 page/TodayPage.qml
 FocusPage 1.0 page/FocusPage.qml

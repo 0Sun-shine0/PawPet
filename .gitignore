@@ -67,6 +67,15 @@ extensions.removed.json
 conversations.json
 conversations.json.bak*
 
+# 用户改过的界面配色。
+#
+# 和上面几个一个性质：它是运行时生成在**数据目录**的用户数据
+# （开发模式下落在项目根目录，打包后落在 %APPDATA%\PawPet）。
+# 不忽略的话，`git add -A` 会把它推上公开仓库 —— 别人克隆下来看到的
+# 默认配色会变成某个用户自己的配色，而不是随包的粉白。
+theme.json
+theme.json.bak*
+
 # ---------------------------------------------------------------- 编辑器
 .idea/
 .vscode/

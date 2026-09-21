@@ -261,7 +261,9 @@ def main() -> int:
     check("找到旋转容器（stage）", stage is not None,
           "找不到就没法验证旋转，检查 QML 里的结构")
 
-    for edge, expect in (("left", -90), ("right", 90),
+    # 角度值：**左侧顺时针、右侧逆时针**，这样头顶才朝屏幕里。
+    # 搞反了虽然也能看到脸，但看着像倒栽葱（用户报过这个）。
+    for edge, expect in (("left", 90), ("right", -90),
                          ("top", 180), ("bottom", 0)):
         backend.petDetach()
         pump(300)
@@ -286,6 +288,65 @@ def main() -> int:
             # 倒挂时额外挂了晃动，所以允许几度误差
             check(f"{edge} 窗口里的 stage 真的转到了 {expect}° 附近",
                   abs(got - expect) <= 8, f"实测 {got}")
+
+    # ================================================================ 七
+    print("\n=== 七、拖走之后姿势要转回来（用户报的 bug）===")
+    #
+    # 用户报「有贴边没有回正」：宠物转过去了，但拖走之后不转回来，
+    # 一直歪着待在屏幕中间。
+    #
+    # 根因是 backend 解除贴边时**一次信号都不发**，QML 收不到任何动静。
+    # 这个套件第一版没覆盖到 —— 因为前面几节都是「先 detach 再重新贴」，
+    # 每次都走到了吸附那条会发信号的路径。必须专门测「拖走之后停在那」。
+    backend.petDetach()
+    pump(300)
+    win.setX(area["x"] + 5)
+    win.setY(area["y"] + 300)
+    pump(1500)
+    check("先贴在左边、姿势转过去了", backend.petPoseAngle == 90,
+          str(backend.petPoseAngle))
+    if stage is not None:
+        check("窗口里的 stage 也转过去了",
+              abs(float(stage.property("rotation")) - 90) <= 8,
+              str(stage.property("rotation")))
+
+    target = area["x"] + 760
+    win.setX(target)
+    win.setY(area["y"] + 300)
+    pump(1500)
+    check("拖走之后不再贴边", backend.petEdge == "", repr(backend.petEdge))
+    check("拖走之后角度回到 0", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+    if stage is not None:
+        check("窗口里的 stage 真的转回来了（不是一直歪着）",
+              abs(float(stage.property("rotation"))) <= 4,
+              f"实测 {stage.property('rotation')}°")
+    check("窗口停在拖到的位置，没被拽回贴边处",
+          abs(win.x() - target) <= 3, f"x={win.x()}，应约 {target}")
+
+    # ================================================================ 八
+    print("\n=== 八、关掉贴边开关时宠物要回到屏幕内 ===")
+    #
+    # 关开关那一刻宠物正半藏在屏幕外，不特殊处理的话它会卡在半藏状态，
+    # 用户以为宠物不见了。
+    backend.petDetach()
+    pump(300)
+    win.setX(area["x"] + 5)
+    win.setY(area["y"] + 300)
+    pump(3200)      # 等滑回半藏
+    check("已经半藏在屏幕外", win.x() < area["x"], f"x={win.x()}")
+
+    store.settings["pet_snap_enabled"] = False
+    backend._on_setting_changed("pet_snap_enabled")
+    pump(1400)
+    check("关掉开关后解除贴边", backend.petEdge == "", repr(backend.petEdge))
+    check("关掉开关后角度归零", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+    check("关掉开关后宠物回到屏幕内（不再半藏）",
+          win.x() >= area["x"]
+          and win.x() + win.width() <= area["x"] + area["width"],
+          f"x={win.x()}，屏幕 {area['x']}~{area['x'] + area['width']}")
+    store.settings["pet_snap_enabled"] = True
 
     backend.shutdown()
 

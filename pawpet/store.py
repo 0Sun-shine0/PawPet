@@ -86,6 +86,21 @@ def default_settings() -> dict:
         "hotkey_ask": "ctrl+alt+space",
         # ---- 宠物形象 ----
         "pet_style": "mochi",
+        # ---- 贴边 ----
+        # 拖到屏幕边缘附近时吸附过去，并有一半藏在屏幕外；鼠标移到那条边
+        # 附近自动滑出来，移开再滑回去。
+        #
+        # 默认开：桌面宠物常驻在屏幕上，贴边是省地方的主要手段，而用户
+        # 抱怨过「很占视野」。想固定摆在某处的人可以在设置里关掉。
+        "pet_snap_enabled": True,
+        # 拖到离边缘多近时触发吸附。做成设置项是因为「多近算近」很个人：
+        # 有人喜欢一拖就吸（宽），有人嫌误触（窄）。
+        "pet_snap_distance": 40,
+        # 吸附后藏在屏幕外的比例。0.5 = 露一半。
+        #
+        # 不暴露到界面上：这是一个「调好了就不用动」的视觉参数，
+        # 多一个滑块只会让设置页更难看懂。要改就改这里。
+        "pet_snap_hide_ratio": 0.5,
         # ---- 首次启动引导 ----
         # 引导只该出现一次。用设置项而不是「检测数据文件是否为空」：
         # 老用户升级上来时数据文件是满的，但引导从没看过 —— 按数据判空
@@ -112,6 +127,13 @@ def default_state() -> dict:
         "schema": SCHEMA_VERSION,
         "pet_x": None,
         "pet_y": None,
+        # 贴边的状态："" | "left" | "right" | "top" | "bottom"。
+        #
+        # **存边缘而不是存坐标**：贴边时窗口有一半在屏幕外，存下来的坐标
+        # 是个负数或者超出屏幕的值，下次启动直接用它反而会出问题
+        # （换分辨率、换显示器就更对不上）。存「贴的是哪条边」，
+        # 启动时按当前的屏幕尺寸重新算位置，换显示器也不会错。
+        "pet_edge": "",
         "tasks": [],
         "reminders": [],
         "notes": [],
@@ -245,7 +267,10 @@ class Store:
 
         # 当前版本：把缺的键补上（前向兼容新增字段）
         state = default_state()
-        state.update({k: v for k, v in raw.items() if v is not None or k in ("pet_x", "pet_y")})
+        # pet_x / pet_y 允许是 None（还没摆过位置），所以单独放行 ——
+        # 通用的 `v is not None` 会把它们过滤掉，于是每次启动都回到默认角。
+        state.update({k: v for k, v in raw.items()
+                      if v is not None or k in ("pet_x", "pet_y")})
         merged_settings = default_settings()
         merged_settings.update(raw.get("settings") or {})
         state["settings"] = merged_settings

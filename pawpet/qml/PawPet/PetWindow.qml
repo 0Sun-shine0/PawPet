@@ -95,6 +95,11 @@ Window {
 
     // -------------------------------------------------------------- 状态
     function clampToScreen() {
+        // **贴边时不做这个夹取。** 贴边的定义就是「有一半在屏幕外」，
+        // 而下面这个夹取会把窗口拉回可见范围 —— 两者直接冲突，
+        // 表现是宠物刚贴上去就被弹回屏幕里。
+        if (backend.petEdge)
+            return
         var area = backend.screenAt(win.x, win.y)
         if (!area || area.width <= 0)
             return
@@ -108,7 +113,112 @@ Window {
             win.y = Math.round(ny)
     }
 
+    // ================================================================ 贴边
+    //
+    // 拖到屏幕边缘附近就吸附过去，并且有一半藏在屏幕外；鼠标移到那条边
+    // 附近自动滑出来，移开一会儿再滑回去。四条边都支持。
+    //
+    // 位置由 backend 算（它才拿得到带任务栏偏移的可用区域和全局鼠标
+    // 位置），这里只负责「什么时候请求」和「怎么移过去」。
+    //
+    // ---- 为什么拖动结束要靠「位置静止」来判断 ----
+    // 拖动走的是 startSystemMove()，交给 Windows 原生处理（流畅、跟手、
+    // 能跨屏）。代价是拖动期间 QML 收不到任何事件，也拿不到「松手」这个
+    // 时刻 —— 原生拖动会一直占着消息循环直到用户放开鼠标。
+    // 所以只能反过来推：位置不再变化了，就认为拖完了。
+    property bool edgeAnimating: false
+
+    ParallelAnimation {
+        id: slideAnim
+        property real toX: 0
+        property real toY: 0
+        NumberAnimation {
+            target: win; property: "x"; to: slideAnim.toX
+            duration: 240; easing.type: Easing.OutCubic
+        }
+        NumberAnimation {
+            target: win; property: "y"; to: slideAnim.toY
+            duration: 240; easing.type: Easing.OutCubic
+        }
+        onFinished: win.edgeAnimating = false
+    }
+
+    function slideTo(tx, ty, animate) {
+        if (Math.abs(win.x - tx) < 1 && Math.abs(win.y - ty) < 1)
+            return
+        if (!animate) {
+            win.x = Math.round(tx)
+            win.y = Math.round(ty)
+            return
+        }
+        slideAnim.stop()
+        win.edgeAnimating = true
+        slideAnim.toX = tx
+        slideAnim.toY = ty
+        slideAnim.restart()
+    }
+
+    // 拖动停下来之后：判断要不要吸附
+    function settlePosition() {
+        if (win.edgeAnimating)
+            return
+        if (!backend.petSnapEnabled)
+            return
+        if (!win.positionReady)
+            return
+
+        if (backend.petEdge) {
+            // 已经贴着某条边。**先看它是不是还在原位** ——
+            // 在的话什么都不做。这一步是必须的：贴边之后窗口坐标是负的
+            // （贴左边 x=-100），要是拿这个坐标再去问「要不要吸附」，
+            // 会被判成「离边缘很远」从而把贴边状态清掉，宠物就自己解开了。
+            var geo = backend.petEdgeGeometry()
+            if (geo && geo.active
+                    && Math.abs(win.x - geo.x) <= 2
+                    && Math.abs(win.y - geo.y) <= 2)
+                return
+            // 位置对不上，说明用户把它从边上拖走了
+            backend.petDetach()
+        }
+
+        var result = backend.petSnap(win.x, win.y)
+        if (result && result.edge)
+            slideTo(result.x, result.y, true)
+    }
+
+    Timer {
+        id: settleTimer
+        interval: 240
+        onTriggered: win.settlePosition()
+    }
+
+    // backend 说位置该变了（吸附、滑出、滑回、解除）
+    Connections {
+        target: backend
+        function onPetGeometryChanged() {
+            if (!win.positionReady)
+                return
+            var geo = backend.petEdgeGeometry()
+            if (!geo || !geo.active) {
+                // 贴边被解除了（用户关了开关、或拖离了边缘）：
+                // 从屏幕外回到屏幕内，用动画，免得突然跳一下
+                win.clampToScreen()
+                return
+            }
+            win.slideTo(geo.x, geo.y, true)
+        }
+    }
+
     function restorePosition() {
+        // 贴边状态优先：它比坐标可靠 —— 半藏的坐标是负数，而且换分辨率或
+        // 换显示器之后就完全对不上了，而「贴着哪条边」到哪都成立。
+        var geo = backend.petEdgeGeometry()
+        if (geo && geo.active) {
+            win.x = Math.round(geo.x)
+            win.y = Math.round(geo.y)
+            return
+        }
+
         var saved = backend.petPosition()
         var ok = saved && saved.length === 2
                  && saved[0] !== null && saved[0] !== undefined
@@ -150,8 +260,8 @@ Window {
         onTriggered: backend.savePetPosition(win.x, win.y)
     }
 
-    onXChanged: if (positionReady) savePositionTimer.restart()
-    onYChanged: if (positionReady) savePositionTimer.restart()
+    onXChanged: if (positionReady) { savePositionTimer.restart(); settleTimer.restart() }
+    onYChanged: if (positionReady) { savePositionTimer.restart(); settleTimer.restart() }
 
     // ------------------------------------------------------------- 宠物
     Item {

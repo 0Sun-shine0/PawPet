@@ -196,6 +196,13 @@ Window {
     Connections {
         target: backend
         function onPetGeometryChanged() {
+            // 姿势和位置一起更新：贴边状态变了，角度也要跟着变。
+            // 放在 positionReady 判断之前 —— 姿势不依赖窗口就绪。
+            win.syncPose()
+            // 不再倒挂了就把晃动收干净，否则下一次贴边会带着一个偏移量
+            if (!backend.petHanging)
+                win.poseSwing = 0
+
             if (!win.positionReady)
                 return
             var geo = backend.petEdgeGeometry()
@@ -237,6 +244,9 @@ Window {
     Component.onCompleted: {
         restorePosition()
         positionReady = true
+        // 启动时如果本来就在贴边状态，姿势要一次性对上，
+        // 不然会先直挺挺站着再翻过去
+        syncPose()
     }
 
     // 改「始终置顶」会重建原生窗口，位置需要还原一次
@@ -264,9 +274,40 @@ Window {
     onYChanged: if (positionReady) { savePositionTimer.restart(); settleTimer.restart() }
 
     // ------------------------------------------------------------- 宠物
+    //
+    // ---- 贴边姿态 ----
+    // 贴到哪条边就用哪个姿势（侧躺 / 倒挂），角度由 backend 给。
+    //
+    // 转的是 **stage 这一层**，不是 Pet 自己：
+    //   * Pet 身上挂着 `scale`（而且 transformOrigin 是 TopLeft），再给它加
+    //     旋转，两个变换的先后顺序会影响旋转中心落在哪 —— 容易看着对、
+    //     实际偏。stage 是干净的 200x220，转它的中心就是转画布中心。
+    //   * stage 只包着宠物，所以转它不会把悬停提示和右键菜单一起转歪。
+    //
+    // 画布留白够（实测四个形象画到的范围约 185x185，居中），所以转 90°
+    // 之后仍在窗口内，不会被切掉。
+    property real poseAngle: 0          // 目标角度，来自 backend
+    property real poseSwing: 0          // 倒挂时的晃动，叠加上去
+    readonly property real petAngle: poseAngle + poseSwing
+
+    // 转过去的时候「翻一下」，比线性转好看得多 —— 像真的翻身过去。
+    //
+    // overshoot 是缓动曲线自己的参数，必须写成 `easing.overshoot`；
+    // 直接写 `overshoot:` 会被当成 NumberAnimation 的属性，报
+    // 「Cannot assign to non-existent property」。
+    Behavior on poseAngle {
+        NumberAnimation {
+            duration: 420
+            easing.type: Easing.OutBack
+            easing.overshoot: 1.3
+        }
+    }
+
     Item {
         id: stage
         anchors.fill: parent
+        // 默认 transformOrigin 就是 Item.Center，绕画布中心转正合适
+        rotation: win.petAngle
 
         Pet {
             id: pet
@@ -286,6 +327,31 @@ Window {
         }
     }
 
+    // 倒挂的时候轻轻晃 —— 挂在那儿一动不动像张贴纸
+    SequentialAnimation {
+        running: backend.petHanging
+        loops: Animation.Infinite
+        NumberAnimation {
+            target: win; property: "poseSwing"
+            to: 2.6; duration: 1700; easing.type: Easing.InOutSine
+        }
+        NumberAnimation {
+            target: win; property: "poseSwing"
+            to: -2.6; duration: 1700; easing.type: Easing.InOutSine
+        }
+    }
+    // 不挂了就把晃动收干净，否则下一次贴边会带着一个偏移量。
+    // 这个处理并进上面那个 Connections（同一个信号，没必要开两块）。
+
+    // 让姿势跟着贴边状态走。
+    //
+    // **不能挂 onPetEdgeChanged** —— `win` 本身没有 petEdge 属性，
+    // 那个属性在 backend 上。贴边状态一变 backend 就会发
+    // petGeometryChanged，下面那个 Connections 里已经有入口。
+    function syncPose() {
+        win.poseAngle = backend.petPoseAngle
+    }
+
     // 眼睛跟随光标
     property real eyeShiftX: 0
     property real eyeShiftY: 0
@@ -296,8 +362,18 @@ Window {
             var p = point.position
             var nx = (p.x / Math.max(1, win.width)) - 0.5
             var ny = (p.y / Math.max(1, win.height)) - 0.5
-            win.eyeShiftX = Math.max(-2.5, Math.min(2.5, nx * 6))
-            win.eyeShiftY = Math.max(-2.0, Math.min(2.0, ny * 5))
+            var sx = Math.max(-2.5, Math.min(2.5, nx * 6))
+            var sy = Math.max(-2.0, Math.min(2.0, ny * 5))
+
+            // **眼神要按宠物自己的坐标系算。** 宠物转过角度之后，它的
+            // 「上」不再是屏幕的上 —— 直接拿屏幕方向的偏移量喂进去，
+            // 倒挂时眼睛会朝反方向看，侧躺时上下颠倒。
+            // 这里把屏幕方向反过来转同样的角度，换到宠物的坐标系里。
+            var a = win.poseAngle * Math.PI / 180
+            var cos = Math.cos(a)
+            var sin = Math.sin(a)
+            win.eyeShiftX = sx * cos + sy * sin
+            win.eyeShiftY = -sx * sin + sy * cos
         }
         onHoveredChanged: {
             win.hovering = hovered

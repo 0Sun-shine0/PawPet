@@ -398,6 +398,8 @@ class Backend(QObject):
     # 拖到屏幕边缘附近吸附过去，并有一半藏在屏幕外；鼠标移过去滑出来。
     petSnapEnabled = _setting_property("pet_snap_enabled", bool, settingsChanged)
     petSnapDistance = _setting_property("pet_snap_distance", int, settingsChanged)
+    # 贴边时换姿势（侧躺 / 倒挂）而不是直挺挺藏一半
+    petEdgePose = _setting_property("pet_edge_pose", bool, settingsChanged)
 
     def _on_setting_changed(self, key: str) -> None:
         if key == "sound_enabled":
@@ -417,6 +419,10 @@ class Backend(QObject):
                 self.petGeometryChanged.emit()
         elif key in ("pet_snap_distance", "pet_snap_hide_ratio", "pet_scale"):
             # 改了吸附距离或隐藏比例，当前贴着的位置要重算一遍
+            if self._pet_edge:
+                self.petGeometryChanged.emit()
+        elif key == "pet_edge_pose":
+            # 开/关贴边姿势：角度变了，得让界面重新取一次
             if self._pet_edge:
                 self.petGeometryChanged.emit()
 
@@ -1123,13 +1129,25 @@ class Backend(QObject):
 
     @property
     def _pet_hide_ratio(self) -> float:
+        """当前该藏多少。
+
+        **按边取值**，不是一个全局数字 —— 脸在画布中心附近，旋转不会
+        把它挪到边上，所以每条边能藏多少取决于转完之后脸的包围盒落在哪。
+        统一用 0.5 的话四条边都只剩后脑勺（实测过）。
+
+        设置里的 `pet_snap_hide_ratio` 只作为兜底：边不在表里时用它。
+        """
         try:
-            value = float(self._store.settings.get("pet_snap_hide_ratio", 0.5))
+            fallback = float(self._store.settings.get("pet_snap_hide_ratio", 0.5))
         except (TypeError, ValueError):
-            return 0.5
-        # 上下限卡住：0 就完全不藏（那和「只吸附」没区别，但至少不反常），
-        # 0.85 以上只剩一条边，用户就找不着宠物了
-        return max(0.0, min(0.85, value))
+            fallback = 0.5
+        fallback = max(0.0, min(0.85, fallback))
+
+        _name, _angle, ratio = self._pet_pose(self._pet_edge)
+        if not self._pet_edge:
+            return fallback
+        # 表里的值也夹一下，防止以后手改配置时写出离谱的数
+        return max(0.0, min(0.85, ratio))
 
     @property
     def _pet_snap_distance(self) -> int:
@@ -1272,6 +1290,73 @@ class Backend(QObject):
     def petPeek(self) -> bool:
         """贴边状态下宠物是不是滑出来了。"""
         return bool(self._pet_peek)
+
+    # ---------------------------------------------------------- 贴边姿态
+    #
+    # 贴到哪条边就用哪个姿势。角度是**绕画布中心转**，所以「藏起来」这件事
+    # 读起来就变了性质：直挺挺露出一半像被切掉，转过角度之后同一个「只露
+    # 一部分」看起来是它自己趴在那儿 / 挂在那儿。
+    #
+    # ---- 角度符号是**渲染核对过的**，不是推出来的 ----
+    # 直觉上「贴左边要顺时针转，让头转向屏幕里」，但实测正相反：
+    # Qt 的正角度是顺时针，而脸本来就在画布中心偏下，转 +90° 会把眼睛
+    # 转到**左半**（也就是贴左边时被藏掉的那半），露出来的是后脑勺。
+    # 四条边都渲染出来看过之后才定的下面这组值。
+    #
+    # ---- 藏多少也是按「脸必须露出来」定的 ----
+    # 旋转不改变脸的位置（它就在中心附近），所以统一藏 50% 会让四条边
+    # 全都只露后脑勺。每条边能藏多少，取决于转完之后脸的包围盒落在哪：
+    # 藏到刚好把脸留在可见区里。数字是算出来再实测校准的，
+    # tools/posecheck.py 会渲染出来验证「可见区里确实有眼睛」。
+    #
+    #   left   −90°：眼睛转到 x≈112、嘴 x≈143 → 藏在左边，可见区从 x=84 起
+    #   right  +90°：镜像 → 可见区到 x=116 为止
+    #   top    180°：眼睛转到 y≈98、嘴 y≈67 → 藏在上面，可见区从 y=55 起
+    #   bottom   0°：不转，脸在 y 110~157 → 藏在下面，可见区到 y=163 为止
+    _PET_POSES: dict[str, tuple[str, int, float]] = {
+        "left": ("side-left", -90, 0.42),
+        "right": ("side-right", 90, 0.42),
+        "top": ("hang", 180, 0.26),
+        "bottom": ("sit", 0, 0.28),
+    }
+
+    # 不开「贴边换姿势」时用的藏匿比例。角度是 0，脸的包围盒没变，
+    # 所以上下两条边和开着姿势时需要的比例不同：
+    #   不转时脸在 y 110~157，贴上边（藏上、露下）能藏到 0.5，
+    #   贴下边（藏下、露上）就只能藏到 0.28。
+    _PET_FLAT_HIDE: dict[str, float] = {
+        "left": 0.42,
+        "right": 0.42,
+        "top": 0.50,
+        "bottom": 0.28,
+    }
+
+    def _pet_pose(self, edge: str) -> tuple[str, int, float]:
+        """某条边的 (姿势名, 角度, 藏匿比例)。"""
+        if not edge:
+            return ("", 0, 0.0)
+        if bool(self._store.settings.get("pet_edge_pose", True)):
+            return self._PET_POSES.get(edge, ("", 0, 0.5))
+        return ("", 0, self._PET_FLAT_HIDE.get(edge, 0.5))
+
+    @Property(str, notify=petGeometryChanged)
+    def petPose(self) -> str:
+        """当前的贴边姿势。没贴边或没开姿势时是空串。
+
+        返回的是「边 + 方向」而不是笼统的 "side"，因为左右两边虽然都是
+        侧躺，角度是相反的 —— 测试里要能把它们区分开。
+        """
+        return self._pet_pose(self._pet_edge)[0]
+
+    @Property(int, notify=petGeometryChanged)
+    def petPoseAngle(self) -> int:
+        """宠物要转多少度。"""
+        return self._pet_pose(self._pet_edge)[1]
+
+    @Property(bool, notify=petGeometryChanged)
+    def petHanging(self) -> bool:
+        """是不是倒挂着。倒挂时前端要给它加一点晃动，不然像贴纸。"""
+        return self.petPose == "hang"
 
     def _pet_should_peek(self, pos_x: int, pos_y: int) -> bool:
         """鼠标在 (pos_x, pos_y) 时，贴边的宠物该不该滑出来。

@@ -123,6 +123,36 @@ def main() -> int:
           repr(backend.petEdge))
     store.settings["pet_snap_enabled"] = True
 
+    # ---- 拖过头（窗口有一部分到了屏幕外）----
+    #
+    # **这是用户报「贴边感应不灵敏」的根因。** 往边上拖的时候必然会
+    # 拖过头（窗口滑出屏幕才感觉「到头了」），而距离原来用 abs() 算 ——
+    # 超出 60px 就被算成「离边缘 60px」，超出 120px 就算 120px，
+    # 于是越往边上拖越不吸附。
+    print("\n  拖过头也应该吸上：")
+    for overshoot in (5, 30, 60, 120, 300):
+        backend.petDetach()
+        result = backend.petSnap(area["x"] - overshoot, area["y"] + 400)
+        check(f"往左拖过头 {overshoot}px 仍吸附",
+              result["edge"] == "left", f"edge={result['edge']!r}")
+
+    for edge, ox, oy in (
+        ("right", area["x"] + area["width"] - width + 80, area["y"] + 300),
+        ("top", area["x"] + 600, area["y"] - 80),
+        ("bottom", area["x"] + 600,
+         area["y"] + area["height"] - height + 80),
+    ):
+        backend.petDetach()
+        result = backend.petSnap(ox, oy)
+        check(f"往{edge}边拖过头仍吸附", result["edge"] == edge,
+              f"edge={result['edge']!r}")
+
+    # 完全拖到屏幕外（比如分辨率变化留下的坐标）也要能收回来
+    backend.petDetach()
+    result = backend.petSnap(-2000, area["y"] + 300)
+    check("窗口完全在屏幕外时也能吸回最近的那条边",
+          result["edge"] != "", str(result))
+
     # ================================================================ 三
     print("\n=== 三、半藏与滑出的位置 ===")
     backend.petSnap(area["x"] + 5, area["y"] + 400)
@@ -276,8 +306,8 @@ def main() -> int:
     backend.petDetach()
 
     for edge, expect_pose, expect_angle, expect_hang in (
-        ("left", "side-left", -90, False),
-        ("right", "side-right", 90, False),
+        ("left", "side-left", 90, False),
+        ("right", "side-right", -90, False),
         ("top", "hang", 180, True),
         ("bottom", "sit", 0, False),
     ):
@@ -301,7 +331,62 @@ def main() -> int:
               backend.petHanging is expect_hang,
               str(backend.petHanging))
 
-    # 角度符号是渲染核对过的 —— 左右必须相反，不然一边会露后脑勺
+    # ---- 朝向：头必须朝屏幕里，不能朝屏幕外 ----
+    #
+    # **这条是用户报「左右的贴边反了」之后补的。**
+    #
+    # 之前只断言了「可见区里有眼睛」—— 但**两个方向都能让眼睛露出来**，
+    # 区别只是「头朝屋里躺」还是「头朝屋外躺」（后者看着像倒栽葱）。
+    # 所以那个断言抓不到朝向问题。
+    #
+    # 正确的判据是**头顶的落点**：把画布上方中心（头顶）按同样的角度转
+    # 一遍，它必须落在可见区里。用和产品一样的旋转公式算，不另写一套。
+    print("\n  朝向（头顶必须转向屏幕里）：")
+    import math
+
+    def rotated_head_top(angle: int, w: int, h: int) -> tuple[float, float]:
+        """头顶（画布上方中心）绕画布中心转 angle 度之后落在哪。
+
+        Qt 的 rotation 正值是顺时针（屏幕坐标 y 向下），
+        所以在 y 向下的坐标系里用标准旋转矩阵即可：
+            x' = x·cosθ − y·sinθ
+            y' = x·sinθ + y·cosθ
+        """
+        cx, cy = w / 2.0, h / 2.0
+        # 头顶：画布水平中心、垂直方向靠上（用 1/4 高度处，别贴边）
+        ox, oy = 0.0, -(h / 2.0) + h * 0.25
+        rad = math.radians(angle)
+        return (cx + ox * math.cos(rad) - oy * math.sin(rad),
+                cy + ox * math.sin(rad) + oy * math.cos(rad))
+
+    for edge in ("left", "right", "top", "bottom"):
+        # **角度和比例都要从产品读，不能用测试自己写的常量。**
+        #
+        # 第一版这里用的是循环里的字面量，结果把符号改错之后这几条断言
+        # 照样全绿 —— 它只是在验证我自己的算术自洽，根本没测到产品。
+        # 这种断言比没有更糟：它给的是虚假的安心。
+        backend._pet_edge = edge
+        angle = backend.petPoseAngle
+        ratio = backend._pet_hide_ratio
+
+        hx, hy = rotated_head_top(angle, width, height)
+        if edge == "left":
+            visible = hx >= width * ratio
+            where = f"可见区从 x={int(width * ratio)} 起"
+        elif edge == "right":
+            visible = hx <= width * (1 - ratio)
+            where = f"可见区到 x={int(width * (1 - ratio))} 为止"
+        elif edge == "top":
+            visible = hy >= height * ratio
+            where = f"可见区从 y={int(height * ratio)} 起"
+        else:
+            visible = hy <= height * (1 - ratio)
+            where = f"可见区到 y={int(height * (1 - ratio))} 为止"
+        check(f"{edge} 边：头顶落在可见区里（头朝屋里躺）", visible,
+              f"角度 {angle}°，头顶转到 ({hx:.0f}, {hy:.0f})，{where}")
+    backend._pet_edge = ""
+
+    # 左右两侧的旋转方向必须**相反**，否则一边朝里一边朝外
     backend.petDetach()
     backend.petSnap(area["x"] + 5, area["y"] + 300)
     left_angle = backend.petPoseAngle
@@ -310,8 +395,8 @@ def main() -> int:
     right_angle = backend.petPoseAngle
     check("左右两侧的旋转方向相反", left_angle == -right_angle,
           f"left={left_angle} right={right_angle}")
-    check("左侧是反向转（不是想当然的正转）", left_angle < 0,
-          f"left={left_angle} —— 正转会把眼睛转到被藏起来的那半")
+    check("左侧是顺时针（头才朝屏幕里）", left_angle > 0,
+          f"left={left_angle} —— 反了的话头会朝屏幕外，看着像倒栽葱")
 
     # 藏匿比例必须**按边不同** —— 统一 0.5 会让四条边都只剩后脑勺
     backend.petDetach()
@@ -339,6 +424,56 @@ def main() -> int:
           backend._pet_hide_ratio < 0.5,
           f"{backend._pet_hide_ratio:.0%}")
     store.settings["pet_edge_pose"] = True
+
+    # ---- 解除贴边必须通知界面 ----
+    #
+    # **这是用户报「贴边没有回正」的根因。** 解除贴边时原来一次信号都不发，
+    # QML 收不到任何动静，姿势就不转回来 —— 把宠物从边上拖走之后，
+    # 它会一直歪着待在屏幕中间。
+    print("\n  解除贴边要通知界面（不然姿势不转回来）：")
+    signals: list[int] = []
+    backend.petGeometryChanged.connect(lambda: signals.append(1))
+
+    backend.petDetach()
+    signals.clear()
+    backend.petSnap(area["x"] + 5, area["y"] + 300)
+    check("吸附时发了信号", len(signals) >= 1, f"{len(signals)} 次")
+
+    signals.clear()
+    backend.petDetach()
+    check("解除贴边时发了信号", len(signals) >= 1,
+          f"{len(signals)} 次 —— 0 次的话 QML 不知道要转回来")
+    check("解除之后角度是 0", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+
+    # 重复解除不该反复发信号（免得界面跟着反复动画）
+    signals.clear()
+    backend.petDetach()
+    check("已经解除了再解除不重复发信号", len(signals) == 0,
+          f"{len(signals)} 次")
+
+    # 从边上拖走的完整路径：先 detach 再 snap 到屏幕中间
+    backend.petSnap(area["x"] + 5, area["y"] + 300)
+    check("重新贴上", backend.petEdge == "left", repr(backend.petEdge))
+    signals.clear()
+    backend.petDetach()
+    result = backend.petSnap(area["x"] + 800, area["y"] + 300)
+    check("拖到屏幕中间不再吸附", result["edge"] == "", str(result))
+    check("拖走之后角度回到 0（宠物是正的）", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+    check("拖走这条路径也发了信号", len(signals) >= 1, f"{len(signals)} 次")
+
+    # 关掉贴边开关时，要把「完全显示」的位置记下来，界面才知道挪到哪
+    backend.petDetach()
+    backend.petSnap(area["x"] + 5, area["y"] + 300)
+    store.settings["pet_snap_enabled"] = False
+    backend._on_setting_changed("pet_snap_enabled")
+    saved = backend.petPosition()
+    check("关掉开关后位置记录在屏幕内（不是半藏的负坐标）",
+          saved[0] >= area["x"], f"存了 {saved}")
+    check("关掉开关后角度归零", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+    store.settings["pet_snap_enabled"] = True
 
     # ================================================================ 七
     print("\n=== 七、配置与界面接线 ===")

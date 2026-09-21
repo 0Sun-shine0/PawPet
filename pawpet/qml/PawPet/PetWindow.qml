@@ -207,8 +207,30 @@ Window {
                 return
             var geo = backend.petEdgeGeometry()
             if (!geo || !geo.active) {
-                // 贴边被解除了（用户关了开关、或拖离了边缘）：
-                // 从屏幕外回到屏幕内，用动画，免得突然跳一下
+                // 贴边解除了，分两种情况 —— **不能一律挪窗口**：
+                //
+                //   · 用户在设置里关了贴边：宠物此刻正半藏在屏幕外，
+                //     得把它挪回完全可见的位置（backend 已经把这个位置
+                //     记进 petPosition 了）。
+                //   · 用户把宠物从边上拖走：窗口就在他松手的地方，
+                //     位置是对的，**动它反而会被拽回旧位置**。
+                //
+                // 判据就是「现在是不是在屏幕外」。拖动那条路走不到这里
+                // （能拖走说明离边缘已经超过吸附距离，窗口必然是完整的）。
+                var area = backend.screenAt(win.x + win.width / 2,
+                                            win.y + win.height / 2)
+                var offScreen = area && area.width > 0 &&
+                        (win.x < area.x || win.y < area.y
+                         || win.x + win.width > area.x + area.width
+                         || win.y + win.height > area.y + area.height)
+                if (offScreen) {
+                    var saved = backend.petPosition()
+                    if (saved && saved.length === 2
+                            && saved[0] !== null && saved[1] !== null) {
+                        win.slideTo(Number(saved[0]), Number(saved[1]), true)
+                        return
+                    }
+                }
                 win.clampToScreen()
                 return
             }

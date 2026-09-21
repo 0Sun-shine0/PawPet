@@ -412,10 +412,18 @@ class Backend(QObject):
             self.reminder_engine.reset_sit_timer()
             self.sitChanged.emit()
         elif key == "pet_snap_enabled":
-            # 关掉贴边时，宠物正半藏在屏幕外 —— 得把它拉回来，
-            # 否则用户会以为宠物不见了（那一半还在屏幕外）。
+            # 关掉贴边时，宠物正半藏在屏幕外 —— 得先把它「完全显示」的
+            # 位置记下来，再解除贴边，界面那边才知道该把窗口挪到哪。
+            # 不记的话它就一直半藏在屏幕外，用户以为宠物不见了。
             if not bool(self._store.settings.get("pet_snap_enabled", True)):
-                self._pet_edge = ""
+                if self._pet_edge:
+                    x, y = self._pet_geometry_for(self._pet_edge,
+                                                  int(self._store.state.get("pet_x") or 0),
+                                                  int(self._store.state.get("pet_y") or 0),
+                                                  peek=True)
+                    self._store.state["pet_x"] = int(x)
+                    self._store.state["pet_y"] = int(y)
+                self._pet_edge = ""       # setter 会发信号
                 self.petGeometryChanged.emit()
         elif key in ("pet_snap_distance", "pet_snap_hide_ratio", "pet_scale"):
             # 改了吸附距离或隐藏比例，当前贴着的位置要重算一遍
@@ -1115,7 +1123,8 @@ class Backend(QObject):
     @_pet_edge.setter
     def _pet_edge(self, value: str) -> None:
         value = value if value in self._EDGES else ""
-        if self._store.state.get("pet_edge") == value:
+        previous = str(self._store.state.get("pet_edge") or "")
+        if previous == value:
             return
         self._store.state["pet_edge"] = value
         # 贴边状态一变就重新开始（或停掉）鼠标轮询
@@ -1126,6 +1135,17 @@ class Backend(QObject):
         else:
             self._pet_hover_timer.stop()
             self._pet_peek = False
+            # **解除贴边必须通知界面。**
+            #
+            # 不通知的话 QML 收不到任何动静，姿势就不会转回来 ——
+            # 用户把宠物从边上拖走之后，它会一直歪着待在屏幕中间
+            # （实测：解除贴边发了 0 次信号）。这不只是难看，
+            # 「歪着的宠物」还会让人以为它卡住了。
+            #
+            # 只在「从贴着变成不贴」时发；吸附那一步由 petSnap 统一发，
+            # 免得同一个动作触发两次动画。
+            if previous:
+                self.petGeometryChanged.emit()
 
     @property
     def _pet_hide_ratio(self) -> float:
@@ -1220,13 +1240,19 @@ class Backend(QObject):
 
         # 四条边各算一下「离得多远」，取最近的。
         #
-        # 用窗口的**边**去比而不是左上角：贴右边时看的是窗口右沿和屏幕
-        # 右沿的距离，用左上角算的话一个宽窗口永远够不着。
+        # **距离要夹在 0 以上，不能用 abs()。** 用 abs 的话，用户把宠物
+        # 拖**过头**（窗口有一部分跑到屏幕外）之后距离反而变大：
+        # 超出 60px 就算成「离边缘 60px」，超出 120px 就算 120px ——
+        # 于是越往边上拖越不吸附。而用户往边上拖的时候**必然拖过头**
+        # （窗口滑出屏幕才感觉「到头了」），所以这条把「不灵敏」坐实了。
+        #
+        # 夹到 0 之后：「已经超出去了」是**最强烈**的贴边意图，
+        # 距离记 0，必定吸上。
         gaps = {
-            "left": abs(x - area["x"]),
-            "right": abs((x + width) - (area["x"] + area["width"])),
-            "top": abs(y - area["y"]),
-            "bottom": abs((y + height) - (area["y"] + area["height"])),
+            "left": max(0, x - area["x"]),
+            "right": max(0, (area["x"] + area["width"]) - (x + width)),
+            "top": max(0, y - area["y"]),
+            "bottom": max(0, (area["y"] + area["height"]) - (y + height)),
         }
         edge = min(gaps, key=lambda key: gaps[key])
         if gaps[edge] > limit:
@@ -1297,25 +1323,30 @@ class Backend(QObject):
     # 读起来就变了性质：直挺挺露出一半像被切掉，转过角度之后同一个「只露
     # 一部分」看起来是它自己趴在那儿 / 挂在那儿。
     #
-    # ---- 角度符号是**渲染核对过的**，不是推出来的 ----
-    # 直觉上「贴左边要顺时针转，让头转向屏幕里」，但实测正相反：
-    # Qt 的正角度是顺时针，而脸本来就在画布中心偏下，转 +90° 会把眼睛
-    # 转到**左半**（也就是贴左边时被藏掉的那半），露出来的是后脑勺。
-    # 四条边都渲染出来看过之后才定的下面这组值。
+    # ---- 四个角度全部是**渲染核对出来的** ----
+    # 这块我错过两次，两次都是「推出来觉得对、渲染出来是反的」，所以下面
+    # 把判断依据写清楚，别再靠推理：
     #
-    # ---- 藏多少也是按「脸必须露出来」定的 ----
+    # Qt 的 rotation 正值是**顺时针**（屏幕坐标 y 向下）。
+    #
+    # 而脸在画布中心**偏下**（眼睛 y≈122、头顶 y≈44，画布中心 y=110），
+    # 所以旋转之后「头顶」和「嘴」是朝**相反**方向跑的 —— 只看「脸还在
+    # 不在可见区里」判断不出朝向，必须看耳朵朝哪边：
+    #
+    #   left  +90°（顺时针）：头顶转到右边 → 耳朵在**上**、身体朝外 ✔
+    #   left  -90°（逆时针）：头顶转到左边 → 耳朵在**下**，是倒的 ✘
+    #   right -90°（逆时针）：头顶转到左边 → 耳朵在**上**、身体朝外 ✔
+    #   right +90°（顺时针）：头顶转到右边 → 耳朵在**下**，是倒的 ✘
+    #
+    # 一句话记法：**头顶要朝屏幕内、脚朝屏幕外**，也就是「头朝屋里躺」。
+    # 左右两侧的角度必然相反（一个顺时针一个逆时针）。
+    #
+    # ---- 藏多少也是渲染校准的，按「脸必须露出来」 ----
     # 旋转不改变脸的位置（它就在中心附近），所以统一藏 50% 会让四条边
-    # 全都只露后脑勺。每条边能藏多少，取决于转完之后脸的包围盒落在哪：
-    # 藏到刚好把脸留在可见区里。数字是算出来再实测校准的，
-    # tools/posecheck.py 会渲染出来验证「可见区里确实有眼睛」。
-    #
-    #   left   −90°：眼睛转到 x≈112、嘴 x≈143 → 藏在左边，可见区从 x=84 起
-    #   right  +90°：镜像 → 可见区到 x=116 为止
-    #   top    180°：眼睛转到 y≈98、嘴 y≈67 → 藏在上面，可见区从 y=55 起
-    #   bottom   0°：不转，脸在 y 110~157 → 藏在下面，可见区到 y=163 为止
+    # 全都只露后脑勺。每条边能藏多少，取决于转完之后脸的包围盒落在哪。
     _PET_POSES: dict[str, tuple[str, int, float]] = {
-        "left": ("side-left", -90, 0.42),
-        "right": ("side-right", 90, 0.42),
+        "left": ("side-left", 90, 0.42),
+        "right": ("side-right", -90, 0.42),
         "top": ("hang", 180, 0.26),
         "bottom": ("sit", 0, 0.28),
     }

@@ -182,9 +182,12 @@ def main() -> int:
           repr(backend.petEdge))
     check("位置确实是半藏（比屏幕左沿更靠外）", win.x() < area["x"],
           f"x={win.x()}，应小于 {area['x']}")
-    check("半藏的偏移量正确（藏一半）",
-          win.x() == area["x"] - width // 2,
-          f"x={win.x()}，应为 {area['x'] - width // 2}")
+    # 藏多少是**按边**定的（脸在画布中心，旋转不会把它挪到边上，
+    # 所以每条边能藏多少不同）。这里不该写死「藏一半」。
+    check("半藏的偏移量等于该边的藏匿比例",
+          win.x() == area["x"] - int(width * backend._pet_hide_ratio),
+          f"x={win.x()}，比例 {backend._pet_hide_ratio:.0%}"
+          f"（应为 {area['x'] - int(width * backend._pet_hide_ratio)}）")
 
     # ================================================================ 三
     print("\n=== 三、从边上拖走会解除贴边 ===")
@@ -239,6 +242,50 @@ def main() -> int:
     check("petEdgeGeometry 能报出可恢复的位置",
           backend.petEdgeGeometry().get("active") is True,
           str(backend.petEdgeGeometry()))
+
+    # ================================================================ 六
+    print("\n=== 六、姿态真的转过去了（跑真窗口才看得出来）===")
+    #
+    # 角度是渲染核对过的：左侧必须**反向**转，正转会把眼睛转到被藏起来
+    # 的那半，露出来的是后脑勺。这里在真窗口上确认 stage 真的转了。
+    stage = None
+    for child in win.contentItem().childItems():
+        try:
+            rot = child.property("rotation")
+            height_px = child.property("height")
+        except Exception:  # noqa: BLE001
+            continue
+        if rot is not None and height_px and height_px > 100:
+            stage = child
+            break
+    check("找到旋转容器（stage）", stage is not None,
+          "找不到就没法验证旋转，检查 QML 里的结构")
+
+    for edge, expect in (("left", -90), ("right", 90),
+                         ("top", 180), ("bottom", 0)):
+        backend.petDetach()
+        pump(300)
+        if edge == "left":
+            win.setX(area["x"] + 5)
+            win.setY(area["y"] + 300)
+        elif edge == "right":
+            win.setX(area["x"] + area["width"] - width - 5)
+            win.setY(area["y"] + 300)
+        elif edge == "top":
+            win.setX(area["x"] + 500)
+            win.setY(area["y"] + 5)
+        else:
+            win.setX(area["x"] + 500)
+            win.setY(area["y"] + area["height"] - height - 5)
+        pump(1500)      # 吸附 + 翻身动画(420ms) + 余量
+
+        check(f"{edge} 贴边后姿势角度是 {expect}°",
+              backend.petPoseAngle == expect, str(backend.petPoseAngle))
+        if stage is not None:
+            got = float(stage.property("rotation"))
+            # 倒挂时额外挂了晃动，所以允许几度误差
+            check(f"{edge} 窗口里的 stage 真的转到了 {expect}° 附近",
+                  abs(got - expect) <= 8, f"实测 {got}")
 
     backend.shutdown()
 

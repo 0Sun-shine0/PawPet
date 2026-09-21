@@ -131,8 +131,11 @@ def main() -> int:
     geo_peek = backend._pet_geometry_for("left", 0, 400, peek=True)
     geo_hide = backend._pet_geometry_for("left", 0, 400, peek=False)
     check("滑出时完全在屏幕内", geo_peek[0] == area["x"], str(geo_peek))
-    check("半藏时有一半在屏幕外",
-          geo_hide[0] == area["x"] - width // 2, str(geo_hide))
+    check("半藏时有一半以上在屏幕外",
+          geo_hide[0] < area["x"] - width * 0.3, str(geo_hide))
+    check("半藏的偏移量等于该边的藏匿比例",
+          geo_hide[0] == area["x"] - int(width * backend._pet_hide_ratio),
+          f"{geo_hide[0]}，比例 {backend._pet_hide_ratio:.0%}")
     check("半藏比滑出更靠外（贴左边是更小的 x）",
           geo_hide[0] < geo_peek[0], f"{geo_hide[0]} vs {geo_peek[0]}")
 
@@ -261,11 +264,84 @@ def main() -> int:
           f"{wide}x{high}")
     geo2 = backend._pet_geometry_for("left", 0, 400, peek=False)
     check("换尺寸后半藏的偏移跟着重算",
-          geo2[0] == area["x"] - wide // 2, str(geo2))
+          geo2[0] == area["x"] - int(wide * backend._pet_hide_ratio),
+          f"{geo2[0]}，应为 {area['x'] - int(wide * backend._pet_hide_ratio)}")
     store.settings["pet_scale"] = 1.0
 
     # ================================================================ 六
-    print("\n=== 六、配置与界面接线 ===")
+    print("\n=== 六、贴边姿势（侧躺 / 倒挂）===")
+    #
+    # 姿势不只是好看：直挺挺藏一半看起来像**被切掉**，转过角度之后同一个
+    # 「只露一部分」读起来是它自己趴在那儿 / 挂在那儿。
+    backend.petDetach()
+
+    for edge, expect_pose, expect_angle, expect_hang in (
+        ("left", "side-left", -90, False),
+        ("right", "side-right", 90, False),
+        ("top", "hang", 180, True),
+        ("bottom", "sit", 0, False),
+    ):
+        backend.petDetach()
+        if edge == "left":
+            backend.petSnap(area["x"] + 5, area["y"] + 300)
+        elif edge == "right":
+            backend.petSnap(area["x"] + area["width"] - width - 5,
+                            area["y"] + 300)
+        elif edge == "top":
+            backend.petSnap(area["x"] + 500, area["y"] + 5)
+        else:
+            backend.petSnap(area["x"] + 500,
+                            area["y"] + area["height"] - height - 5)
+        check(f"{edge} 的姿势是 {expect_pose}",
+              backend.petPose == expect_pose, repr(backend.petPose))
+        check(f"{edge} 的角度是 {expect_angle}°",
+              backend.petPoseAngle == expect_angle,
+              str(backend.petPoseAngle))
+        check(f"{edge} 的倒挂标记正确",
+              backend.petHanging is expect_hang,
+              str(backend.petHanging))
+
+    # 角度符号是渲染核对过的 —— 左右必须相反，不然一边会露后脑勺
+    backend.petDetach()
+    backend.petSnap(area["x"] + 5, area["y"] + 300)
+    left_angle = backend.petPoseAngle
+    backend.petDetach()
+    backend.petSnap(area["x"] + area["width"] - width - 5, area["y"] + 300)
+    right_angle = backend.petPoseAngle
+    check("左右两侧的旋转方向相反", left_angle == -right_angle,
+          f"left={left_angle} right={right_angle}")
+    check("左侧是反向转（不是想当然的正转）", left_angle < 0,
+          f"left={left_angle} —— 正转会把眼睛转到被藏起来的那半")
+
+    # 藏匿比例必须**按边不同** —— 统一 0.5 会让四条边都只剩后脑勺
+    backend.petDetach()
+    ratios = {}
+    for edge in ("left", "right", "top", "bottom"):
+        backend._pet_edge = edge
+        ratios[edge] = backend._pet_hide_ratio
+    print(f"  各边藏匿比例：{ {k: f'{v:.0%}' for k, v in ratios.items()} }")
+    check("藏匿比例按边区分（不是统一值）", len(set(ratios.values())) >= 2,
+          str(ratios))
+    check("藏得比例都在合理范围（不超过 60%）",
+          all(0.0 < r <= 0.60 for r in ratios.values()),
+          str(ratios))
+    backend._pet_edge = ""
+
+    # 关掉姿势开关：角度归零，但藏匿比例仍按边取值（脸要留得住）
+    store.settings["pet_edge_pose"] = False
+    backend.petDetach()
+    backend.petSnap(area["x"] + 5, area["y"] + 300)
+    check("关掉姿势开关后角度归零", backend.petPoseAngle == 0,
+          str(backend.petPoseAngle))
+    check("关掉姿势开关后姿势名是空", backend.petPose == "",
+          repr(backend.petPose))
+    check("关掉姿势开关后仍按边取藏匿比例",
+          backend._pet_hide_ratio < 0.5,
+          f"{backend._pet_hide_ratio:.0%}")
+    store.settings["pet_edge_pose"] = True
+
+    # ================================================================ 七
+    print("\n=== 七、配置与界面接线 ===")
     from pawpet.config import (PET_DESIGN_HEIGHT, PET_DESIGN_WIDTH,
                                PET_SCALE_MAX, PET_SCALE_MIN)
 
@@ -298,6 +374,19 @@ def main() -> int:
     check("设置页有贴边开关", "backend.petSnapEnabled" in settings)
     check("设置页有吸附距离滑块", "backend.petSnapDistance" in settings)
     check("设置页有「拉回来」的出口", "backend.petDetach()" in settings)
+    check("设置页有贴边姿势开关", "backend.petEdgePose" in settings)
+
+    # QML 侧：旋转挂在 stage 上，不是 Pet 上
+    check("QML 转的是 stage 这一层",
+          "rotation: win.petAngle" in qml,
+          "转 Pet 会和它自己的 scale 打架，旋转中心也会偏")
+    check("QML 有翻身动画", "Behavior on poseAngle" in qml)
+    check("overshoot 写在 easing 下（写外面会报属性不存在）",
+          "easing.overshoot" in qml, "写成 overshoot: 会 Cannot assign")
+    check("倒挂时有晃动", "poseSwing" in qml)
+    check("眼神按宠物坐标系换算（不然倒挂时朝反方向看）",
+          "Math.cos(a)" in qml and "Math.sin(a)" in qml,
+          "没有角度换算的话，转过去之后眼睛会看错方向")
 
     backend.shutdown()
 

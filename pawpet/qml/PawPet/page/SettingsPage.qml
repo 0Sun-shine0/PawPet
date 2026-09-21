@@ -289,6 +289,30 @@ Flickable {
                 lineHeight: 1.35
             }
 
+            // 贴边之后换个姿势（侧躺 / 倒挂），而不是直挺挺藏一半。
+            //
+            // 这不只是好看：直挺挺露出一半看起来像**被切掉了**，转过角度
+            // 之后同一个「只露一部分」读起来是它自己趴在那儿 / 挂在那儿。
+            PawSwitch {
+                Layout.fillWidth: true
+                visible: backend.petSnapEnabled
+                text: "贴边时换个姿势（侧躺 / 倒挂）"
+                checked: backend.petEdgePose
+                onToggled: backend.petEdgePose = checked
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: backend.petSnapEnabled && backend.petEdgePose
+                text: "贴左边和右边时侧躺，贴上边时倒挂着，贴下边还是坐着。"
+                      + "旋转只是图形变换，呼吸、眨眼、摇尾照常。"
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.35
+            }
+
             // 已经贴着的时候给一个「拔出来」的出口。
             // 不然用户想把它摆回屏幕中间，只能靠拖 —— 半藏着的时候不好抓。
             PawButton {

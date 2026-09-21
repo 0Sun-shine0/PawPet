@@ -134,6 +134,17 @@ if not QML_DIR.exists():          # 开发模式下走这里
 # 存在这里，升级不会覆盖掉。
 THEME_FILE = ROOT / "theme.json"
 
+# 宠物画布的设计尺寸。
+#
+# QML 那边的 PetWindow.qml 也写着这两个数（designWidth/designHeight），
+# 但贴边的位置计算在 Python 侧 —— 窗口刚建好、尺寸还没定下来的时候
+# QML 拿不到准数，所以这里也要有一份。两处必须改一起改，测试里有断言
+# 盯着它们是否一致（tools/snaptest.py）。
+PET_DESIGN_WIDTH = 200
+PET_DESIGN_HEIGHT = 220
+PET_SCALE_MIN = 0.6
+PET_SCALE_MAX = 2.4
+
 # 随包发布的 MCP server（目前是 pawkit）。
 #
 # 打包后在只读资源目录（_MEIPASS/mcp_servers）；开发模式在项目根目录下。

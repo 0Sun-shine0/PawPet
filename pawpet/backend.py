@@ -11,7 +11,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from . import win32
@@ -60,6 +60,19 @@ def _auto_ui_scale(backend) -> float:
     return 1.0           # 小屏（比如 768p）
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    """夹在 [low, high] 之间。
+
+    注意 `high` 可能小于 `low`（屏幕比窗口还窄的时候，比如窗口缩放调到
+    2.4 倍放在小屏上），所以不能写成 `max(low, min(high, value))` ——
+    那种写法在 high < low 时会返回 low，反而把窗口推出屏幕。这里显式
+    处理：范围无效时返回 low。
+    """
+    if high < low:
+        return low
+    return max(low, min(high, value))
+
+
 def _setting_property(key: str, qtype, notify):
     """按设置项生成 Qt Property，让 QML 里的绑定能自动刷新。"""
 
@@ -106,6 +119,11 @@ class Backend(QObject):
     dataTransferFinished = Signal(bool, str)
     # 自动更新检查完（无论有没有新版）。QML 订阅它刷新「关于」那一块。
     updateChecked = Signal()
+    # 贴边位置变了：贴上了 / 解除了 / 滑出滑回。QML 收到就移动到新位置。
+    #
+    # 用信号 + 只读属性而不是双向绑定：窗口的 x/y 会被用户拖动直接改写，
+    # 双向绑定会被拖动打破。这里让 Python 算、QML 听，方向单一。
+    petGeometryChanged = Signal()
 
     # --------------------------------------------------------------- 构造
     def __init__(self, store, parent=None) -> None:
@@ -154,6 +172,20 @@ class Backend(QObject):
         self._tasks.countsChanged.connect(self._on_focus_tick)
         self._ai.toastRequested.connect(self._on_ai_toast)
         self._ai.memoryChanged.connect(self.memoryChanged)
+
+        # ---------------------------------------------------------- 贴边
+        # 贴边时窗口有一半在屏幕外，所以「鼠标移过去要滑出来」这件事
+        # **没法用 QML 的 HoverHandler** —— 鼠标在屏幕边缘时可能根本不在
+        # 窗口范围内（窗口一半在外面），而且那个位置的鼠标事件属于别的
+        # 程序。只能用全局鼠标位置轮询。
+        #
+        # 150ms 一次 QCursor.pos() 很轻（底层就是 GetCursorPos），而且
+        # **只在贴边状态下才跑** —— 没贴边时定时器是停的，不耗电。
+        self._pet_peek = False
+        self._pet_peek_until = 0.0
+        self._pet_hover_timer = QTimer(self)
+        self._pet_hover_timer.setInterval(150)
+        self._pet_hover_timer.timeout.connect(self._pet_check_peek)
 
         self._refresh_upcoming()
 
@@ -362,6 +394,10 @@ class Backend(QObject):
     onboardingDone = _setting_property("onboarding_done", bool, settingsChanged)
     # 检查更新。关掉之后一个网络请求都不会发 —— 设置页的文案里写明了这点。
     updateCheck = _setting_property("update_check", bool, settingsChanged)
+    # ---- 贴边 ----
+    # 拖到屏幕边缘附近吸附过去，并有一半藏在屏幕外；鼠标移过去滑出来。
+    petSnapEnabled = _setting_property("pet_snap_enabled", bool, settingsChanged)
+    petSnapDistance = _setting_property("pet_snap_distance", int, settingsChanged)
 
     def _on_setting_changed(self, key: str) -> None:
         if key == "sound_enabled":
@@ -373,6 +409,16 @@ class Backend(QObject):
         elif key in ("sit_reminder_enabled", "sit_reminder_minutes", "afk_minutes"):
             self.reminder_engine.reset_sit_timer()
             self.sitChanged.emit()
+        elif key == "pet_snap_enabled":
+            # 关掉贴边时，宠物正半藏在屏幕外 —— 得把它拉回来，
+            # 否则用户会以为宠物不见了（那一半还在屏幕外）。
+            if not bool(self._store.settings.get("pet_snap_enabled", True)):
+                self._pet_edge = ""
+                self.petGeometryChanged.emit()
+        elif key in ("pet_snap_distance", "pet_snap_hide_ratio", "pet_scale"):
+            # 改了吸附距离或隐藏比例，当前贴着的位置要重算一遍
+            if self._pet_edge:
+                self.petGeometryChanged.emit()
 
         if key in ("pet_scale", "pet_opacity", "always_on_top", "fade_when_idle"):
             self.petStyleChanged.emit()
@@ -1000,6 +1046,16 @@ class Backend(QObject):
     # ------------------------------------------------------------ QML 动作
     @Slot(float, float)
     def savePetPosition(self, x: float, y: float) -> None:
+        # **贴边时存「完全显示」的位置，不存半藏的位置。**
+        #
+        # 半藏时窗口坐标是负数（贴左边 x=-100）或者超出屏幕（贴右边）。
+        # 存下来有两个后果：用户在设置里关掉贴边之后，宠物会照着这个坐标
+        # 跑到屏幕外、找不回来；换分辨率或换显示器之后更对不上。
+        # 存成完全显示的位置就没这些问题 —— 贴边状态另有 pet_edge 记着，
+        # 启动时会按它重算。
+        if self._pet_edge:
+            x, y = self._pet_geometry_for(self._pet_edge, int(x), int(y),
+                                          peek=True)
         self._store.state["pet_x"] = int(x)
         self._store.state["pet_y"] = int(y)
         self.save()
@@ -1030,6 +1086,266 @@ class Backend(QObject):
             "width": rect.width(),
             "height": rect.height(),
         }
+
+    # ============================================================== 贴边
+    #
+    # 拖到屏幕边缘附近就吸附过去，并且有一半藏在屏幕外（省地方，用户
+    # 抱怨过宠物「很占视野」）；鼠标移到那条边附近自动滑出来，移开一会儿
+    # 再滑回去。四条边都支持。
+    #
+    # 为什么位置计算放在 Python 而不是 QML：
+    #   * 「包含任务栏偏移的可用区域」要用 QScreen 才算得准，QML 的 Screen
+    #     附加类型只有 virtualX/desktopAvailable*；
+    #   * 「鼠标是不是移到边上了」必须用全局鼠标位置 —— 贴边时窗口有一半
+    #     在屏幕外，QML 收不到那个区域的鼠标事件。
+    #   Python 算、QML 听，两边不会各算一套。
+    _EDGES = ("left", "right", "top", "bottom")
+
+    @property
+    def _pet_edge(self) -> str:
+        edge = str(self._store.state.get("pet_edge") or "")
+        return edge if edge in self._EDGES else ""
+
+    @_pet_edge.setter
+    def _pet_edge(self, value: str) -> None:
+        value = value if value in self._EDGES else ""
+        if self._store.state.get("pet_edge") == value:
+            return
+        self._store.state["pet_edge"] = value
+        # 贴边状态一变就重新开始（或停掉）鼠标轮询
+        if value:
+            self._pet_peek_until = 0.0
+            if not self._pet_hover_timer.isActive():
+                self._pet_hover_timer.start()
+        else:
+            self._pet_hover_timer.stop()
+            self._pet_peek = False
+
+    @property
+    def _pet_hide_ratio(self) -> float:
+        try:
+            value = float(self._store.settings.get("pet_snap_hide_ratio", 0.5))
+        except (TypeError, ValueError):
+            return 0.5
+        # 上下限卡住：0 就完全不藏（那和「只吸附」没区别，但至少不反常），
+        # 0.85 以上只剩一条边，用户就找不着宠物了
+        return max(0.0, min(0.85, value))
+
+    @property
+    def _pet_snap_distance(self) -> int:
+        try:
+            return max(4, min(200, int(
+                self._store.settings.get("pet_snap_distance", 40))))
+        except (TypeError, ValueError):
+            return 40
+
+    def _pet_size(self) -> tuple[int, int]:
+        """宠物窗口当前的尺寸。
+
+        从 store 里的缩放算，而不是问 QML 要 —— 恢复位置发生在 QML
+        窗口刚建好、尺寸可能还没定下来的时候，那时候问它拿不到准数。
+        """
+        from .config import PET_DESIGN_HEIGHT, PET_DESIGN_WIDTH
+
+        try:
+            scale = float(self._store.settings.get("pet_scale", 1.0))
+        except (TypeError, ValueError):
+            scale = 1.0
+        scale = max(0.6, min(2.4, scale))
+        return (int(round(PET_DESIGN_WIDTH * scale)),
+                int(round(PET_DESIGN_HEIGHT * scale)))
+
+    def _pet_geometry_for(self, edge: str, anchor_x: int, anchor_y: int,
+                          peek: bool) -> tuple[int, int]:
+        """算出贴在某条边上时，窗口该在哪。
+
+        `anchor_x` / `anchor_y` 是**垂直于贴边方向**的那个坐标 ——
+        贴左右边时用 y，贴上下边时用 x。它在吸附后保持用户拖到的位置，
+        只做屏幕范围内的夹取，这样宠物不会因为贴边而突然横移一截。
+        """
+        width, height = self._pet_size()
+        area = self.screenAt(anchor_x, anchor_y)
+        ratio = self._pet_hide_ratio
+
+        if edge == "left":
+            x = area["x"] if peek else area["x"] - int(width * ratio)
+            y = _clamp(anchor_y, area["y"], area["y"] + area["height"] - height)
+        elif edge == "right":
+            right = area["x"] + area["width"]
+            x = right - width if peek else right - width + int(width * ratio)
+            y = _clamp(anchor_y, area["y"], area["y"] + area["height"] - height)
+        elif edge == "top":
+            y = area["y"] if peek else area["y"] - int(height * ratio)
+            x = _clamp(anchor_x, area["x"], area["x"] + area["width"] - width)
+        elif edge == "bottom":
+            bottom = area["y"] + area["height"]
+            y = bottom - height if peek else bottom - height + int(height * ratio)
+            x = _clamp(anchor_x, area["x"], area["x"] + area["width"] - width)
+        else:
+            return (anchor_x, anchor_y)
+        return (int(x), int(y))
+
+    @Slot(int, int, result="QVariantMap")
+    def petSnap(self, x: int, y: int) -> dict:
+        """用户拖完松手时调这个：判断要不要吸附。
+
+        返回 `{"edge": 边, "x": ..., "y": ...}`，没吸附时 edge 是空串、
+        坐标原样返回。QML 收到之后负责把窗口移过去。
+        """
+        if not bool(self._store.settings.get("pet_snap_enabled", True)):
+            self._pet_edge = ""
+            return {"edge": "", "x": int(x), "y": int(y)}
+
+        width, height = self._pet_size()
+        area = self.screenAt(x + width // 2, y + height // 2)
+        limit = self._pet_snap_distance
+
+        # 四条边各算一下「离得多远」，取最近的。
+        #
+        # 用窗口的**边**去比而不是左上角：贴右边时看的是窗口右沿和屏幕
+        # 右沿的距离，用左上角算的话一个宽窗口永远够不着。
+        gaps = {
+            "left": abs(x - area["x"]),
+            "right": abs((x + width) - (area["x"] + area["width"])),
+            "top": abs(y - area["y"]),
+            "bottom": abs((y + height) - (area["y"] + area["height"])),
+        }
+        edge = min(gaps, key=lambda key: gaps[key])
+        if gaps[edge] > limit:
+            # 没够着任何一条边 —— 顺便把之前的贴边状态清掉
+            self._pet_edge = ""
+            return {"edge": "", "x": int(x), "y": int(y)}
+
+        self._pet_edge = edge
+        # 吸上去的一瞬间是「完全显示」的：用户刚把它拖到那儿，直接藏一半
+        # 会让人以为宠物不见了。等鼠标移开之后才收回去。
+        self._pet_peek_until = time.time() + 2.5
+        self._pet_peek = True
+        nx, ny = self._pet_geometry_for(edge, x, y, peek=True)
+
+        # **顺手把落点记进 state。** _pet_should_peek 要拿它算触发区，
+        # 而 QML 那边保存位置有 700ms 的节流 —— 中间这段时间里鼠标要是
+        # 移到边上，判定会用到旧坐标，触发区就偏了（表现为「鼠标移过去
+        # 宠物不滑出来」）。吸附时已经知道确切落点，直接记下来最准。
+        self._store.state["pet_x"] = int(nx)
+        self._store.state["pet_y"] = int(ny)
+
+        self.petGeometryChanged.emit()
+        return {"edge": edge, "x": nx, "y": ny}
+
+    @Slot()
+    def petDetach(self) -> None:
+        """解除贴边（用户把宠物拖离边缘、或者在设置里关了贴边）。"""
+        if not self._pet_edge:
+            return
+        self._pet_edge = ""
+
+    @Slot(result="QVariantMap")
+    def petEdgeGeometry(self) -> dict:
+        """当前贴边状态下窗口该在哪。QML 启动恢复位置时用。"""
+        edge = self._pet_edge
+        if not edge:
+            return {"edge": "", "x": 0, "y": 0, "active": False}
+        state = self._store.state
+        try:
+            saved_x = int(state.get("pet_x") or 0)
+            saved_y = int(state.get("pet_y") or 0)
+        except (TypeError, ValueError):
+            saved_x = saved_y = 0
+        nx, ny = self._pet_geometry_for(edge, saved_x, saved_y,
+                                        peek=self._pet_peek)
+        return {"edge": edge, "x": nx, "y": ny, "active": True}
+
+    @Property(int, notify=petGeometryChanged)
+    def petWindowX(self) -> int:
+        return int(self.petEdgeGeometry().get("x", 0))
+
+    @Property(int, notify=petGeometryChanged)
+    def petWindowY(self) -> int:
+        return int(self.petEdgeGeometry().get("y", 0))
+
+    @Property(str, notify=petGeometryChanged)
+    def petEdge(self) -> str:
+        return self._pet_edge
+
+    @Property(bool, notify=petGeometryChanged)
+    def petPeek(self) -> bool:
+        """贴边状态下宠物是不是滑出来了。"""
+        return bool(self._pet_peek)
+
+    def _pet_should_peek(self, pos_x: int, pos_y: int) -> bool:
+        """鼠标在 (pos_x, pos_y) 时，贴边的宠物该不该滑出来。
+
+        **抽成纯函数是为了能测。** 判定原本嵌在 _pet_check_peek 里，
+        而那里面直接读 QCursor.pos() —— 测试没法把鼠标挪到屏幕边缘再
+        断言，只能靠人手动试。抽出来之后传坐标就能验四条的边逻辑。
+
+        触发区不是「整条屏幕边缘」，而是**宠物所在的那一段**：
+        鼠标只是路过屏幕左边（比如去点任务栏）不该让宠物弹出来，
+        那会很烦。所以除了靠边，还要求鼠标落在宠物所在的另一条轴上。
+        """
+        edge = self._pet_edge
+        if not edge:
+            return False
+
+        width, height = self._pet_size()
+        state = self._store.state
+        try:
+            anchor_x = int(state.get("pet_x") or 0)
+            anchor_y = int(state.get("pet_y") or 0)
+        except (TypeError, ValueError):
+            anchor_x = anchor_y = 0
+
+        # 用「完全显示」的位置来算触发区：滑出和滑回的判断基准一致，
+        # 否则判定区会随着宠物滑进滑出而移动，产生自激（滑出→判定区变→
+        # 又判定为不在→滑回→判定区变回→又滑出）。
+        win_x, win_y = self._pet_geometry_for(edge, anchor_x, anchor_y,
+                                              peek=True)
+        area = self.screenAt(win_x + width // 2, win_y + height // 2)
+
+        # 靠边多近算「移过去了」。比吸附距离窄一点：吸附是主动拖过去的，
+        # 触发滑出是被动扫过，太宽会误触。
+        reach = max(12, min(60, self._pet_snap_distance // 2))
+        margin = 24          # 余量：宠物边上再多一点也算
+
+        if edge in ("left", "right"):
+            in_band = (win_y - margin) <= pos_y <= (win_y + height + margin)
+            if edge == "left":
+                return pos_x <= area["x"] + reach and in_band
+            return (pos_x >= area["x"] + area["width"] - reach and in_band)
+
+        # 贴上/下边时反过来：横向在宠物范围内，纵向靠边
+        in_band = (win_x - margin) <= pos_x <= (win_x + width + margin)
+        if edge == "top":
+            return pos_y <= area["y"] + reach and in_band
+        return pos_y >= area["y"] + area["height"] - reach and in_band
+
+    def _pet_check_peek(self) -> None:
+        """轮询全局鼠标，决定滑出还是滑回。"""
+        edge = self._pet_edge
+        if not edge:
+            self._pet_hover_timer.stop()
+            return
+
+        from PySide6.QtGui import QCursor
+
+        pos = QCursor.pos()
+        near = self._pet_should_peek(pos.x(), pos.y())
+
+        now = time.time()
+        if near:
+            # 鼠标在旁边——保持滑出，并不断把这个「保持到什么时候」往后推
+            self._pet_peek_until = now + 0.6
+            if not self._pet_peek:
+                self._pet_peek = True
+                self.petGeometryChanged.emit()
+            return
+
+        # 鼠标走开了。不立刻收回 —— 鼠标稍微动一下就让宠物来回弹很烦，
+        # 所以多等一会儿（petSnap 里刚吸附的那 2.5 秒也是靠这个判断的）。
+        if self._pet_peek and now >= self._pet_peek_until:
+            self._pet_peek = False
+            self.petGeometryChanged.emit()
 
     @Slot(str)
     def showDashboard(self, page: str = "focus") -> None:

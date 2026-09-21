@@ -100,6 +100,10 @@ SUITES: list[tuple[str, str, str]] = [
     ("ai", "UI Automation", "uia_test.py"),
     # ---- 宠物
     ("pet", "宠物情绪动画", "moodtest.py"),
+    ("pet", "贴边吸附与滑出", "snaptest.py"),
+    # 跑真实宠物窗口 —— 上面那个测的是 Python 判定逻辑，
+    # 这个测「什么时候请求吸附」的 QML 时序
+    ("pet", "贴边时序（真窗口）", "snapqmltest.py"),
     # ---- 曾经真出过的 bug
     ("reg", "轮次串台", "turntest.py"),
     ("reg", "任务收尾", "finishtest.py"),

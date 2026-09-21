@@ -230,6 +230,75 @@ Flickable {
                 onToggled: backend.fade_when_idle = checked
             }
 
+            // ------------------------------------------------ 贴边
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: Theme.borderSoft
+            }
+
+            PawSwitch {
+                Layout.fillWidth: true
+                text: "拖到屏幕边缘时吸附过去"
+                checked: backend.petSnapEnabled
+                onToggled: backend.petSnapEnabled = checked
+            }
+
+            // 吸附距离只在开着的时候才有意义，关着时收起来 ——
+            // 一个不起作用的滑块比没有更让人困惑。
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                visible: backend.petSnapEnabled
+
+                Text {
+                    Layout.preferredWidth: 84
+                    text: "吸附距离"
+                    color: Theme.textDim
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsBody
+                }
+                PawSlider {
+                    Layout.fillWidth: true
+                    from: 10
+                    to: 120
+                    stepSize: 5
+                    value: backend.petSnapDistance
+                    decimals: 0
+                    onMoved: backend.petSnapDistance = Math.round(value)
+                }
+                Text {
+                    Layout.preferredWidth: 56
+                    horizontalAlignment: Text.AlignRight
+                    text: backend.petSnapDistance + " px"
+                    color: Theme.text
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fsBody
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: backend.petSnapEnabled
+                text: "吸附之后小爪会有一半藏在屏幕外，鼠标移到那条边附近就滑出来，"
+                      + "移开一会儿再收回去。四条边都支持。"
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
+                lineHeight: 1.35
+            }
+
+            // 已经贴着的时候给一个「拔出来」的出口。
+            // 不然用户想把它摆回屏幕中间，只能靠拖 —— 半藏着的时候不好抓。
+            PawButton {
+                Layout.fillWidth: true
+                visible: backend.petSnapEnabled && backend.petEdge !== ""
+                text: "把小爪从边上拉回来"
+                variant: "ghost"
+                onClicked: backend.petDetach()
+            }
+
             // ------------------------------------------------ 点击行为
             Rectangle {
                 Layout.fillWidth: true

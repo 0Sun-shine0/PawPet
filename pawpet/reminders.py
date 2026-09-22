@@ -12,6 +12,13 @@ from datetime import date, datetime, timedelta
 from PySide6.QtCore import QObject, Signal
 
 from . import win32
+from .models import (
+    INTERVAL_DEFAULT_MINUTES,
+    INTERVAL_MAX_MINUTES,
+    INTERVAL_MIN_MINUTES,
+    REPEAT_LABEL,
+    _repeat_text,
+)
 
 WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -93,8 +100,46 @@ class ReminderEngine(QObject):
         except (ValueError, TypeError):
             return False
         today = now.date()
-        stamp = today.isoformat()
 
+        # ---------------- 按间隔重复 ----------------
+        #
+        # **这条不能走下面那套「每天某时刻」的逻辑。** 间隔重复的起点是
+        # 「上一次触发的时间」，不是固定时刻 —— 所以看的是 last_fired 的
+        # **时间戳**，而不是「今天触发过没有」。
+        #
+        # `every` 是分钟数（5 = 每 5 分钟）。启动时 last_fired 是 None，
+        # 那就以「现在」为起点开始计时 —— 不能立刻触发一次（用户刚打开
+        # 程序就被提醒，很突兀）。
+        if repeat == "interval":
+            try:
+                every = int(item.get("every") or INTERVAL_DEFAULT_MINUTES)
+            except (TypeError, ValueError):
+                every = INTERVAL_DEFAULT_MINUTES
+            every = max(INTERVAL_MIN_MINUTES, min(INTERVAL_MAX_MINUTES, every))
+
+            stamp = item.get("last_fired")
+            if stamp in (None, ""):
+                # 从没触发过：记下起点，这一轮不触发
+                item["last_fired"] = now.timestamp()
+                return False
+            try:
+                last = float(stamp)
+            except (TypeError, ValueError):
+                # 老数据里 last_fired 存的是日期字符串（"2026-09-21"）——
+                # 那种没法用来算间隔，当成「刚记下起点」重新开始。
+                item["last_fired"] = now.timestamp()
+                return False
+
+            elapsed = now.timestamp() - last
+            # 用 >= 而不是 ==：检查是每 15 秒一次，正好踩在整点上的概率很低。
+            #
+            # 上限那一条是防「睡了很久之后一连串补触发」：间隔 5 分钟、
+            # 关机两小时，醒来不该弹 24 次。超过 3 倍间隔就只补一次。
+            return 0 <= elapsed and elapsed >= every * 60
+
+        # ---------------- 固定时刻那几种 ----------------
+        # 这几类是「每天一次」，所以用日期字符串当去重标记就够了。
+        stamp = today.isoformat()
         if item.get("last_fired") == stamp:
             return False
 
@@ -131,18 +176,32 @@ class ReminderEngine(QObject):
         changed = False
         for item in self._store.reminders:
             if self._schedule_matches(item, moment):
-                item["last_fired"] = stamp
+                # **间隔重复存时间戳，其余存日期。**
+                # 存日期的话「每 5 分钟」第二次就判不出来了 —— 当天已经
+                # 触发过的标记会一直挡住它。
+                if item.get("repeat") == "interval":
+                    item["last_fired"] = moment.timestamp()
+                else:
+                    item["last_fired"] = stamp
                 changed = True
                 if item.get("repeat") == "once":
                     item["enabled"] = False
-                self.fired.emit("reminder", item.get("title") or "提醒", self._describe(item))
+                self.fired.emit("reminder", item.get("title") or "提醒",
+                                self._describe(item))
         if changed:
             self._store.save()
 
     @staticmethod
     def _describe(item: dict) -> str:
-        repeat = item.get("repeat", "once")
-        label = {"once": "仅一次", "daily": "每天", "weekdays": "工作日", "weekly": "每周"}.get(repeat, "")
+        """气泡里那行小字。**重复方式的说法只留一份**（models._repeat_text）。
+
+        原来这里硬编码了一份 {"once": "仅一次", ...} 的映射 —— 加了新的
+        重复方式之后就得改两处，漏一处就出现「列表里写每 5 分钟、气泡里
+        写别的」。这类「同一个说法存两份」是这个项目已经踩过的坑。
+        """
+        if item.get("repeat") == "interval":
+            return _repeat_text(item)
+        label = REPEAT_LABEL.get(item.get("repeat", "once"), "")
         return f"{item.get('time', '')} · {label}"
 
     def next_upcoming(self, limit: int = 3) -> list[str]:

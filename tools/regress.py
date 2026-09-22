@@ -61,6 +61,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("core", "文件读写安全", "filetest.py"),
     ("core", "工具消息历史", "historytest.py"),
     ("core", "对话持久化", "convtest.py"),
+    ("core", "提醒与间隔重复", "remindertest.py"),
     ("core", "Markdown 渲染", "mdtest.py"),
     ("core", "字体与字形", "glyphcheck.py"),
     ("core", "版本号比较", "updatetest.py"),

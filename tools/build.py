@@ -231,15 +231,21 @@ def main() -> int:
         # 文件安全策略）出问题不会被发现 —— 而那些恰恰是最容易悄悄坏掉、
         # 打出发给别人又不会立刻暴露的部分。
         #
-        # **清单从 regress.py 导入，不在这里再抄一份。**
+        # **清单和「按需拉应用」都从 regress.py 拿，不在这里再写一份。**
         #
         # 以前这里有一份 24 个的硬编码清单，而实际回归用的是 33 个 ——
         # 差的 9 个正好是 QML/界面那批。也就是说打包前自测**发现不了
         # QML 语法错误**（实测踩过：一个 rgba 写法炸掉 Pet.qml，
         # 而那 9 个里有 4 个会红）。清单只留一份，就不会再漂。
+        #
+        # 同理，`uia_test` 那几条要按标题找「小爪」窗口，应用没开着就报
+        # 「找不到小爪窗口」—— 打包前通常正把应用关掉，于是必然红。
+        # 实测踩到：整套自测跑到 uia_test 中止打包，而同一份代码在
+        # regress.py 里是绿的（那边会自己拉应用）。
+        # AppInstance 直接复用，别再写第二份。
         try:
             sys.path.insert(0, str(ROOT / "tools"))
-            from regress import SUITES  # noqa: PLC0415
+            from regress import NEEDS_APP, SUITES, AppInstance  # noqa: PLC0415
 
             suites = [(label, script) for _group, label, script in SUITES]
         except Exception as exc:  # noqa: BLE001
@@ -247,14 +253,22 @@ def main() -> int:
             return 1
 
         failures: list[str] = []
-        for label, script in suites:
-            path = ROOT / "tools" / script
-            if not path.exists():
-                failures.append(f"{label}：找不到 {script}")
-                continue
-            code = run([PYTHON, path], timeout=600)
-            if code != 0:
-                failures.append(f"{label}（{script}）")
+        app_instance = AppInstance()
+        try:
+            for label, script in suites:
+                path = ROOT / "tools" / script
+                if not path.exists():
+                    failures.append(f"{label}：找不到 {script}")
+                    continue
+                # 需要窗口的套件先确保应用在跑
+                if script in NEEDS_APP:
+                    note = app_instance.ensure()
+                    log(f"       （{label} 需要小爪在运行：{note}）")
+                code = run([PYTHON, path], timeout=600)
+                if code != 0:
+                    failures.append(f"{label}（{script}）")
+        finally:
+            app_instance.stop()
         if failures:
             log("")
             log("  [XX] 以下自测没通过，中止打包：")

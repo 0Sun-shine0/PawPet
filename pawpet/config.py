@@ -25,7 +25,7 @@ APP_ID = "PawPet"
 # **版本号唯一来源。** 别在别处再写一份（`pawpet/__init__.py` 里那个已删，
 # `tools/releasetest.py` 有断言禁止它回来）。`tools/build.py` 会把
 # `version.json` 同步成这个值，`tools/release.py` 拿它建 tag。
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 # 单实例：命名互斥体 + 本地命名管道（第二个实例通过管道让第一个实例显示面板）
 MUTEX_NAME = "Local\\PawPet.SingleInstance.v2"

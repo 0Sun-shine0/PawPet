@@ -253,13 +253,24 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         "add_reminder",
-        "给小爪助手加一条定时提醒。",
+        "给小爪助手加一条定时提醒。"
+        "用户说「每天九点提醒我打卡」用 daily；"
+        "说「每 30 分钟提醒我起来看看远处」用 interval 并把 every 填 30。",
         _schema({
             "title": {**_STRING, "description": "提醒内容"},
-            "time": {**_STRING, "description": "24 小时制时间，例如 09:30"},
-            "repeat": {**_STRING, "enum": ["once", "daily", "weekdays", "weekly"],
-                       "description": "重复方式，默认 daily"},
-        }, ["title", "time"]),
+            "time": {**_STRING,
+                     "description": "24 小时制时间，例如 09:30。"
+                                    "repeat 是 interval 时可以不给"},
+            "repeat": {**_STRING,
+                       "enum": ["once", "daily", "weekdays", "weekly",
+                                "interval"],
+                       "description": "重复方式，默认 daily。"
+                                      "interval = 每隔 N 分钟"},
+            "every": {**_INT,
+                      "description": "仅 repeat=interval 时用：间隔多少分钟。"
+                                     "例如「每 5 分钟」填 5，"
+                                     "「每小时」填 60。范围 1~720"},
+        }, ["title"]),
         Risk.READ,
     ),
     ToolSpec(
@@ -1424,21 +1435,40 @@ class ToolContext:
     def _do_add_reminder(self, args: dict):
         title = str(args.get("title") or "").strip()
         when = str(args.get("time") or "").strip()
+        repeat = str(args.get("repeat") or "daily")
+
+        # 间隔重复（「每隔 N 分钟提醒我」）不需要「几点」——
+        # 它的起点是添加的那一刻。所以这一类允许 when 为空。
+        if repeat == "interval":
+            when = when or "09:00"      # 占位，这个模式下不用它
         if not title or not when:
             return False, "提醒内容和时间都不能为空", None
-        repeat = str(args.get("repeat") or "daily")
+
+        try:
+            every = int(args.get("every") or 0)
+        except (TypeError, ValueError):
+            every = 0
+
         if self.backend is not None:
-            self.backend.reminders.add(title, when, repeat)
+            self.backend.reminders.add(title, when, repeat, every)
         else:
             from ..store import new_id
+            from ..models import _clamp_interval
             import time as _time
 
-            self.store.reminders.append({
+            entry = {
                 "id": new_id("r"), "title": title[:80], "time": when[:5],
                 "date": None, "repeat": repeat, "enabled": True,
                 "last_fired": None, "created": _time.time(),
-            })
+            }
+            if repeat == "interval":
+                entry["every"] = _clamp_interval(every)
+            self.store.reminders.append(entry)
             self.store.save()
+
+        if repeat == "interval":
+            minutes = int(args.get("every") or 30)
+            return True, f"已添加提醒：每 {minutes} 分钟 · {title}", None
         return True, f"已添加提醒：{when} {title}", None
 
     def _do_save_note(self, args: dict):

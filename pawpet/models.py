@@ -309,7 +309,55 @@ REPEAT_LABEL = {
     "daily": "每天",
     "weekdays": "工作日",
     "weekly": "每周",
+    # 按间隔重复。`every` 字段存分钟数（5 = 每 5 分钟）。
+    #
+    # 和上面几个的区别：那些是「每天某时刻」，这个是「从现在起每隔 N 分钟」——
+    # 起点是**上一次触发的时间**，所以要靠 last_fired 的**时间戳**来算，
+    # 不能只看日期。
+    "interval": "每 N 分钟",
 }
+
+# 间隔重复的上下限。太小会烦人（1 分钟提醒一次），太大就退化成「每天」了。
+INTERVAL_MIN_MINUTES = 1
+INTERVAL_MAX_MINUTES = 720          # 12 小时
+INTERVAL_DEFAULT_MINUTES = 30
+
+# 几个常用间隔，界面上做成快捷选项
+INTERVAL_PRESETS = (5, 10, 15, 30, 60, 120)
+
+
+def _clamp_interval(minutes) -> int:
+    """把间隔分钟数夹到合理范围。传 0/None 就用默认值。
+
+    夹的原因：太小会烦人（1 分钟提醒一次），太大就退化成「每天」了。
+    界面上的输入框可能被用户填任意数字，这里必须兜住。
+    """
+    try:
+        value = int(minutes)
+    except (TypeError, ValueError):
+        value = INTERVAL_DEFAULT_MINUTES
+    if value <= 0:
+        value = INTERVAL_DEFAULT_MINUTES
+    return max(INTERVAL_MIN_MINUTES, min(INTERVAL_MAX_MINUTES, value))
+
+
+def _repeat_text(item: dict) -> str:
+    """把重复方式说成人话，给列表和气泡用。"""
+    repeat = item.get("repeat", "once")
+    spec = str(item.get("time", "09:00"))
+    if repeat == "interval":
+        minutes = int(item.get("every") or INTERVAL_DEFAULT_MINUTES)
+        return f"每 {minutes} 分钟"
+    if repeat == "once":
+        day = item.get("date")
+        return f"{day} {spec}" if day else spec
+    if repeat == "daily":
+        return f"每天 {spec}"
+    if repeat == "weekdays":
+        return f"工作日 {spec}"
+    if repeat == "weekly":
+        return f"每周 {spec}"
+    return spec
 
 
 class ReminderModel(QAbstractListModel):
@@ -356,13 +404,7 @@ class ReminderModel(QAbstractListModel):
     def _next_text(item: dict) -> str:
         if not item.get("enabled", True):
             return "已关闭"
-        spec = str(item.get("time", "09:00"))
-        repeat = item.get("repeat", "once")
-        if repeat == "once":
-            day = item.get("date")
-            return f"{day} {spec}" if day else spec
-        return f"每天 {spec}" if repeat == "daily" else (
-            f"工作日 {spec}" if repeat == "weekdays" else f"每周 {spec}")
+        return _repeat_text(item)
 
     @Property(int, notify=countsChanged)
     def count(self) -> int:
@@ -396,8 +438,9 @@ class ReminderModel(QAbstractListModel):
                 return item
         return None
 
-    @Slot(str, str, str)
-    def add(self, title: str, when: str, repeat: str = "daily") -> None:
+    @Slot(str, str, str, int)
+    def add(self, title: str, when: str, repeat: str = "daily",
+            every: int = 0) -> None:
         title = (title or "").strip()
         if not title:
             return
@@ -409,7 +452,8 @@ class ReminderModel(QAbstractListModel):
         elif " " in time_part:
             date_part, _, time_part = time_part.partition(" ")
         time_part = time_part[:5] or "09:00"
-        self._store.reminders.append({
+
+        entry = {
             "id": new_id("r"),
             "title": title[:80],
             "time": time_part,
@@ -418,7 +462,12 @@ class ReminderModel(QAbstractListModel):
             "enabled": True,
             "last_fired": None,
             "created": time.time(),
-        })
+        }
+        if repeat == "interval":
+            entry["every"] = _clamp_interval(every)
+            # 间隔重复不看 time，界面上那个时间框会被藏起来
+            entry["date"] = None
+        self._store.reminders.append(entry)
         del self._store.reminders[:-200]
         self._touch()
 
@@ -435,17 +484,25 @@ class ReminderModel(QAbstractListModel):
         if item is None:
             return
         item["enabled"] = not item.get("enabled", True)
+        # **重新开启时把触发标记清掉。**
+        #
+        # 间隔重复靠 last_fired 算「距上次多久」，不清的话：关了一小时
+        # 再打开，会立刻触发一次（因为早就超过间隔了）。用户刚打开就被
+        # 提醒，像是程序没听他的话。
         item["last_fired"] = None
         self._touch()
 
-    @Slot(str, str, str)
-    def update(self, reminder_id: str, title: str, when: str) -> None:
+    @Slot(str, str, str, str, int)
+    def update(self, reminder_id: str, title: str, when: str,
+               repeat: str = "", every: int = 0) -> None:
+        """改一条提醒。**重复方式也可以改** —— 原来只能改标题和时间。"""
         item = self._find(reminder_id)
         if item is None:
             return
         title = (title or "").strip()
         if title:
             item["title"] = title[:80]
+
         date_part = None
         time_part = when or item.get("time", "09:00")
         if "T" in time_part:
@@ -453,8 +510,52 @@ class ReminderModel(QAbstractListModel):
         elif " " in time_part:
             date_part, _, time_part = time_part.partition(" ")
         item["time"] = time_part[:5] or "09:00"
-        if item.get("repeat") == "once" and date_part:
+
+        if repeat and repeat in REPEAT_LABEL and repeat != item.get("repeat"):
+            item["repeat"] = repeat
+            # 换了重复方式就要重新计时：原来「每天 09:00」的触发标记，
+            # 对「每 5 分钟」来说是个没有意义的时间戳。
+            item["last_fired"] = None
+        if item.get("repeat") == "interval":
+            item["every"] = _clamp_interval(every or item.get("every", 0))
+            item["date"] = None
+        elif item.get("repeat") == "once" and date_part:
             item["date"] = date_part
+        self._touch()
+
+    @Slot(str, int)
+    def snooze(self, reminder_id: str, minutes: int) -> None:
+        """「稍后提醒」：把这条压后 N 分钟再响一次。
+
+        实现方式是**临时把 last_fired 往前推**，让间隔判定在 N 分钟后再
+        满足一次 —— 没有引入新的状态字段。对固定时刻那几种（每天/工作日）
+        走不通（它们看的是 clock），所以那些直接改成一次性提醒，定在
+        N 分钟之后。
+
+        这是刻意的取舍：为了一个「稍后」按钮去改所有重复方式的语义，
+        不值得。一次性提醒的语义最直白 —— 用户点「稍后 10 分钟」，
+        就是「10 分钟后再提醒我一次」。
+        """
+        item = self._find(reminder_id)
+        if item is None:
+            return
+        minutes = max(1, min(24 * 60, int(minutes or 10)))
+
+        if item.get("repeat") == "interval":
+            # 把「上次触发」设成 N 分钟前 —— 那么再过 0 秒就到点了，
+            # 不对。要的是「从现在起 N 分钟后再触发」，
+            # 所以把 last_fired 设成「现在」往后推：让判定在 N 分钟后成立。
+            target = time.time() + minutes * 60
+            every = _clamp_interval(item.get("every", 0)) * 60
+            item["last_fired"] = target - every
+        else:
+            # 固定时刻那几种：改成「N 分钟之后的一次性提醒」
+            moment = datetime.now() + timedelta(minutes=minutes)
+            item["repeat"] = "once"
+            item["date"] = moment.strftime("%Y-%m-%d")
+            item["time"] = moment.strftime("%H:%M")
+            item["last_fired"] = None
+        item["enabled"] = True
         self._touch()
 
 

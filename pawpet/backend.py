@@ -289,6 +289,55 @@ class Backend(QObject):
 
         return theme_mod.editable_roles()
 
+    @Property("QVariantList", constant=True)
+    def repeatOptions(self) -> list:
+        """提醒的重复方式，给界面上的下拉用。
+
+        **从 models 里读，不在这里另写一份** —— 这个项目踩过「同一个说法
+        存两份」的坑（`_describe` 里硬编码过一份重复方式映射，加了新方式
+        之后列表和气泡显示不一致）。
+
+        每项是 {key, label, needsTime, needsInterval}：
+          needsTime     —— 要不要填「几点」（间隔重复不需要）
+          needsInterval —— 要不要填「每 N 分钟」
+        """
+        from .models import REPEAT_LABEL
+
+        order = ["once", "daily", "weekdays", "weekly", "interval"]
+        out = []
+        for key in order:
+            if key not in REPEAT_LABEL:
+                continue
+            out.append({
+                "key": key,
+                "label": REPEAT_LABEL[key],
+                "needsTime": key != "interval",
+                "needsInterval": key == "interval",
+            })
+        return out
+
+    @Property("QVariantList", constant=True)
+    def intervalPresets(self) -> list:
+        """常用间隔（分钟），界面上做成快捷按钮。"""
+        from .models import INTERVAL_PRESETS
+
+        return list(INTERVAL_PRESETS)
+
+    @Property("QVariantMap", constant=True)
+    def intervalLimits(self) -> dict:
+        """间隔的上下限，界面上用来卡输入范围。"""
+        from .models import (
+            INTERVAL_DEFAULT_MINUTES,
+            INTERVAL_MAX_MINUTES,
+            INTERVAL_MIN_MINUTES,
+        )
+
+        return {
+            "min": INTERVAL_MIN_MINUTES,
+            "max": INTERVAL_MAX_MINUTES,
+            "default": INTERVAL_DEFAULT_MINUTES,
+        }
+
     @Property(str, notify=themeChanged)
     def themeSummary(self) -> str:
         from . import theme as theme_mod

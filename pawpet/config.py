@@ -2,7 +2,9 @@
 
 三种运行形态，路径规则不同：
 
-1. **开发模式**（从源码跑）：数据放在项目根目录旁边，保持便携。
+1. **开发模式**（从源码跑）：新环境默认放在 `.cache/runtime`，避免把
+   用户数据和源码、打包产物混在一起；如果项目根目录已经有旧数据，继续
+   使用旧目录，保证升级不会让已有数据看起来“丢了”。
 2. **打包后的绿色版**（exe 旁边有 pet_data.json 或者可写）：
    数据放在 exe 旁边，仍然便携，可以塞进 U 盘带走。
 3. **打包后安装到 Program Files**：那里是只读的，数据必须放到
@@ -20,18 +22,32 @@ import os
 import sys
 from pathlib import Path
 
+from .version import APP_VERSION
+
 APP_NAME = "小爪助手"
 APP_ID = "PawPet"
-# **版本号唯一来源。** 别在别处再写一份（`pawpet/__init__.py` 里那个已删，
-# `tools/releasetest.py` 有断言禁止它回来）。`tools/build.py` 会把
-# `version.json` 同步成这个值，`tools/release.py` 拿它建 tag。
-APP_VERSION = "2.3.0"
 
 # 单实例：命名互斥体 + 本地命名管道（第二个实例通过管道让第一个实例显示面板）
 MUTEX_NAME = "Local\\PawPet.SingleInstance.v2"
 PIPE_NAME = "PawPet.SingleInstance.v2"
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = PACKAGE_DIR.parent
+
+# 源码开发模式以前把这些文件直接写到项目根目录。只要其中一个存在，
+# 就把它视为旧版开发数据，继续沿用根目录；否则新环境使用隔离目录。
+# `.cache` 本身不算旧数据，因为回归测试和构建工具本来就会创建它。
+_LEGACY_DEV_FILES = (
+    ".env",
+    "pet_data.json",
+    "pet_data.backup.json",
+    "conversations.json",
+    "conversations.jsonl",
+    "extensions.json",
+    "theme.json",
+    "mcp_servers.json",
+    "pawpet.log",
+)
 
 
 def is_frozen() -> bool:
@@ -86,9 +102,20 @@ def _resolve_data_dir() -> tuple[Path, Path, bool]:
             pass    # 指定的目录建不出来就退回默认逻辑
 
     if not is_frozen():
-        # 开发模式：就在项目目录旁边
-        root = PACKAGE_DIR.parent
-        return root, resources, True
+        # 可以显式指定源码开发数据目录，适合多份配置并存或 IDE 调试。
+        dev_override = os.environ.get("PAWPET_DEV_HOME", "").strip()
+        if dev_override:
+            target = Path(dev_override).expanduser()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                return target, resources, True
+            except OSError:
+                pass
+
+        # 新环境与源码分离；旧项目继续用根目录，避免数据迁移造成误解。
+        if any((PROJECT_DIR / name).exists() for name in _LEGACY_DEV_FILES):
+            return PROJECT_DIR, resources, True
+        return PROJECT_DIR / ".cache" / "runtime", resources, True
 
     exe_dir = _exe_dir()
 
@@ -242,9 +269,19 @@ def save_env_value(key: str, value: str, path: Path = ENV_FILE) -> bool:
             output.append("")
         output.append(f"{key}={value}")
 
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        path.write_text("\n".join(output) + "\n", encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(output) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
     except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
 
     if value:

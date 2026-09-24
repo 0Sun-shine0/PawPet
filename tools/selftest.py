@@ -97,6 +97,32 @@ def test_atomic_save(tmp: Path) -> None:
     check("备份是上一版内容", len(backup["tasks"]) == 1, f"实际 {len(backup['tasks'])}")
 
 
+def test_env_atomic_save(tmp: Path) -> None:
+    section(".env 原子保存")
+    from pawpet.config import save_env_value
+
+    path = tmp / "env" / ".env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# 保留这行\nTEST_KEY=旧值\n", encoding="utf-8")
+    previous = os.environ.get("TEST_KEY")
+    try:
+        check("首次写入 .env", save_env_value("TEST_KEY", "新值", path))
+        text = path.read_text(encoding="utf-8")
+        check("替换已有键且保留注释", "TEST_KEY=新值" in text and "# 保留这行" in text)
+        check("进程环境同步更新", os.environ.get("TEST_KEY") == "新值")
+        check("没有残留临时文件", not list(path.parent.glob(".env.*.tmp")))
+
+        check("清空键值成功", save_env_value("TEST_KEY", "", path))
+        check("清空键值不会继续泄露到环境变量", "TEST_KEY" not in os.environ)
+        check("清空后的键仍是合法 .env 行",
+              "TEST_KEY=\n" in path.read_text(encoding="utf-8"))
+    finally:
+        if previous is None:
+            os.environ.pop("TEST_KEY", None)
+        else:
+            os.environ["TEST_KEY"] = previous
+
+
 def test_recovery(tmp: Path) -> None:
     section("损坏文件回退到备份")
     sub = tmp / "recover"
@@ -435,6 +461,7 @@ def main() -> int:
     try:
         test_migration(scratch)
         test_atomic_save(scratch)
+        test_env_atomic_save(scratch)
         test_recovery(scratch)
         test_bom_tolerance(scratch)
         test_task_model(scratch)

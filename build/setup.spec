@@ -21,7 +21,7 @@ payload = ROOT / "build" / "payload.zip"
 
 a = Analysis(                         # noqa: F821
     [str(ROOT / "build" / "setup_ui.py")],
-    pathex=[str(ROOT / "build")],
+    pathex=[str(ROOT), str(ROOT / "build")],
     binaries=[],
     datas=[(str(payload), ".")] if payload.exists() else [],
     hiddenimports=[],

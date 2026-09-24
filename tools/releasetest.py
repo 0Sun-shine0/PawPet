@@ -330,6 +330,33 @@ def main() -> int:
     check("version.json 的版本号和代码里的一致",
           version_json.get("version") == APP_VERSION,
           f"version.json={version_json.get('version')!r} config={APP_VERSION!r}")
+    import ast
+    import runpy
+    from unittest.mock import patch
+    from pawpet import version as version_mod
+    from buildmeta import make_manifest, source_fingerprint, source_latest_mtime_ns
+
+    installer = runpy.run_path(str(ROOT / "build" / "setup_ui.py"))
+    check("安装器和主程序版本一致", installer["APP_VERSION"] == APP_VERSION)
+    with patch.object(version_mod, "APP_VERSION", "9.8.7"):
+        installer = runpy.run_path(str(ROOT / "build" / "setup_ui.py"))
+        builder = runpy.run_path(str(ROOT / "tools" / "build.py"))
+        check("共享版本变化后安装器同步", installer["APP_VERSION"] == "9.8.7")
+        check("共享版本变化后构建脚本同步", builder["VERSION"] == "9.8.7")
+    definitions = []
+    for folder in ("pawpet", "tools", "build"):
+        for source in (ROOT / folder).rglob("*.py"):
+            if any(part in ("__pycache__", "work", "setupwork") for part in source.parts):
+                continue
+            tree = ast.parse(source.read_text(encoding="utf-8-sig"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                    if any(isinstance(target, ast.Name) and target.id == "APP_VERSION"
+                           for target in node.targets):
+                        definitions.append(source.relative_to(ROOT).as_posix())
+    check("只有一个版本常量", definitions == ["pawpet/version.py"], str(definitions))
+    spec = (ROOT / "build" / "setup.spec").read_text(encoding="utf-8")
+    check("安装器打包包含共享版本搜索路径", 'pathex=[str(ROOT),' in spec)
     check("version.json 里有 url 字段（客户端要拿它当下载页）",
           bool(version_json.get("url")), str(version_json))
 
@@ -359,6 +386,16 @@ def main() -> int:
             if "__version__" in code and "=" in code and "APP_VERSION" not in code:
                 strays.append(f"{path.relative_to(ROOT)}:{lineno}")
     check("pawpet 包里没有第二份版本号定义", strays == [], str(strays))
+
+    manifest = make_manifest(ROOT, APP_VERSION)
+    check("构建清单版本来自共享版本", manifest.get("version") == APP_VERSION,
+          str(manifest))
+    check("构建清单源码指纹可复算",
+          manifest.get("source_fingerprint") == source_fingerprint(ROOT),
+          str(manifest.get("source_fingerprint")))
+    check("构建清单时间覆盖源码修改",
+          manifest.get("built_at_ns", 0) >= source_latest_mtime_ns(ROOT),
+          str(manifest))
 
     # ==================================================== 八、发版不许让仓库分叉
     #

@@ -140,7 +140,13 @@ def main() -> int:
     backend.aiMaxSteps = DEFAULT_MAX_STEPS
 
     print("\n=== QML 里没有写死的旧文案 ===")
-    qml_text = (QML_DIR / "PawPet" / "page" / "AiPage.qml").read_text(encoding="utf-8")
+    qml_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            QML_DIR / "PawPet" / "page" / "AiPage.qml",
+            QML_DIR / "PawPet" / "AiSettingsPanel.qml",
+        )
+    )
     check("界面文案不再写死 20 步", "20 步" not in qml_text)
     check("控件绑到了 backend.aiMaxSteps", "backend.aiMaxSteps" in qml_text)
     check("选项绑到了 backend.aiStepOptions", "backend.aiStepOptions" in qml_text)

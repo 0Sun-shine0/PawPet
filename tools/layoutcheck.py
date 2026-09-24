@@ -165,16 +165,16 @@ def main() -> int:
         else:
             card_h = 0
 
-        # 3. 对话区必须停在它自己声明的区间里（声明在 AiPage.qml 里是
-        #    Layout.preferredHeight: 320 / Layout.minimumHeight: 220）。
+        # 3. 现成任务卡片显示时，对话区必须停在它自己声明的区间里（声明在
+        #    AiPage.qml 里是 Layout.preferredHeight: 320 / Layout.minimumHeight: 220）。
         #
         #    当初那个 bug 就是它跑到了 995px —— 比整个列（562px）还高，
         #    把别的卡片全顶出去了。所以直接钉它落在这个窗口里，比钉一个
         #    「整列不超过 N px」靠谱：那个 N 是拍脑袋定的，内容一多就误报。
         if chat is not None:
             check(f"{width}x{height}：对话区高度锁在声明的区间里（220~320）",
-                  220 - 2 <= card_h <= 320 + 2,
-                  f"实际 {card_h:.0f}px —— 它应该由 preferredHeight/minimumHeight 定死")
+                   220 - 2 <= card_h <= 320 + 2,
+                   f"实际 {card_h:.0f}px —— 它应该由 preferredHeight/minimumHeight 定死")
 
         # 4. 列高必须**正好**等于各卡片高度之和（含间距）—— 多出来的那一截
         #    只可能来自某张卡片被拉伸，这正是上面那个 bug 的成因。
@@ -200,6 +200,44 @@ def main() -> int:
 
         print(f"     {width}x{height}: 视口 {viewport_h:.0f} 内容 {content_h:.0f} "
               f"列 {col_h:.0f} 对话区 {card_h:.0f}")
+
+    # ---------------------------------------------------------- 收起现成任务
+    # 用户截图里的状态是「现成任务」已经收起：这时对话卡片是右栏里
+    # 唯一的主要内容，不能仍然只保留 320px，否则卡片下面会露出一大片
+    # 没有容器背景的空白。对话卡片应填满滚动视口，窗口变窄时则允许
+    # 依靠自己的最小高度产生滚动，但不能和输入区或其他卡片重叠。
+    print("\n=== 现成任务收起：对话区填满可用空间 ===")
+    backend.setProperty("aiTemplatesHidden", True)
+    app.processEvents()
+    app.processEvents()
+    template = page.findChild(QObject, "templateCard", Qt.FindChildrenRecursively)
+    chat_card_obj = page.findChild(QObject, "chatCard", Qt.FindChildrenRecursively)
+    for width, height in ((908, 590), (1400, 900), (860, 470)):
+        host.setProperty("pw", width)
+        host.setProperty("ph", height)
+        app.processEvents()
+        app.processEvents()
+        scroll = page.findChild(QObject, "rightScroll", Qt.FindChildrenRecursively)
+        if template is None or chat_card_obj is None or scroll is None:
+            check(f"{width}x{height}：收起状态对象齐全", False,
+                  "缺少 templateCard / chatCard / rightScroll")
+            continue
+        viewport_h = float(scroll.property("height") or 0)
+        content_h = float(scroll.property("contentHeight") or 0)
+        chat_bottom = (float(chat_card_obj.property("y") or 0)
+                       + float(chat_card_obj.property("height") or 0))
+        check(f"{width}x{height}：现成任务确实隐藏",
+              not bool(template.property("visible")))
+        check(f"{width}x{height}：对话卡片填到视口底部",
+              chat_bottom >= viewport_h - 2,
+              f"卡片底部 {chat_bottom:.0f} vs 视口 {viewport_h:.0f}")
+        check(f"{width}x{height}：收起状态没有额外空白内容高度",
+              content_h >= viewport_h - 2,
+              f"contentHeight={content_h:.0f} 视口={viewport_h:.0f}")
+
+    backend.setProperty("aiTemplatesHidden", False)
+    app.processEvents()
+    app.processEvents()
 
     print("\n=== 左栏不该无脑占满 ===")
     host.setProperty("pw", 1400)

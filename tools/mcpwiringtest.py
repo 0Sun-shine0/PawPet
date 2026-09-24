@@ -221,6 +221,8 @@ def main() -> int:
     print("\n=== 六、界面接了（缺口 1 的另一半）===")
     qml = (ROOT / "pawpet" / "qml" / "PawPet" / "page" / "AiPage.qml").read_text(
         encoding="utf-8")
+    qml += "\n" + (ROOT / "pawpet" / "qml" / "PawPet" / "AiMcpPanel.qml").read_text(
+        encoding="utf-8")
     for api in ("backend.ai.mcpEnabled", "backend.ai.mcpServers",
                 "backend.ai.connectMcp()", "backend.ai.disconnectMcp()",
                 "backend.ai.mcpConfigPath", "backend.ai.mcpHint()"):

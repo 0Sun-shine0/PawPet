@@ -51,6 +51,8 @@ def make_data_dir(root: pathlib.Path) -> None:
         json.dumps({"accent": "#ff0000"}), encoding="utf-8")
     (root / "conversations.json").write_text(
         json.dumps({"conversations": []}, ensure_ascii=False), encoding="utf-8")
+    (root / "conversations.jsonl").write_text(
+        '{"op":"upsert","session":{"id":"journal"}}\n', encoding="utf-8")
 
     # 这个**必须不能**进包
     (root / ".env").write_text(
@@ -82,6 +84,7 @@ check("含 pet_data.json", "pet_data.json" in names, str(names))
 check("含 extensions.json", "extensions.json" in names)
 check("含 theme.json", "theme.json" in names)
 check("含 conversations.json", "conversations.json" in names)
+check("含 conversations.jsonl 追加日志", "conversations.jsonl" in names)
 check("含 manifest", dt.MANIFEST_NAME in names)
 check("*** .env 不在包里（API Key 不泄露）", ".env" not in names, str(names))
 check("不含日志/缓存", ".cache/ai-actions.log" not in names, str(names))
@@ -170,6 +173,27 @@ check("备份里是导入前的旧数据（能捞回来）",
       str(old.get("tasks")))
 check("导入没有带来 .env", not (data / ".env").read_text(encoding="utf-8").startswith("PAWPET")
       or (data / ".env").read_text(encoding="utf-8").startswith("PAWPET"))
+check("追加日志随新格式备份一起导入",
+      (data / "conversations.jsonl").exists())
+
+legacy_bundle = work / "legacy.zip"
+legacy_files = [name for name in dt.BUNDLE_FILES if name != "conversations.jsonl"]
+legacy_manifest = {
+    "format": dt.FORMAT_VERSION,
+    "appVersion": "2.0.0",
+    "schema": 2,
+    "files": legacy_files,
+    "counts": {},
+}
+with zipfile.ZipFile(legacy_bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+    zf.writestr(dt.MANIFEST_NAME, json.dumps(legacy_manifest))
+    for name in legacy_files:
+        zf.write(data / name, name)
+(data / "conversations.jsonl").write_text("stale\n", encoding="utf-8")
+legacy_ok, legacy_message = dt.import_bundle(data, legacy_bundle)
+check("旧格式快照导入成功", legacy_ok, legacy_message)
+check("导入旧格式快照时清掉残留追加日志",
+      not (data / "conversations.jsonl").exists())
 
 print()
 print("=== 6. 空数据目录的边界 ===")

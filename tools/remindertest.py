@@ -302,10 +302,37 @@ def main() -> int:
     check("有稍后提醒菜单", "snoozeMenu" in qml and "snooze" in qml)
 
     # 溢出：悬停按钮用浮层，不参与 RowLayout 的宽度分配
+    #
+    # 这条断言改过一次。原来检查的是 `anchors.right: parent.right` +
+    # `anchors.rightMargin: 42` —— 但那种写法把带锚点的 Row 放在了
+    # RowLayout **里面**，Qt 会警告
+    # 「Detected anchors on an item that is managed by a layout.
+    #  This is undefined behavior」（冒烟测试报出来了）。
+    #
+    # 现在浮层挂在 delegate 根节点下、锚到开关左边。所以断言要检查的是
+    # **它不在 RowLayout 里**，而不是某个具体坐标。
     check("稍后/改 按钮用浮层定位（不挤走开关）",
-          "anchors.right: parent.right" in qml
-          and "anchors.rightMargin: 42" in qml,
-          "塞进 RowLayout 的话窄窗口下开关会被挤出卡片")
+          "anchors.right: enabledSwitch.left" in qml,
+          "锚到开关左边：既不参与布局分配，也不跟布局抢位置")
+    check("浮层挂在 delegate 根节点下（不在 RowLayout 里）",
+          "id: enabledSwitch" in qml,
+          "要能锚到开关，开关就得有 id")
+
+    # 那条 anchors-on-layout 警告本身也钉一下：浮层行必须在 RowLayout
+    # 闭合之后。用缩进深度判断太脆，这里检查「Row {」出现在
+    # RowLayout 的闭合大括号之后 —— 简单做法是确认浮层块的缩进比
+    # RowLayout 深度的下一层更浅（即和 RowLayout 同级）。
+    lines = qml.splitlines()
+    row_layout_line = next((i for i, ln in enumerate(lines)
+                            if "RowLayout {" in ln
+                            and "anchors.fill: parent" in "\n".join(
+                                lines[i:i + 3])), None)
+    overlay_line = next((i for i, ln in enumerate(lines)
+                         if "anchors.right: enabledSwitch.left" in ln), None)
+    check("浮层在 RowLayout 之外（避免 undefined behavior）",
+          row_layout_line is not None and overlay_line is not None
+          and overlay_line > row_layout_line,
+          f"RowLayout 在第 {row_layout_line} 行附近，浮层在第 {overlay_line} 行")
     check("快捷间隔按钮会跟着宽度收缩",
           "readonly property real slot" in qml,
           "写死宽度时 6 个按钮在窄窗口下溢出")

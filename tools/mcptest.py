@@ -143,6 +143,34 @@ def main() -> int:
     ok, text = client.call_tool("boom", {})
     check("工具报错时 isError 被识别", not ok and "报错" in text, text)
 
+    # 同时发多个请求，确认每个 request id 都等自己的响应，
+    # 不会因为共享一个事件而串响应、提前唤醒或互相超时。
+    from concurrent.futures import ThreadPoolExecutor
+
+    def call_echo(index: int) -> tuple[bool, str]:
+        return client.call_tool("echo", {"text": f"并发-{index}"})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        concurrent_results = list(pool.map(call_echo, range(8)))
+    check("并发 MCP 请求各自收到正确响应",
+          all(ok2 and text2 == f"echo: 并发-{index}"
+              for index, (ok2, text2) in enumerate(concurrent_results)),
+          str(concurrent_results))
+
+    # 连接会随设置开关反复切换，连续重连不能留下死进程或失去工具。
+    restart_ok = True
+    restart_message = ""
+    for index in range(20):
+        client.stop()
+        restart_ok, restart_message = client.start()
+        if not restart_ok:
+            break
+        if len(client.tools) != 2:
+            restart_ok = False
+            restart_message = f"第 {index + 1} 次工具数为 {len(client.tools)}"
+            break
+    check("连续 20 次断开重连仍正常", restart_ok, restart_message)
+
     # ---------------------------------------------------------------- 二
     print("\n=== 二、工具真的进了给模型的清单（这是原来断掉的地方）===")
     plain = openai_tools()

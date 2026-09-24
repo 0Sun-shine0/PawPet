@@ -165,8 +165,10 @@ class MCPClient:
         self._next_id = 0
         self._lock = threading.Lock()
         self._responses: dict[int, dict] = {}
-        self._event = threading.Event()
+        self._waiters: dict[int, threading.Event] = {}
+        self._write_lock = threading.Lock()
         self._reader: threading.Thread | None = None
+        self._stderr_reader: threading.Thread | None = None
         self._stderr_lines: list[str] = []
         self.last_error = ""
         self._atexit_done = False
@@ -196,6 +198,14 @@ class MCPClient:
             return False, "没有配置启动命令"
         if self.running:
             return True, "已经在运行"
+        if self.process is not None:
+            self.stop()
+
+        with self._lock:
+            self._responses.clear()
+            self._waiters.clear()
+            self._stderr_lines.clear()
+            self.last_error = ""
 
         try:
             self.process = subprocess.Popen(
@@ -225,9 +235,15 @@ class MCPClient:
         # subprocess 相关对象那时可能已经不可用了。
         self._register_atexit_cleanup()
 
-        self._reader = threading.Thread(target=self._read_stdout, name=f"mcp-{self.name}", daemon=True)
+        process = self.process
+        self._reader = threading.Thread(
+            target=self._read_stdout, args=(process,),
+            name=f"mcp-{self.name}", daemon=True)
         self._reader.start()
-        threading.Thread(target=self._drain_stderr, name=f"mcp-err-{self.name}", daemon=True).start()
+        self._stderr_reader = threading.Thread(
+            target=self._drain_stderr, args=(process,),
+            name=f"mcp-err-{self.name}", daemon=True)
+        self._stderr_reader.start()
 
         try:
             result = self._request("initialize", {
@@ -244,27 +260,49 @@ class MCPClient:
 
         ok, payload = self.refresh_tools()
         if not ok:
+            self.stop()
             return False, payload
         return True, f"已连接，{len(self.tools)} 个工具"
 
     def stop(self) -> None:
-        process = self.process
-        self.process = None
-        if process is None:
-            return
-        try:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-        except OSError:
-            pass
+        with self._lock:
+            process = self.process
+            self.process = None
+            waiters = list(self._waiters.values())
+            self._waiters.clear()
+            self._responses.clear()
+        for waiter in waiters:
+            waiter.set()
+
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+
+        current = threading.current_thread()
+        for thread in (self._reader, self._stderr_reader):
+            if thread is not None and thread is not current:
+                thread.join(timeout=1.5)
+        self._reader = None
+        self._stderr_reader = None
 
     # ---------------------------------------------------------------- IO 线程
-    def _read_stdout(self) -> None:
-        stream = self.process.stdout if self.process else None
+    def _read_stdout(self, process: subprocess.Popen | None = None) -> None:
+        stream = process.stdout if process else None
         if stream is None:
             return
         try:
@@ -280,34 +318,45 @@ class MCPClient:
                 message_id = message.get("id")
                 if message_id is None:
                     continue    # 通知，暂时不处理
+                try:
+                    message_id = int(message_id)
+                except (TypeError, ValueError):
+                    continue
                 with self._lock:
-                    self._responses[int(message_id)] = message
-                self._event.set()
+                    waiter = self._waiters.get(message_id)
+                    if waiter is not None:
+                        self._responses[message_id] = message
+                if waiter is not None:
+                    waiter.set()
         except (OSError, ValueError):
             pass
 
-    def _drain_stderr(self) -> None:
-        stream = self.process.stderr if self.process else None
+    def _drain_stderr(self, process: subprocess.Popen | None = None) -> None:
+        stream = process.stderr if process else None
         if stream is None:
             return
         try:
             for line in stream:
                 text = line.strip()
                 if text:
-                    self._stderr_lines.append(text)
-                    del self._stderr_lines[:-40]
+                    with self._lock:
+                        self._stderr_lines.append(text)
+                        del self._stderr_lines[:-40]
         except (OSError, ValueError):
             pass
 
     # ------------------------------------------------------------------ 协议
     def _send(self, payload: dict) -> None:
-        if not self.running or self.process is None or self.process.stdin is None:
-            raise MCPError("MCP server 没有在运行")
-        try:
-            self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            self.process.stdin.flush()
-        except (OSError, ValueError) as exc:
-            raise MCPError(f"写入 MCP 失败：{exc}") from exc
+        with self._write_lock:
+            process = self.process
+            if (process is None or process.poll() is not None
+                    or process.stdin is None):
+                raise MCPError("MCP server 没有在运行")
+            try:
+                process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                process.stdin.flush()
+            except (OSError, ValueError) as exc:
+                raise MCPError(f"写入 MCP 失败：{exc}") from exc
 
     def _notify(self, method: str, params: dict) -> None:
         try:
@@ -316,31 +365,47 @@ class MCPClient:
             pass
 
     def _request(self, method: str, params: dict) -> dict:
-        self._next_id += 1
-        request_id = self._next_id
-        self._event.clear()
-        self._send({
-            "jsonrpc": "2.0", "id": request_id, "method": method, "params": params,
-        })
+        with self._lock:
+            self._next_id += 1
+            request_id = self._next_id
+            waiter = threading.Event()
+            self._waiters[request_id] = waiter
 
-        deadline = time.time() + self.timeout
-        while time.time() < deadline:
+        try:
+            self._send({
+                "jsonrpc": "2.0", "id": request_id,
+                "method": method, "params": params,
+            })
+        except MCPError:
             with self._lock:
-                message = self._responses.pop(request_id, None)
-            if message is not None:
-                if "error" in message:
-                    error = message["error"]
-                    raise MCPError(f"{method} 出错：{error.get('message', error)}")
-                return message.get("result") or {}
+                self._waiters.pop(request_id, None)
+                self._responses.pop(request_id, None)
+            raise
 
-            if not self.running:
-                detail = self._stderr_lines[-1] if self._stderr_lines else "进程已退出"
-                raise MCPError(f"MCP server 意外退出：{detail}")
+        deadline = time.monotonic() + self.timeout
+        try:
+            while True:
+                with self._lock:
+                    message = self._responses.pop(request_id, None)
+                if message is not None:
+                    if "error" in message:
+                        error = message["error"]
+                        raise MCPError(f"{method} 出错：{error.get('message', error)}")
+                    return message.get("result") or {}
 
-            self._event.wait(0.15)
-            self._event.clear()
+                if not self.running:
+                    with self._lock:
+                        detail = self._stderr_lines[-1] if self._stderr_lines else "进程已退出"
+                    raise MCPError(f"MCP server 意外退出：{detail}")
 
-        raise MCPError(f"{method} 超时（{self.timeout} 秒）")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MCPError(f"{method} 超时（{self.timeout} 秒）")
+                waiter.wait(remaining)
+        finally:
+            with self._lock:
+                self._waiters.pop(request_id, None)
+                self._responses.pop(request_id, None)
 
     # ------------------------------------------------------------------ 工具
     def refresh_tools(self) -> tuple[bool, str]:

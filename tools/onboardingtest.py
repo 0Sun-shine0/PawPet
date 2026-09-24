@@ -176,6 +176,30 @@ def main() -> int:
         check("还没有新版时不显示更新提示",
               backend.property("updateAvailable") is False)
 
+        section("更新失败不能伪装成最新")
+        backend._latest = {}
+        backend._update_checking = True
+        backend._update_pending = {
+            "result": {"ok": False, "found": None},
+            "manual": False,
+        }
+        backend._drain_update()
+        check("失败结果被记录",
+              store.settings.get("update_last_check_ok") is False)
+        check("失败后不显示已是最新",
+              "失败" in backend.property("updateStatus"),
+              backend.property("updateStatus"))
+
+        backend._update_checking = True
+        backend._update_pending = {
+            "result": {"ok": True, "found": None},
+            "manual": False,
+        }
+        backend._drain_update()
+        check("成功且无新版才显示已是最新",
+              backend.property("updateStatus") == "已是最新版本",
+              backend.property("updateStatus"))
+
         section("跳过某个版本之后就不再提示它")
         backend._latest = {"version": "9.9.9", "url": "https://example.com", "note": "测试"}
         check("这时提示有新版本", backend.property("updateAvailable") is True)

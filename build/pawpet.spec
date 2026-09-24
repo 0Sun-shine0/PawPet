@@ -46,6 +46,12 @@ datas = [
     *[(str(p), "mcp_servers") for p in sorted((ROOT / "mcp_servers").glob("*.py"))],
 ]
 
+# build.py 会在打包前生成它。直接调用 spec 时文件可能不存在，
+# 这时仍允许 PyInstaller 先完成普通构建；正式产物由 packtest 拦住缺清单。
+_build_info = ROOT / "build" / "build_info.json"
+if _build_info.exists():
+    datas.append((str(_build_info), "."))
+
 # AI 的可选依赖不写进 datas，交给 PyInstaller 自己分析 import 关系带上。
 # 手动塞整个 site-packages 目录会把 cv2 的 112MB 重复打进去（它还会被
 # 自动分析再收一次），而且会把测试数据和文档一起拖进来。
@@ -101,6 +107,18 @@ a = Analysis(                       # noqa: F821
     noarchive=False,
     optimize=0,
 )
+
+# Qt6Core imports the generic `icuuc.dll` name.  In this environment PyInstaller
+# can see an unrelated Poppler/ICU 78 installation through PATH and copy that
+# DLL into the bundle.  Its exports are version-suffixed (`ucnv_open_78`, ...),
+# while Qt expects the Windows ICU exports without a suffix; the frozen app then
+# fails before `PySide6.QtCore` can import with WinError 127.  PySide6 loads the
+# compatible system ICU on Windows, so do not ship the unrelated pair.
+_external_icu = {"icuuc.dll", "icudt78.dll"}
+a.binaries = [
+    item for item in a.binaries
+    if Path(item[0]).name.lower() not in _external_icu
+]
 
 pyz = PYZ(a.pure)                   # noqa: F821
 

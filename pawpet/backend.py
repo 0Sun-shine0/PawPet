@@ -6,10 +6,13 @@ QML 只能看到这个对象。它是唯一允许改数据的地方，并且每�
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
@@ -17,7 +20,16 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from . import win32
 from .ai.controller import AiController
 from .ai.markdown import to_plain
-from .config import APP_NAME, APP_VERSION, ROOT, THEME_FILE
+from .config import (
+    APP_NAME,
+    APP_VERSION,
+    PACKAGE_DIR,
+    QML_DIR,
+    RESOURCE_DIR,
+    ROOT,
+    THEME_FILE,
+    is_frozen,
+)
 from .focus import FocusEngine
 from .models import NoteModel, ReminderModel, SessionModel, TaskModel, WeekModel
 from .reminders import ReminderEngine
@@ -153,6 +165,7 @@ class Backend(QObject):
         self._last_clock = ""
         self._upcoming: list[str] = []
         self._last_save = 0.0
+        self._started_at = datetime.now().astimezone()
         self._dashboard_visible = False
         self._command_bar_visible = False
         self._pet_visible = True
@@ -595,6 +608,8 @@ class Backend(QObject):
             last = float(self._store.settings.get("update_last_check") or 0.0)
             if last <= 0:
                 return ""       # 还没查过，不显示任何东西
+            if not bool(self._store.settings.get("update_last_check_ok", False)):
+                return "上次检查失败，请稍后重试"
             return "已是最新版本"
         version = str(self._latest.get("version") or "")
         if not self.updateAvailable:
@@ -648,10 +663,14 @@ class Backend(QObject):
         self._update_checking = False
 
         result = pending.get("result") or {}
-        found = result.get("found")
-        self._latest = found if isinstance(found, dict) else {}
+        ok = bool(result.get("ok"))
+        if ok:
+            found = result.get("found")
+            self._latest = found if isinstance(found, dict) else {}
 
         self._store.settings["update_last_check"] = time.time()
+        self._store.settings["update_last_check_ok"] = ok
+        self.flush()
         self.updateChecked.emit()
 
         # 手动检查必须有回音 —— 点了按钮什么都不发生，用户会以为坏了。
@@ -1010,6 +1029,16 @@ class Backend(QObject):
             lines.append(f"解释器：{executable}")
         lines.append(f"执行步数：{self.ai.maxSteps} 步")
         lines.append("记忆：" + ("已开启" if self.ai.memoryEnabled else "已关闭"))
+        manifest = self._build_manifest()
+        if frozen and manifest:
+            lines.append(
+                f"构建：{manifest.get('built_at_utc', '未知')} · "
+                f"指纹 {manifest.get('source_fingerprint', '未知')}"
+            )
+        elif frozen:
+            lines.append("构建：未找到构建清单（可能是旧包，请重新打包）")
+        else:
+            lines.append("构建：源码工作区（未打包）")
         try:
             from .ai import uia
 
@@ -1017,6 +1046,18 @@ class Backend(QObject):
         except Exception:  # noqa: BLE001
             lines.append("界面元素：不可用")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_manifest() -> dict:
+        """读取打包时随 exe 带走的清单，源码运行时不读取旧构建信息。"""
+        if not is_frozen():
+            return {}
+        path = RESOURCE_DIR / "build_info.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     @Slot()
     def showCommandBar(self) -> None:
@@ -1580,7 +1621,12 @@ class Backend(QObject):
 
     @Slot()
     def openReadme(self) -> None:
-        target = ROOT / "README.md"
+        if is_frozen():
+            target = RESOURCE_DIR / "使用说明.md"
+            if not target.exists():
+                target = RESOURCE_DIR / "README.md"
+        else:
+            target = PACKAGE_DIR.parent / "README.md"
         if target.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
@@ -1851,10 +1897,30 @@ class Backend(QObject):
 
     @Slot(result=str)
     def runtimeInfo(self) -> str:
-        import sys
+        source = "打包版 exe" if is_frozen() else "源码"
+        executable = str(Path(sys.executable).resolve()) if sys.executable else "未知"
+        entry = (str(Path(sys.argv[0]).resolve())
+                 if sys.argv and sys.argv[0] else executable)
+        manifest = self._build_manifest()
+        if manifest:
+            build = (f"{manifest.get('built_at_utc', '未知')} · "
+                     f"指纹 {manifest.get('source_fingerprint', '未知')}")
+        elif is_frozen():
+            build = "未找到清单（可能是旧包，请重新打包）"
+        else:
+            build = "源码工作区（未打包）"
 
-        return (f"Python {sys.version.split()[0]} · 数据文件 {self._store.path.name} · "
-                f"进程 {os.getpid()}")
+        return "\n".join((
+            f"版本：{APP_VERSION}（{source}）",
+            f"构建：{build}",
+            f"Python {sys.version.split()[0]}",
+            f"入口：{entry}",
+            f"解释器：{executable}",
+            f"QML：{QML_DIR.resolve()}",
+            f"数据文件：{self._store.path.resolve()}",
+            f"进程：{os.getpid()}",
+            f"启动：{self._started_at:%Y-%m-%d %H:%M:%S %z}",
+        ))
 
     @Slot()
     def restart(self) -> None:
@@ -1863,8 +1929,14 @@ class Backend(QObject):
         import sys
 
         try:
-            subprocess.Popen([sys.executable, str(ROOT / "run_pawpet.py")],
-                             cwd=str(ROOT), close_fds=True)
+            if is_frozen():
+                command = [sys.executable]
+                cwd = str(Path(sys.executable).resolve().parent)
+            else:
+                entry = PACKAGE_DIR.parent / "run_pawpet.py"
+                command = [sys.executable, str(entry)]
+                cwd = str(entry.parent)
+            subprocess.Popen(command, cwd=cwd, close_fds=True)
         except OSError:
             pass
         self.quit()

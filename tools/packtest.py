@@ -26,7 +26,15 @@ import sys
 import time
 from pathlib import Path
 
+from console import configure_utf8
+from buildmeta import source_fingerprint, source_latest_mtime_ns
+
+configure_utf8()
+
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from pawpet.version import APP_VERSION  # noqa: E402
+
 PASSED = 0
 FAILED: list[str] = []
 
@@ -74,9 +82,69 @@ def main() -> int:
     check("有 Qt 运行库", (app_dir / "_internal").exists() or (app_dir / "PySide6").exists(),
           str([p.name for p in app_dir.iterdir()][:8]))
 
+    # 版本号相同也可能是旧包：源码改了但忘了重新打包，用户就会继续运行旧逻辑。
+    # build.py 写入的清单带源码指纹，必须和当前工作区完全一致。
+    manifest_candidates = (
+        app_dir / "build_info.json",
+        app_dir / "_internal" / "build_info.json",
+    )
+    manifest_path = next((path for path in manifest_candidates if path.is_file()), None)
+    check("产物包含构建清单", manifest_path is not None,
+          str(manifest_candidates[-1]))
+    manifest: dict = {}
+    if manifest_path is not None:
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  [XX] 构建清单无法读取：{exc}")
+    if manifest:
+        expected_fingerprint = source_fingerprint(ROOT)
+        expected_mtime = source_latest_mtime_ns(ROOT)
+        check("产物版本与源码一致", manifest.get("version") == APP_VERSION,
+              f"产物={manifest.get('version')!r} 源码={APP_VERSION!r}")
+        check("产物源码指纹与当前源码一致",
+              manifest.get("source_fingerprint") == expected_fingerprint,
+              f"产物={manifest.get('source_fingerprint')!r} 当前={expected_fingerprint!r}")
+        try:
+            built_at_ns = int(manifest.get("built_at_ns") or 0)
+        except (TypeError, ValueError):
+            built_at_ns = 0
+        check("构建时间不早于源码最新修改",
+              built_at_ns >= expected_mtime,
+              f"构建={manifest.get('built_at_ns')} 源码={expected_mtime}")
+
     qml_files = list(app_dir.rglob("Main.qml"))
     check("QML 资源已打进包里", len(qml_files) > 0,
           f"找到 {len(qml_files)} 个 Main.qml")
+
+    # Main.qml 存在只能说明 QML 目录没有完全丢失；类型模块里的某个新组件
+    # 仍可能漏进旧包，直到用户打开对应页面才暴露。这里钉住源码运行所需的
+    # 自定义组件，尤其是从 AiPage 拆出来的组件。
+    required_qml = (
+        "qmldir",
+        "AiHistoryPanel.qml",
+        "AiSettingsPanel.qml",
+        "AiMcpPanel.qml",
+        "PermissionCard.qml",
+    )
+    missing_qml = [
+        name for name in required_qml
+        if not any(path.name == name for path in app_dir.rglob(name))
+    ]
+    check("关键自定义 QML 组件都已打进包里", not missing_qml,
+          str(missing_qml))
+
+    # Qt6Core expects the Windows ICU exports without a version suffix.  A
+    # Poppler installation on PATH can make PyInstaller collect ICU 78, whose
+    # `ucnv_open_78` symbols are incompatible with Qt's `ucnv_open` imports.
+    # The frozen app must rely on the system ICU instead.
+    bundled_icu = [
+        path.name for name in ("icuuc.dll", "icudt78.dll")
+        for path in app_dir.rglob(name)
+    ]
+    check("产物没有混入不兼容的外部 ICU DLL", not bundled_icu,
+          str(bundled_icu))
 
     # -------------------------------------------------- 隐私：别把本机数据发出去
     #
@@ -95,7 +163,7 @@ def main() -> int:
     print("\n隐私：产物里不该有本机数据…")
     PERSONAL = [
         "pet_data.json", "pet_data.backup.json", "extensions.json",
-        "extensions.removed.json", "conversations.json", "theme.json",
+        "extensions.removed.json", "conversations.json", "conversations.jsonl", "theme.json",
         ".env", "ai-actions.log",
     ]
     leaked_files: list[str] = []

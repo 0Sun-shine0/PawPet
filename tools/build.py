@@ -28,21 +28,23 @@ import time
 import zipfile
 from pathlib import Path
 
+from console import configure_utf8
+from buildmeta import write_manifest
+
+configure_utf8()
+
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from pawpet.version import APP_VERSION as VERSION
+
 VENV = ROOT / ".venv"
 PYTHON = VENV / "Scripts" / "python.exe"
 PYINSTALLER = VENV / "Scripts" / "pyinstaller.exe"
 BUILD_DIR = ROOT / "build"
 DIST_DIR = ROOT / "dist"
+BUILD_INFO = BUILD_DIR / "build_info.json"
 SPEC = BUILD_DIR / "pawpet.spec"
 SETUP_SPEC = BUILD_DIR / "setup.spec"
-
-# 版本号从代码里读，避免两处各写一份、改一处忘一处
-try:
-    sys.path.insert(0, str(ROOT))
-    from pawpet.config import APP_VERSION as VERSION  # noqa: E402
-except Exception:  # noqa: BLE001 - 读不到就退回硬编码值
-    VERSION = "2.1.0"
 
 
 def log(message: str) -> None:
@@ -114,6 +116,17 @@ def sync_version_file() -> str:
     if previous:
         return f"  [ok] version.json：{previous} → {VERSION}（记得连同它一起提交）"
     return f"  [ok] version.json：新建，版本 {VERSION}"
+
+
+def write_build_info() -> str:
+    """写入随包清单，防止同版本旧包被误当成最新构建。"""
+    try:
+        manifest = write_manifest(BUILD_INFO, ROOT, VERSION)
+    except OSError as exc:
+        return f"  [XX] 构建清单写不进去（{exc}）"
+    return (f"  [ok] 构建清单：{manifest['build_id']} · "
+            f"源码 {manifest['source_fingerprint']} · "
+            f"{manifest['source_file_count']} 个文件")
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 1800) -> int:
@@ -290,6 +303,11 @@ def main() -> int:
     for stale in (DIST_DIR / "PawPet", BUILD_DIR / "PawPet"):
         if stale.exists():
             shutil.rmtree(stale, ignore_errors=True)
+
+    build_info_status = write_build_info()
+    log(build_info_status)
+    if build_info_status.startswith("  [XX]"):
+        return 1
 
     cmd = [PYINSTALLER, "--noconfirm", "--clean", "--distpath", DIST_DIR,
            "--workpath", BUILD_DIR / "work", SPEC]

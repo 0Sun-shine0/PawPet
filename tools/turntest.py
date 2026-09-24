@@ -168,6 +168,27 @@ def main() -> int:
         pump(0.05)
         check("过期的 finished 不会把新一轮标记成结束",
               controller.running, "running 被上一轮清掉了")
+
+        # 兼容接口可能在工具执行后返回空正文：界面仍必须有明确收尾，
+        # 不能只留下动作卡片。
+        controller._apply_event(
+            StepEvent(kind="tool", tool="run_command", text="执行命令"),
+            second_turn)
+        controller._apply_finished("", "", second_turn)
+        pump(0.05)
+        last = controller.messages[-1] if controller.messages else {}
+        check("工具执行后没有正文时仍显示收尾提示",
+              last.get("role") == "assistant"
+              and "没有返回总结" in (last.get("text") or ""),
+              str(last))
+        count_after_fallback = len(controller.messages)
+        # 连接测试等非任务完成信号也可能没有正文，不能沿用上一轮的
+        # 工具状态再补一条收尾。
+        controller._apply_finished("", "", second_turn)
+        pump(0.05)
+        check("非任务完成信号不会重复补收尾",
+              len(controller.messages) == count_after_fallback,
+              f"{count_after_fallback} -> {len(controller.messages)}")
     finally:
         controller.shutdown()
 

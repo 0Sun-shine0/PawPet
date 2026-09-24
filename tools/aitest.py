@@ -104,8 +104,9 @@ def main() -> int:
         command_rejection,
     )
     from pawpet.ai.agent import AgentRunner, StepEvent
-    from pawpet.ai.client import AIClient, ChatReply, ToolCall
+    from pawpet.ai.client import AIClient, AiError, ChatReply, ToolCall
     from pawpet.ai.tools import TOOLS, TOOL_INDEX, ToolContext, openai_tools
+    from pawpet.ai.tool_specs import TOOLS as CATALOG_TOOLS
     from pawpet.ai.vision import ScreenCapture, downscale_png
     from pawpet.store import Store
 
@@ -167,6 +168,30 @@ def main() -> int:
     check("完全自动下命令免审批", actions.needs_approval(Risk.DANGER) is False)
     actions.level = LEVEL_CONFIRM
 
+    section("高权限升级确认")
+    from PySide6.QtCore import QCoreApplication
+    from pawpet.ai.controller import AiController
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    permission_root = ROOT / ".cache" / "aitest" / "permission"
+    permission_root.mkdir(parents=True, exist_ok=True)
+    permission_store = Store(permission_root / "pet.json", permission_root / "pet.bak.json")
+    permission_store.load()
+    controller = AiController(permission_store)
+    requests = []
+    controller.levelConfirmationRequested.connect(
+        lambda key, warning: requests.append((key, warning)))
+    controller.requestLevelChange(LEVEL_FULL)
+    check("升到完全自动先停在确认卡", controller.level == LEVEL_CONFIRM)
+    check("确认请求说明高危影响",
+          len(requests) == 1 and "执行命令" in requests[0][1])
+    controller.confirmLevelChange(LEVEL_FULL)
+    check("明确确认后才启用完全自动", controller.level == LEVEL_FULL)
+    controller.level = LEVEL_CONFIRM
+    controller.level = LEVEL_FULL
+    check("直接写属性不能绕过确认", controller.level == LEVEL_CONFIRM)
+    controller.shutdown()
+
     # ------------------------------------------------------------ 审计
     section("审计日志")
     audit = AuditLog(limit=5)
@@ -177,6 +202,7 @@ def main() -> int:
 
     # ------------------------------------------------------------ 工具集
     section("工具集")
+    check("静态工具目录已独立", CATALOG_TOOLS is TOOLS)
     names = [t.name for t in TOOLS]
     check("工具数量合理", len(names) >= 15, f"实际 {len(names)}")
     for required in ("screenshot", "click", "type_text", "press_keys", "add_task", "run_command"):
@@ -546,6 +572,117 @@ def main() -> int:
     check("配置后 configured=True", configured.configured is True)
     ok, message = configured.test_connection()
     check("连不上时报错可读", ok is False and len(message) > 0, message[:80])
+
+    # 连通性探测可以有限重试；真正的对话不能自动重试，避免重复扣费或重复执行工具。
+    import io
+    import json
+    import urllib.error
+    from unittest.mock import patch
+
+    class JsonResponse:
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
+    probe_client = AIClient(api_key="sk-secret", model="m",
+                            base_url="https://example.com/v1", timeout=90)
+    busy = urllib.error.HTTPError(
+        "https://example.com/v1/chat/completions", 503, "busy", {},
+        io.BytesIO(b"temporary"),
+    )
+    with patch("pawpet.ai.client.urllib.request.urlopen",
+               side_effect=[busy, JsonResponse({"model": "m"})]) as urlopen, \
+            patch("pawpet.ai.client.time.sleep") as sleep:
+        ok, message = probe_client.test_connection()
+    check("连接测试对临时 503 只重试一次",
+          ok and urlopen.call_count == 2 and sleep.call_count == 1, message)
+    check("连接测试超时时间被限制到 15 秒",
+          urlopen.call_args_list[0].kwargs.get("timeout") == 15.0,
+          str(urlopen.call_args_list[0]))
+
+    model_busy = urllib.error.HTTPError(
+        "https://example.com/v1/models", 429, "busy", {},
+        io.BytesIO(b"rate limited"),
+    )
+    with patch("pawpet.ai.client.urllib.request.urlopen",
+               side_effect=[model_busy, JsonResponse({"data": [{"id": "m"}]})]) as urlopen, \
+            patch("pawpet.ai.client.time.sleep"):
+        ok, models = probe_client.list_models()
+    check("模型列表对限流只重试一次",
+          ok and models == ["m"] and urlopen.call_count == 2, str(models))
+    check("模型列表超时时间被限制到 30 秒",
+          urlopen.call_args_list[0].kwargs.get("timeout") == 30.0,
+          str(urlopen.call_args_list[0]))
+
+    chat_busy = urllib.error.HTTPError(
+        "https://example.com/v1/chat/completions", 503, "busy", {},
+        io.BytesIO(b"temporary"),
+    )
+    with patch("pawpet.ai.client.urllib.request.urlopen",
+               side_effect=chat_busy) as urlopen, \
+            patch("pawpet.ai.client.time.sleep") as sleep:
+        try:
+            probe_client.chat([{"role": "user", "content": "hello"}])
+        except AiError as exc:
+            chat_error = str(exc)
+        else:
+            chat_error = ""
+    check("对话请求默认不自动重试",
+          urlopen.call_count == 1 and sleep.call_count == 0 and "503" in chat_error,
+          chat_error)
+
+    remote_http = AIClient(
+        api_key="sk-secret",
+        model="m",
+        base_url="http://192.0.2.10:11434/v1",
+    )
+    check("远程 HTTP 地址会显示风险提示",
+          "不是 HTTPS" in remote_http.describe(), remote_http.describe())
+    previous_http_override = os.environ.pop("PAWPET_ALLOW_INSECURE_HTTP", None)
+    try:
+        try:
+            remote_http._validate_base_url()
+        except AiError as exc:
+            blocked = str(exc)
+        else:
+            blocked = ""
+        check("远程 HTTP 默认拒绝发送 API Key",
+              "HTTPS" in blocked, blocked)
+
+        os.environ["PAWPET_ALLOW_INSECURE_HTTP"] = "1"
+        try:
+            remote_http._validate_base_url()
+            allowed = True
+        except AiError:
+            allowed = False
+        check("显式开关可以放行可信的远程 HTTP", allowed)
+    finally:
+        if previous_http_override is None:
+            os.environ.pop("PAWPET_ALLOW_INSECURE_HTTP", None)
+        else:
+            os.environ["PAWPET_ALLOW_INSECURE_HTTP"] = previous_http_override
+
+    local_http = AIClient(
+        api_key="sk-secret",
+        model="m",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    try:
+        local_http._validate_base_url()
+        local_allowed = True
+    except AiError:
+        local_allowed = False
+    check("本机 HTTP 服务仍可用", local_allowed)
+    check("错误信息会遮住 API Key",
+          local_http._safe_error("token=sk-secret") == "token=***")
 
     shutil.rmtree(scratch, ignore_errors=True)
 

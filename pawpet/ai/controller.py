@@ -80,6 +80,7 @@ class AiController(QObject):
     approvalChanged = Signal()
     auditChanged = Signal()
     settingsChanged = Signal()
+    levelConfirmationRequested = Signal(str, str)
     memoryChanged = Signal()
     modelsChanged = Signal()
     # 步骤时间线变了（「边做边说」）
@@ -141,6 +142,9 @@ class AiController(QObject):
         # 当前这一轮用户的原话。自动记忆要用它 —— 不能回头去消息列表里
         # 找「最后一条用户消息」，那时用户可能已经追问下一句了。
         self._turn_user_text = ""
+        # 当前轮是否真的执行过工具。模型/兼容接口偶尔会在工具执行后
+        # 直接结束而不返回正文，收尾时需要据此补一条可见提示。
+        self._turn_had_tool = False
         # 「边做边说」的时间线：最近几步的人话标签。
         # 新一轮开始时清空，不然会看到上一轮的步骤。
         self._steps: list[str] = []
@@ -150,8 +154,10 @@ class AiController(QObject):
         # 全量重写）。详见 ai/history.py 的模块说明。
         self._history_path = history_mod.default_path(store.path)
         self._sessions: list = history_mod.load(self._history_path)
+        history_mod.compact_if_needed(self._history_path, self._sessions)
         self._restored = False
         self._messages: list[dict] = []
+        self._history_persisted_ids: set[str] = set()
         self._adopt_sessions()
         # 写盘节流：一轮里可能 push 几十条（工具卡片），每条都写太浪费。
         # 攒 2 秒写一次，退出时再补一次兜底。
@@ -204,18 +210,22 @@ class AiController(QObject):
         self._current: object = self._sessions[0] if self._sessions else None
         self._restored = False
         self._messages = []
+        self._history_persisted_ids = set()
         if self._current is None:
             return
         # 恢复的消息要把 html 重新算一遍：文件里不存 html
         # （它是 text 的派生结果，存两份等于文件大一倍）。
         from .markdown import to_plain, to_qt_html
 
-        for item in self._current.messages:
+        for index, item in enumerate(self._current.messages):
+            if not item.get("id"):
+                item["id"] = f"{self._current.id}:m{index}"
             role = item.get("role") or "info"
             text = item.get("text") or ""
             item["html"] = (to_qt_html(text)
                             if role in ("assistant", "error") else "")
             item["plain"] = to_plain(text) if role == "assistant" else text
+            self._history_persisted_ids.add(str(item["id"]))
         self._messages = list(self._current.messages)
         self._restored = bool(self._messages)
 
@@ -321,11 +331,41 @@ class AiController(QObject):
         value = value if value in LEVEL_LABELS else LEVEL_CONFIRM
         if value == self.actions.level:
             return
+        if value == LEVEL_FULL:
+            self.toastRequested.emit(
+                "需要确认",
+                "完全自动会放行高危操作，请在操作权限卡片中再次确认。",
+            )
+            return
+        self._apply_level(value)
+
+    def _apply_level(self, value: str) -> None:
+        """保存已经通过 UI 确认的权限等级。"""
         self.actions.level = value
         self._settings["ai_level"] = value
         self._store.save()
         self.settingsChanged.emit()
         self._push("info", f"权限已切换为「{LEVEL_LABELS[value]}」")
+
+    @Slot(str)
+    def requestLevelChange(self, value: str) -> None:
+        value = value if value in LEVEL_LABELS else LEVEL_CONFIRM
+        if value == LEVEL_FULL and self.actions.level != LEVEL_FULL:
+            self.levelConfirmationRequested.emit(
+                value,
+                "完全自动会让 AI 不再询问，包括打开程序、执行命令和写文件。"
+                "只有你明确确认后才会启用。",
+            )
+            return
+        self._apply_level(value)
+
+    @Slot(str)
+    def confirmLevelChange(self, value: str) -> None:
+        if value != LEVEL_FULL:
+            self.requestLevelChange(value)
+            return
+        if self.actions.level != LEVEL_FULL:
+            self._apply_level(LEVEL_FULL)
 
     @Property("QVariantList", notify=settingsChanged)
     def levelOptions(self) -> list:
@@ -337,7 +377,7 @@ class AiController(QObject):
             {"key": LEVEL_AUTO, "label": LEVEL_LABELS[LEVEL_AUTO],
              "hint": "只读和键鼠自动执行，危险动作仍要确认"},
             {"key": LEVEL_FULL, "label": LEVEL_LABELS[LEVEL_FULL],
-             "hint": "不再询问，包括执行命令（谨慎）"},
+             "hint": "需再次确认；不再询问，包括执行命令"},
         ]
 
     @Property(bool, notify=settingsChanged)
@@ -964,11 +1004,24 @@ class AiController(QObject):
 
             # 单会话太长就切一个：会话列表是给人翻的，
             # 一个几千条的会话点开就没法看了。
+            session_to_save = self._current
+            for index, item in enumerate(messages):
+                if not item.get("id"):
+                    item["id"] = f"{session_to_save.id}:m{index}"
+            new_messages = [
+                item for item in messages
+                if str(item.get("id") or "") not in self._history_persisted_ids
+            ]
             if len(messages) >= history_mod.SESSION_MAX_MESSAGES:
                 self._current = None
 
-            ok, message = history_mod.save(self._history_path, self._sessions)
+            ok, message = history_mod.append_messages(
+                self._history_path, session_to_save, new_messages)
             if ok:
+                self._history_persisted_ids.update(
+                    str(item.get("id") or "") for item in new_messages)
+                if self._current is None:
+                    self._history_persisted_ids.clear()
                 self._history_dirty = False
             else:
                 self.last_history_error = message
@@ -1020,15 +1073,19 @@ class AiController(QObject):
         from .markdown import to_plain, to_qt_html
 
         self._current = target
+        self._history_persisted_ids = set()
         messages = []
-        for raw in target.messages:
+        for index, raw in enumerate(target.messages):
             item = dict(raw)
+            if not item.get("id"):
+                item["id"] = f"{target.id}:m{index}"
             role = item.get("role") or "info"
             text = item.get("text") or ""
             item["html"] = (to_qt_html(text)
                             if role in ("assistant", "error") else "")
             item["plain"] = to_plain(text) if role == "assistant" else text
             messages.append(item)
+            self._history_persisted_ids.add(str(item["id"]))
         self._messages = messages
         self._restored = True
         self.messagesChanged.emit()
@@ -1046,6 +1103,7 @@ class AiController(QObject):
         self._flush_history()
         self._messages = []
         self._current = None
+        self._history_persisted_ids.clear()
         self._restored = False
         self.messagesChanged.emit()
         self.historyChanged.emit()
@@ -1065,6 +1123,7 @@ class AiController(QObject):
             # 「会话已经不在列表里了但消息还在屏幕上」的错位
             self._current = None
             self._messages = []
+            self._history_persisted_ids.clear()
             self._restored = False
             self.messagesChanged.emit()
         history_mod.save(self._history_path, self._sessions)
@@ -1076,6 +1135,11 @@ class AiController(QObject):
         keep = self._current
         self._sessions = [keep] if keep is not None else []
         history_mod.save(self._history_path, self._sessions)
+        self._history_persisted_ids = {
+            str(item.get("id") or "")
+            for item in (keep.messages if keep is not None else [])
+            if item.get("id")
+        }
         self.historyChanged.emit()
         self.toastRequested.emit("已清空", "历史对话都删掉了，当前这段留着")
 
@@ -1244,6 +1308,7 @@ class AiController(QObject):
         self._turn += 1
         turn = self._turn
         self._turn_user_text = text
+        self._turn_had_tool = False
         # 新一轮：上一轮的步骤时间线要清掉，否则「正在做」会串轮
         self._steps = []
         self.stepsChanged.emit()
@@ -1373,6 +1438,7 @@ class AiController(QObject):
                        ok=False, detail=event.detail)
             return
         if event.kind == "tool":
+            self._turn_had_tool = True
             # 「边做边说」的素材：工具执行前把这一步记进时间线，
             # 状态行显示「正在做：xxx → 刚做完：yyy」。
             self._note_step(event)
@@ -1433,6 +1499,8 @@ class AiController(QObject):
             # 这一轮早被新一轮取代了：不要再动界面状态，
             # 更不要起自动记忆线程（那正是「上一轮结果插进新一轮」的来源）
             return
+        had_tool = self._running and self._turn_had_tool
+        self._turn_had_tool = False
         self._running = False
         self._status = "空闲"
         self.runningChanged.emit()
@@ -1469,6 +1537,15 @@ class AiController(QObject):
                         self.messagesChanged.emit()
                         break
             self.toastRequested.emit("任务结束", text[:80])
+        elif had_tool:
+            # 某些兼容接口会在工具结果之后返回空正文，甚至跳过 Agent
+            # 自己的二次收尾。不能让用户只看到动作卡片和一大片空白。
+            fallback = (
+                "操作已结束，但模型没有返回总结。请查看上面的执行结果；"
+                "如果还要继续，请告诉我下一步。"
+            )
+            self._push("assistant", fallback, report=report)
+            self.toastRequested.emit("任务结束", fallback[:80])
 
         # 任务结束后，后台判断这一轮有没有值得长期记住的东西。
         # 放在这里（而不是任务中间）有两个好处：不占用步数预算，

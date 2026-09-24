@@ -28,6 +28,10 @@ import re
 import sys
 from pathlib import Path
 
+from console import configure_utf8
+
+configure_utf8()
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 

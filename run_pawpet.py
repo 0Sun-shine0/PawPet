@@ -35,6 +35,23 @@ def show_error(title: str, message: str) -> None:
         pass
 
 
+def safe_print(message: str = "", **_kwargs: object) -> None:
+    """Write diagnostics without letting a broken stdout hide the real error."""
+    text = f"{message}\n"
+    stream = getattr(sys, "stdout", None)
+    if stream is not None:
+        try:
+            stream.write(text)
+            stream.flush()
+            return
+        except (AttributeError, OSError, UnicodeError, ValueError):
+            pass
+    try:
+        os.write(1, text.encode("utf-8", errors="backslashreplace"))
+    except (OSError, ValueError):
+        pass
+
+
 def _ensure_stdio() -> str:
     """给窗口程序补上 stdin/stdout。失败返回原因，成功返回空串。
 
@@ -120,6 +137,7 @@ def selfcheck() -> int:
     所以打包后跑一次这个：`PawPet.exe --selfcheck`。
     它逐个 import 并打印，缺哪个一眼就看到。
     """
+    print = safe_print
     targets = [
         ("核心配置", "pawpet.config"),
         ("界面后端", "pawpet.backend"),

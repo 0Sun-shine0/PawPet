@@ -34,6 +34,10 @@ import sys
 import time
 from pathlib import Path
 
+from console import configure_utf8
+
+configure_utf8()
+
 ROOT = Path(__file__).resolve().parent.parent
 VENV = ROOT / ".venv"
 PYTHON = VENV / "Scripts" / "python.exe"
@@ -233,13 +237,15 @@ def run_suite(script: str, log_path: Path) -> tuple[int, float, str]:
         return 127, 0.0, f"找不到 {path}"
 
     started = time.time()
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         result = subprocess.run(
             [str(PYTHON), str(path)],
             cwd=str(ROOT), capture_output=True, text=True,
             # 显式 encoding：不给的话按系统区域设置解码，
             # 中文输出会变成乱码（这个坑踩过好几次）
-            encoding="utf-8", errors="replace", timeout=TIMEOUT,
+            encoding="utf-8", errors="replace", timeout=TIMEOUT, env=env,
         )
         code = result.returncode
         output = (result.stdout or "") + (result.stderr or "")

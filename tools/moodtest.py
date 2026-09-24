@@ -16,6 +16,7 @@ r"""宠物情绪动画：验证四种状态真的会动，而且动作互不打�
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import sys
@@ -67,7 +68,35 @@ def main() -> int:
 
     store = Store(SCRATCH / "p.json", SCRATCH / "p.bak.json")
     store.load()
+    store.settings["ai_mcp_enabled"] = False
     backend = Backend(store)
+    root = None
+    cleaned = False
+
+    def cleanup() -> None:
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            backend.shutdown()
+        except Exception:  # noqa: BLE001 - 测试收尾不能遮住原始结果
+            pass
+        try:
+            if root is not None:
+                root.close()
+                root.deleteLater()
+        except Exception:  # noqa: BLE001 - Qt 退出时对象可能已被销毁
+            pass
+        try:
+            app.processEvents()
+            app.quit()
+            app.processEvents()
+        except Exception:  # noqa: BLE001 - 测试收尾不能阻塞解释器退出
+            pass
+        _keep_alive.clear()
+
+    atexit.register(cleanup)
 
     engine = QQmlEngine()
     engine.addImportPath(str(QML_DIR))
@@ -126,14 +155,19 @@ def main() -> int:
     # 数据和事实反了，但代码其实是对的。
     BREATH_MS = {"idle": 1500, "thinking": 900, "speaking": 700, "sleepy": 2600}
 
-    def sample(channel: str, ms: int, gap: int = 22) -> list:
-        """在 ms 毫秒的窗口里连续采样。"""
-        values = []
+    def sample_channels(channels: list[str], ms: int, gap: int = 22) -> dict[str, list]:
+        """在一个窗口里同时采样所有通道，避免每条通道重复等待。"""
+        values = {channel: [] for channel in channels}
         deadline = time.time() + ms / 1000.0
         while time.time() < deadline:
             pump(gap)
-            values.append(round(float(pet.property(channel) or 0), 4))
+            for channel in channels:
+                values[channel].append(round(float(pet.property(channel) or 0), 4))
         return values
+
+    def sample(channel: str, ms: int, gap: int = 22) -> list:
+        """兼容只需要一条通道的后续断言。"""
+        return sample_channels([channel], ms, gap)[channel]
 
     CHANNELS = ["bob", "hop", "loopHop", "squashX", "squashY",
                 "loopSquashX", "loopSquashY", "sway",
@@ -158,16 +192,14 @@ def main() -> int:
         pump(300)
         # 窗口取「一整次呼吸 + 一点余量」，确保量到的是真的幅度
         window = BREATH_MS.get(mood, 1500) * 2 + 400
-        activity = {}
-        for channel in CHANNELS:
-            values = sample(channel, window)
-            activity[channel] = max(values) - min(values)
+        samples = sample_channels(CHANNELS, window)
+        activity = {
+            channel: max(values) - min(values)
+            for channel, values in samples.items()
+        }
         mood_activity[mood] = activity
         # 顺便把各自的呼吸幅度单独记下来，给下面第二条断言用
-        mood_activity[mood]["_breathAmp"] = abs(
-            min(sample("bob", BREATH_MS.get(mood, 1500) * 2 + 400))
-            - max(sample("bob", BREATH_MS.get(mood, 1500) * 2 + 400))
-        )
+        mood_activity[mood]["_breathAmp"] = activity["bob"]
 
         moving = [c for c, span in activity.items()
                   if span > 0.004 and not c.startswith("_")]
@@ -387,7 +419,7 @@ def main() -> int:
           len(list(OUT.glob("mood-*.png"))) >= 5,
           str(len(list(OUT.glob("mood-*.png")))))
 
-    backend.shutdown()
+    cleanup()
     print(f"\n{'=' * 56}")
     if FAILED:
         print(f"通过 {PASSED} 项，失败 {len(FAILED)} 项：")

@@ -1,5 +1,5 @@
 {
-  "version": "2.3.1",
+  "version": "2.3.2",
   "url": "https://github.com/0Sun-shine0/PawPet/releases/latest",
-  "note": "修复工作台布局和启动兼容性问题"
+  "note": "修复断网时更新状态误报为最新的问题"
 }

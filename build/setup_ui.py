@@ -28,9 +28,13 @@ import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pawpet.version import APP_VERSION
+
 APP_NAME = "小爪助手"
 APP_ID = "PawPet"
-APP_VERSION = "2.1.0"
 APP_EXE = "PawPet.exe"
 
 # 卸载信息写在 HKCU，不需要管理员权限

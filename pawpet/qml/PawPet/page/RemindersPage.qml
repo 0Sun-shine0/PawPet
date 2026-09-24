@@ -463,44 +463,8 @@ Flickable {
                             }
                         }
 
-                        // ---- 稍后提醒 / 编辑 ----
-                        //
-                        // **用浮层而不是塞进这一行。** 塞进去的话，窄窗口下
-                        // 时间 + 标题 + 稍后 + 改 + 开关 + × 六样东西加起来
-                        // 必然超过可用宽度，RowLayout 就把最后那个（开关）
-                        // 顶到卡片外面 —— 实测在 420px 窗口下开关直接不见了。
-                        //
-                        // 改成绝对定位浮在右侧：不参与 RowLayout 的宽度
-                        // 分配，所以不会把别的控件挤走。悬停时才出现，
-                        // 鼠标移开就消失，不挡标题。
-                        Row {
-                            anchors.right: parent.right
-                            anchors.rightMargin: 42      // 让开右边的开关和 ×
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 4
-                            visible: reminderMouse.containsMouse
-
-                            PawButton {
-                                small: true
-                                variant: "ghost"
-                                text: "稍后"
-                                implicitWidth: 46
-                                onClicked: snoozeMenu.popupFor(model.reminderId)
-                            }
-
-                            PawButton {
-                                small: true
-                                variant: "ghost"
-                                text: "改"
-                                implicitWidth: 34
-                                onClicked: page.beginEdit(model.reminderId,
-                                                          model.title,
-                                                          model.time,
-                                                          model.repeat)
-                            }
-                        }
-
                         PawSwitch {
+                            id: enabledSwitch
                             checked: model.enabled
                             onToggled: backend.reminders.toggle(model.reminderId)
                         }
@@ -511,6 +475,50 @@ Flickable {
                             text: "×"
                             implicitWidth: 30
                             onClicked: backend.reminders.remove(model.reminderId)
+                        }
+                    }
+
+                    // ---- 稍后提醒 / 编辑（悬停浮层）----
+                    //
+                    // **必须在 RowLayout 外面。** 塞进布局里会有两个问题：
+                    //
+                    //  1. 窄窗口下 时间 + 标题 + 稍后 + 改 + 开关 + × 六样
+                    //     加起来必然超过可用宽度，RowLayout 就把最后那个
+                    //     （开关）顶到卡片外面 —— 实测 420px 时开关直接不见了。
+                    //  2. 就算用 anchors 硬浮，Qt 也会警告
+                    //     「Detected anchors on an item that is managed by a
+                    //     layout. This is undefined behavior」——
+                    //     布局会覆写锚点算出来的位置。
+                    //     （我上一版就是这么写的，冒烟测试报出了这条警告。）
+                    //
+                    // 现在挂在 delegate 根节点（那个 Rectangle）下、锚到开关
+                    // 左边：既不参与布局的宽度分配，也不跟布局抢位置。
+                    // 锚 `enabledSwitch.left` 而不是写死右边距 —— 开关宽度
+                    // 变了这里自动跟着走。
+                    Row {
+                        anchors.right: enabledSwitch.left
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: enabledSwitch.verticalCenter
+                        spacing: 4
+                        visible: reminderMouse.containsMouse
+
+                        PawButton {
+                            small: true
+                            variant: "ghost"
+                            text: "稍后"
+                            implicitWidth: 46
+                            onClicked: snoozeMenu.popupFor(model.reminderId)
+                        }
+
+                        PawButton {
+                            small: true
+                            variant: "ghost"
+                            text: "改"
+                            implicitWidth: 34
+                            onClicked: page.beginEdit(model.reminderId,
+                                                      model.title,
+                                                      model.time,
+                                                      model.repeat)
                         }
                     }
                 }

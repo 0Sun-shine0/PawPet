@@ -41,6 +41,11 @@ DATA = SCRATCH / "data"
 CONV = DATA / "conversations.json"
 
 
+def clear_conversation_files() -> None:
+    CONV.unlink(missing_ok=True)
+    CONV.with_suffix(".jsonl").unlink(missing_ok=True)
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     global PASSED
     if ok:
@@ -98,7 +103,7 @@ def main() -> int:
 
     CONV.write_text("{ 这不是 json", encoding="utf-8")
     check("文件坏了返回空而不是抛异常", hm.load(CONV) == [])
-    CONV.unlink()
+    clear_conversation_files()
 
     session = hm.new_session([
         {"role": "user", "text": "帮我整理下载文件夹"},
@@ -110,10 +115,31 @@ def main() -> int:
     check("长标题会截断",
           len(hm.make_title([{"role": "user", "text": "一" * 200}]))
           <= hm.TITLE_CHARS)
+    compacted = hm._trim_message({
+        "role": "tool", "text": "x" * 5000, "detail": "y" * 3000,
+        "html": "<b>不要存</b>",
+    })
+    check("历史正文有长度上限", len(compacted["text"]) <= 1600)
+    check("历史细节有长度上限", len(compacted["detail"]) <= 1200)
 
     hm.save(CONV, [session])
     back = hm.load(CONV)
     check("能存能读", len(back) == 1 and back[0].id == session.id, str(len(back)))
+
+    journal = hm.journal_path(CONV)
+    journal.unlink(missing_ok=True)
+    updated = hm.Session(
+        id=session.id,
+        started=session.started,
+        updated=session.updated + 1,
+        title=session.title,
+        messages=session.messages + [{"role": "assistant", "text": "追加的一条"}],
+    )
+    ok, message = hm.append_session(CONV, updated)
+    check("追加会话不要求重写快照", ok, message)
+    check("追加日志可恢复最新会话",
+          hm.load(CONV)[0].messages[-1].get("text") == "追加的一条")
+    check("追加日志文件生成", journal.exists())
 
     # ---- 哪些字段不能落盘 ----
     print("\n  image / html 不该落盘：")
@@ -164,7 +190,7 @@ def main() -> int:
 
     # ================================================================ 二
     print("\n=== 二、跨进程重启（重点）===")
-    CONV.unlink(missing_ok=True)
+    clear_conversation_files()
 
     first = run_snippet("a_write", '''
 ai._push("user", "帮我整理一下下载文件夹")
@@ -241,7 +267,7 @@ for m in ai.messages:
 
     # ================================================================ 三
     print("\n=== 三、退出时补写（问完就关也不丢）===")
-    CONV.unlink(missing_ok=True)
+    clear_conversation_files()
     # 故意不调 _flush_history：模拟「问完最后一句话，两秒内就关掉」。
     # 节流定时器还没到点，只有 shutdown() 的兜底能救这一条。
     third = run_snippet("c_noflush", '''
@@ -327,8 +353,14 @@ print("AFTER_CLEAR_SESSIONS", ai.conversationCount)
 
     # ================================================================ 六
     print("\n=== 六、界面接了这些接口 ===")
-    qml = (ROOT / "pawpet" / "qml" / "PawPet" / "page" / "AiPage.qml").read_text(
-        encoding="utf-8")
+    qml = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT / "pawpet" / "qml" / "PawPet" / "page" / "AiPage.qml",
+            ROOT / "pawpet" / "qml" / "PawPet" / "AiHistoryPanel.qml",
+            ROOT / "pawpet" / "qml" / "PawPet" / "AiSettingsPanel.qml",
+        )
+    )
     for api in ("newConversation()", "openConversation(", "deleteConversation(",
                 "clearHistory()", "backend.ai.conversations",
                 "backend.ai.historyFolder()", "page.showHistory"):

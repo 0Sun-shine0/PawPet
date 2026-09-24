@@ -48,6 +48,7 @@ BUNDLE_FILES = (
     "extensions.json",
     "theme.json",
     "conversations.json",
+    "conversations.jsonl",
 )
 
 # 导入前，旧数据备份成这个名字。放数据目录里，用户找得到。
@@ -284,6 +285,8 @@ def import_bundle(root: Path, source: Path, info: dict | None = None) -> tuple[b
                     os.fsync(handle.fileno())
                 os.replace(tmp, root / name)
                 written.append(name)
+        if "conversations.json" in names and "conversations.jsonl" not in names:
+            (root / "conversations.jsonl").unlink(missing_ok=True)
     except (zipfile.BadZipFile, OSError, KeyError) as exc:
         tail = f"已经写入：{'、'.join(written)}。" if written else ""
         hint = f"原数据备份在 {backed_up}。" if backed_up else ""

@@ -334,7 +334,14 @@ def main() -> int:
     # =========================================================== 六、不变量
     print("\n=== 六、别把该留的也收进去 ===")
 
-    ai_text = (QML_DIR / "PawPet" / "page" / "AiPage.qml").read_text(encoding="utf-8")
+    ai_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            QML_DIR / "PawPet" / "page" / "AiPage.qml",
+            QML_DIR / "PawPet" / "AiSettingsPanel.qml",
+            QML_DIR / "PawPet" / "AiMcpPanel.qml",
+        )
+    )
     settings_text = (QML_DIR / "PawPet" / "page" / "SettingsPage.qml").read_text(
         encoding="utf-8")
 

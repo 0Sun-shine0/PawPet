@@ -262,8 +262,13 @@ def test_ui_visible() -> None:
         check("「其他服务商」默认收起",
               page.property("showProviders") is False)
 
-    qml = (ROOT / "pawpet" / "qml" / "PawPet" / "page" / "AiPage.qml").read_text(
-        encoding="utf-8")
+    qml = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT / "pawpet" / "qml" / "PawPet" / "page" / "AiPage.qml",
+            ROOT / "pawpet" / "qml" / "PawPet" / "AiSettingsPanel.qml",
+        )
+    )
     check("模型设置卡的可见性带了「没配好就展开」",
           "page.showSettings || !backend.ai.configured" in qml,
           "泛用户找不到那个「设置」按钮")

@@ -4,6 +4,9 @@ singleton Theme 1.0 Theme.qml
 
 Card 1.0 Card.qml
 PawButton 1.0 PawButton.qml
+PermissionCard 1.0 PermissionCard.qml
+AiMcpPanel 1.0 AiMcpPanel.qml
+AiSettingsPanel 1.0 AiSettingsPanel.qml
 PawField 1.0 PawField.qml
 PawSlider 1.0 PawSlider.qml
 AiBubble 1.0 AiBubble.qml
@@ -23,4 +26,5 @@ TasksPage 1.0 page/TasksPage.qml
 NotesPage 1.0 page/NotesPage.qml
 RemindersPage 1.0 page/RemindersPage.qml
 AiPage 1.0 page/AiPage.qml
+AiHistoryPanel 1.0 AiHistoryPanel.qml
 SettingsPage 1.0 page/SettingsPage.qml

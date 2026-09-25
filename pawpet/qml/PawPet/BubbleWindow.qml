@@ -10,6 +10,10 @@ Window {
     property string headline: ""
     property string body: ""
     property string kind: "info"
+    property real anchorPetX: 0
+    property real anchorPetY: 0
+    property real anchorPetW: 200
+    property real anchorPetH: 220
 
     readonly property color accentColor: {
         switch (kind) {
@@ -37,6 +41,10 @@ Window {
         headline = titleText
         body = bodyText
         kind = kindName || "info"
+        anchorPetX = petX
+        anchorPetY = petY
+        anchorPetW = petW
+        anchorPetH = petH
         place(petX, petY, petW, petH)
         visible = true
         anim.restart()
@@ -45,7 +53,8 @@ Window {
 
     function place(petX, petY, petW, petH) {
         // Screen 附加类型没有 availableGeometry，用 backend 里的 QScreen 结果
-        var area = backend.screenAt(Math.round(petX), Math.round(petY))
+        var area = backend.screenAt(Math.round(petX + petW / 2),
+                                    Math.round(petY + petH / 2))
         var x = petX + petW / 2 - width / 2
         var y = petY - height - 6
         if (y < area.y + 8) {
@@ -56,6 +65,15 @@ Window {
         y = Math.max(area.y + 8, Math.min(area.y + area.height - height - 8, y))
         bubble.x = Math.round(x)
         bubble.y = Math.round(y)
+    }
+
+    Connections {
+        target: backend
+        function onScreenGeometryChanged() {
+            if (bubble.visible)
+                bubble.place(bubble.anchorPetX, bubble.anchorPetY,
+                             bubble.anchorPetW, bubble.anchorPetH)
+        }
     }
 
     Timer {

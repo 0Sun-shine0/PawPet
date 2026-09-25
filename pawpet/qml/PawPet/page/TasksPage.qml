@@ -11,6 +11,7 @@ Item {
 
     property string editingId: ""
     property string filter: "pending"      // pending | all
+    property bool cancellingEdit: false
 
     ColumnLayout {
         anchors.fill: parent
@@ -129,6 +130,56 @@ Item {
                 onClicked: page.setFilter("all")
             }
 
+            Rectangle {
+                Layout.preferredWidth: 190
+                Layout.minimumWidth: 120
+                implicitHeight: 34
+                radius: Theme.radiusMd
+                color: Theme.surfaceAlt
+                border.width: 1
+                border.color: taskSearch.activeFocus ? Theme.accent : Theme.border
+
+                TextField {
+                    id: taskSearch
+                    objectName: "taskSearchField"
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 38
+                    placeholderText: "\u641c\u7d22\u5f85\u529e\u2026"
+                    color: Theme.text
+                    placeholderTextColor: Theme.textFaint
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsSmall
+                    background: null
+                    selectByMouse: true
+                    onTextChanged: backend.tasks.searchText = text
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape && text.length > 0) {
+                            clear()
+                            event.accepted = true
+                        }
+                    }
+                }
+
+                PawButton {
+                    id: clearTaskSearch
+                    objectName: "clearTaskSearchButton"
+                    anchors.right: parent.right
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    small: true
+                    text: "×"
+                    variant: "ghost"
+                    tooltipText: "清空搜索"
+                    implicitWidth: 28
+                    visible: taskSearch.text.length > 0
+                    onClicked: {
+                        taskSearch.clear()
+                        taskSearch.forceActiveFocus()
+                    }
+                }
+            }
+
             Item { Layout.fillWidth: true }
 
             PawButton {
@@ -143,7 +194,7 @@ Item {
                 text: "清除已完成"
                 variant: "ghost"
                 enabled: backend.tasks.doneCount > 0
-                onClicked: backend.tasks.clearDone()
+                onClicked: clearDoneDialog.open()
             }
 
             Menu {
@@ -199,6 +250,7 @@ Item {
 
             ListView {
                 id: list
+                objectName: "taskList"
                 anchors.fill: parent
                 anchors.margins: 8
                 clip: true
@@ -283,6 +335,7 @@ Item {
 
                             TextField {
                                 id: editField
+                                objectName: "taskEditField_" + model.taskId
                                 Layout.fillWidth: true
                                 visible: page.editingId === model.taskId
                                 text: model.text
@@ -296,13 +349,29 @@ Item {
                                     border.color: Theme.accent
                                 }
                                 onAccepted: {
-                                    backend.tasks.rename(model.taskId, text)
-                                    page.editingId = ""
+                                    page.cancellingEdit = false
+                                    page.saveEdit(model.taskId, text)
                                 }
-                                Keys.onEscapePressed: page.editingId = ""
+                                onEditingFinished: {
+                                    if (page.cancellingEdit) {
+                                        page.cancellingEdit = false
+                                        return
+                                    }
+                                    if (text.trim().length === 0) {
+                                        forceActiveFocus()
+                                    } else {
+                                        page.saveEdit(model.taskId, text)
+                                    }
+                                }
+                                Keys.onEscapePressed: function(event) {
+                                    page.cancellingEdit = true
+                                    page.editingId = ""
+                                    event.accepted = true
+                                }
 
                                 onVisibleChanged: {
                                     if (visible) {
+                                        page.cancellingEdit = false
                                         forceActiveFocus()
                                         selectAll()
                                     }
@@ -371,9 +440,25 @@ Item {
                             Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
 
                             PawButton {
+                                objectName: "taskPriorityButton_" + model.taskId
+                                small: true
+                                variant: "ghost"
+                                text: "✦"
+                                tooltipText: "设置优先级"
+                                implicitWidth: 30
+                                onClicked: {
+                                    priorityMenu.taskId = model.taskId
+                                    priorityMenu.currentPriority = model.priority
+                                    priorityMenu.open()
+                                }
+                            }
+
+                            PawButton {
+                                objectName: "taskDueButton_" + model.taskId
                                 small: true
                                 variant: "ghost"
                                 text: "⚑"
+                                tooltipText: "设置到期日"
                                 implicitWidth: 30
                                 onClicked: {
                                     dueMenu.taskId = model.taskId
@@ -381,9 +466,11 @@ Item {
                                 }
                             }
                             PawButton {
+                                objectName: "taskDeleteButton_" + model.taskId
                                 small: true
                                 variant: "ghost"
                                 text: "×"
+                                tooltipText: "删除待办"
                                 implicitWidth: 30
                                 onClicked: backend.tasks.remove(model.taskId)
                             }
@@ -407,7 +494,9 @@ Item {
                         Layout.alignment: Qt.AlignHCenter
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
-                        text: page.filter === "pending"
+                        text: backend.tasks.searchText.trim().length > 0
+                              ? "\u6ca1\u6709\u5339\u914d\u7684\u5f85\u529e"
+                              : page.filter === "pending"
                               ? "待办清空了，享受这份轻松吧"
                               : "还没有任何待办。在上面输入框里写一件小事开始。"
                         color: Theme.textFaint
@@ -418,6 +507,69 @@ Item {
                 }
             }
         }
+    }
+
+    Timer {
+        id: undoTimer
+        interval: 6000
+        onTriggered: backend.tasks.clearUndo()
+    }
+
+    Connections {
+        target: backend.tasks
+        function onUndoChanged() {
+            if (backend.tasks.canUndo)
+                undoTimer.restart()
+            else
+                undoTimer.stop()
+        }
+    }
+
+    Rectangle {
+        objectName: "taskUndoBar"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.gap
+        z: 10
+        width: Math.min(360, Math.max(260, parent.width - Theme.gap * 2))
+        height: 52
+        radius: Theme.radiusMd
+        visible: backend.tasks.canUndo
+        color: Theme.surfaceHi
+        border.width: 1
+        border.color: Theme.accent
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 8
+            spacing: 8
+
+            Text {
+                Layout.fillWidth: true
+                text: "已删除：" + backend.tasks.lastRemovedText
+                color: Theme.text
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                elide: Text.ElideRight
+            }
+            PawButton {
+                small: true
+                text: "撤销"
+                variant: "accent"
+                onClicked: backend.tasks.undoRemove()
+            }
+        }
+    }
+
+    ConfirmDialog {
+        id: clearDoneDialog
+        objectName: "clearDoneConfirmDialog"
+        heading: "清除已完成待办？"
+        message: "将删除已完成的 " + backend.tasks.doneCount
+                 + " 条待办，删除后无法恢复。"
+        confirmText: "清除已完成"
+        onConfirmed: backend.tasks.clearDone()
     }
 
     // 到期日菜单
@@ -454,7 +606,62 @@ Item {
         DueItem { text: "清除到期日"; onTriggered: backend.tasks.setDue(dueMenu.taskId, "") }
     }
 
+    // 任务创建后也应该能调整优先级，不必删掉重建。
+    Menu {
+        id: priorityMenu
+        objectName: "taskPriorityMenu"
+        property string taskId: ""
+        property int currentPriority: 0
+        font.family: Theme.font
+        background: Rectangle {
+            implicitWidth: 150
+            color: Theme.surfaceHi
+            radius: Theme.radiusMd
+            border.width: 1
+            border.color: Theme.border
+        }
+        component PriorityItem: MenuItem {
+            id: pi
+            checkable: true
+            implicitHeight: 32
+            contentItem: Text {
+                leftPadding: 14
+                text: pi.text
+                color: Theme.text
+                font.family: Theme.font
+                font.pixelSize: Theme.fsBody
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: pi.highlighted ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                radius: Theme.radiusSm
+            }
+        }
+        PriorityItem {
+            text: "普通"
+            checked: priorityMenu.currentPriority === 0
+            onTriggered: backend.tasks.setPriority(priorityMenu.taskId, 0)
+        }
+        PriorityItem {
+            text: "重要"
+            checked: priorityMenu.currentPriority === 1
+            onTriggered: backend.tasks.setPriority(priorityMenu.taskId, 1)
+        }
+        PriorityItem {
+            text: "紧急"
+            checked: priorityMenu.currentPriority === 2
+            onTriggered: backend.tasks.setPriority(priorityMenu.taskId, 2)
+        }
+    }
+
     property int priority: 0
+
+    Shortcut {
+        sequence: "Ctrl+F"
+        context: Qt.WindowShortcut
+        enabled: page.visible
+        onActivated: taskSearch.forceActiveFocus()
+    }
 
     function today(offset) {
         var d = new Date()
@@ -471,6 +678,16 @@ Item {
         backend.tasks.add(text, page.priority)
         input.text = ""
         input.forceActiveFocus()
+    }
+
+    function saveEdit(taskId, value) {
+        if (page.editingId !== taskId)
+            return
+        var text = (value || "").trim()
+        if (text.length === 0)
+            return
+        backend.tasks.rename(taskId, text)
+        page.editingId = ""
     }
 
     function setFilter(value) {

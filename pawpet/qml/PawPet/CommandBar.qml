@@ -68,6 +68,14 @@ Window {
         backend.commandBarVisible = false
     }
 
+    Connections {
+        target: backend
+        function onScreenGeometryChanged() {
+            if (bar.visible)
+                bar.place()
+        }
+    }
+
     function place() {
         var px = 0, py = 0, pw = 200, ph = 220
         if (petWindow) {

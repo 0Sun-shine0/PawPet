@@ -100,13 +100,29 @@ Window {
         // 表现是宠物刚贴上去就被弹回屏幕里。
         if (backend.petEdge)
             return
-        var area = backend.screenAt(win.x, win.y)
+        var area = backend.screenAt(win.x + win.width / 2,
+                                    win.y + win.height / 2)
         if (!area || area.width <= 0)
             return
         var nx = Math.max(area.x - win.width * 0.3,
                           Math.min(area.x + area.width - win.width * 0.7, win.x))
         var ny = Math.max(area.y - win.height * 0.2,
                           Math.min(area.y + area.height - win.height * 0.5, win.y))
+        if (Math.round(nx) !== win.x)
+            win.x = Math.round(nx)
+        if (Math.round(ny) !== win.y)
+            win.y = Math.round(ny)
+    }
+
+    function clampFullyToScreen() {
+        var area = backend.screenAt(win.x + win.width / 2,
+                                    win.y + win.height / 2)
+        if (!area || area.width <= 0 || area.height <= 0)
+            return
+        var maxX = Math.max(area.x, area.x + area.width - win.width)
+        var maxY = Math.max(area.y, area.y + area.height - win.height)
+        var nx = Math.max(area.x, Math.min(maxX, win.x))
+        var ny = Math.max(area.y, Math.min(maxY, win.y))
         if (Math.round(nx) !== win.x)
             win.x = Math.round(nx)
         if (Math.round(ny) !== win.y)
@@ -227,9 +243,18 @@ Window {
                     var saved = backend.petPosition()
                     if (saved && saved.length === 2
                             && saved[0] !== null && saved[1] !== null) {
-                        win.slideTo(Number(saved[0]), Number(saved[1]), true)
-                        return
+                        var sx = Number(saved[0])
+                        var sy = Number(saved[1])
+                        var savedInside = sx >= area.x && sy >= area.y
+                                && sx + win.width <= area.x + area.width
+                                && sy + win.height <= area.y + area.height
+                        if (savedInside) {
+                            win.slideTo(sx, sy, true)
+                            return
+                        }
                     }
+                    win.clampFullyToScreen()
+                    return
                 }
                 win.clampToScreen()
                 return
@@ -256,7 +281,7 @@ Window {
             win.x = Number(saved[0])
             win.y = Number(saved[1])
         } else {
-            var area = backend.screenAt(0, 0)
+            var area = backend.primaryScreenArea()
             win.x = area.x + area.width - win.width - 40
             win.y = area.y + area.height - win.height - 80
         }

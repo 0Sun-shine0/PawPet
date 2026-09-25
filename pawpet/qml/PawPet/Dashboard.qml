@@ -59,13 +59,50 @@ Window {
 
     onClosing: function (close) {
         close.accepted = false
+        flushPendingEdits()
         backend.dashboardVisible = false
     }
 
-    function centerOnScreen() {
-        var area = backend.screenAt(x + Math.round(width / 2), y + Math.round(height / 2))
+    function flushPendingEdits() {
+        notesPage.flushSave()
+    }
+
+    Connections {
+        target: backend
+        function onShutdownRequested() {
+            dash.flushPendingEdits()
+        }
+        function onScreenGeometryChanged() {
+            dash.recoverFromScreenChange()
+        }
+    }
+
+    // 键盘用户不必每次都用鼠标找侧栏：Alt+1~7 直接切换页面。
+    Shortcut { sequence: "Alt+1"; context: Qt.WindowShortcut; onActivated: dash.goTo("today") }
+    Shortcut { sequence: "Alt+2"; context: Qt.WindowShortcut; onActivated: dash.goTo("focus") }
+    Shortcut { sequence: "Alt+3"; context: Qt.WindowShortcut; onActivated: dash.goTo("tasks") }
+    Shortcut { sequence: "Alt+4"; context: Qt.WindowShortcut; onActivated: dash.goTo("notes") }
+    Shortcut { sequence: "Alt+5"; context: Qt.WindowShortcut; onActivated: dash.goTo("reminders") }
+    Shortcut { sequence: "Alt+6"; context: Qt.WindowShortcut; onActivated: dash.goTo("ai") }
+    Shortcut { sequence: "Alt+7"; context: Qt.WindowShortcut; onActivated: dash.goTo("settings") }
+
+    function centerOnScreen(areaOverride) {
+        var area = areaOverride || backend.primaryScreenArea()
         x = Math.round(area.x + (area.width - width) / 2)
         y = Math.round(area.y + (area.height - height) / 2)
+    }
+
+    function recoverFromScreenChange() {
+        if (dash.visibility === Window.Maximized)
+            return
+        var area = backend.screenAt(x + Math.round(width / 2),
+                                    y + Math.round(height / 2))
+        var inside = area && area.width > 0 && area.height > 0
+                && x >= area.x && y >= area.y
+                && x + width <= area.x + area.width
+                && y + height <= area.y + area.height
+        if (!inside)
+            centerOnScreen(area)
     }
 
     ColumnLayout {
@@ -117,6 +154,7 @@ Window {
                     small: true
                     variant: "ghost"
                     text: "—"
+                    tooltipText: "最小化工作台"
                     implicitWidth: 34
                     onClicked: dash.showMinimized()
                 }
@@ -124,6 +162,7 @@ Window {
                     small: true
                     variant: "ghost"
                     text: dash.visibility === Window.Maximized ? "❐" : "▢"
+                    tooltipText: dash.visibility === Window.Maximized ? "还原窗口" : "最大化窗口"
                     implicitWidth: 34
                     onClicked: dash.visibility === Window.Maximized
                                ? dash.showNormal() : dash.showMaximized()
@@ -132,6 +171,7 @@ Window {
                     small: true
                     variant: "ghost"
                     text: "✕"
+                    tooltipText: "关闭工作台（小爪仍在托盘运行）"
                     implicitWidth: 34
                     onClicked: backend.dashboardVisible = false
                 }
@@ -176,10 +216,14 @@ Window {
                             id: navItem
                             Layout.fillWidth: true
                             implicitHeight: 40
+                            focus: stack.currentIndex === index
+                            activeFocusOnTab: true
                             radius: Theme.radiusMd
                             color: stack.currentIndex === index
                                    ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
                                    : (navMouse.containsMouse ? Theme.surfaceHi : "transparent")
+                            border.width: activeFocus ? 1 : 0
+                            border.color: Theme.accent
 
                             Behavior on color { ColorAnimation { duration: Theme.animFast } }
 
@@ -198,7 +242,19 @@ Window {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: dash.goTo(modelData.key)
+                                onClicked: {
+                                    navItem.forceActiveFocus()
+                                    dash.goTo(modelData.key)
+                                }
+                            }
+
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Return
+                                        || event.key === Qt.Key_Enter
+                                        || event.key === Qt.Key_Space) {
+                                    dash.goTo(modelData.key)
+                                    event.accepted = true
+                                }
                             }
 
                             RowLayout {
@@ -317,8 +373,11 @@ Window {
 
                 TodayPage {}
                 FocusPage {}
-                TasksPage {}
-                NotesPage {}
+                TasksPage { objectName: "tasksPage" }
+                NotesPage {
+                    id: notesPage
+                    objectName: "notesPage"
+                }
                 RemindersPage {}
                 AiPage {}
                 SettingsPage {}

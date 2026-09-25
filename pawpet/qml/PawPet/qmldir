@@ -4,6 +4,7 @@ singleton Theme 1.0 Theme.qml
 
 Card 1.0 Card.qml
 PawButton 1.0 PawButton.qml
+ConfirmDialog 1.0 ConfirmDialog.qml
 PermissionCard 1.0 PermissionCard.qml
 AiMcpPanel 1.0 AiMcpPanel.qml
 AiSettingsPanel 1.0 AiSettingsPanel.qml

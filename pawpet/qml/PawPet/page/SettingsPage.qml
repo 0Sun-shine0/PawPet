@@ -768,7 +768,9 @@ Flickable {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "当前生效：" + backend.hotkeySummary + "（改完需要重启才注册）"
+                    text: "当前配置：" + backend.hotkeySummary + "\n"
+                          + backend.hotkeyRegistrationStatus
+                          + "\n修改后需要重启才生效"
                     color: Theme.textFaint
                     font.family: Theme.font
                     font.pixelSize: Theme.fsSmall

@@ -10,6 +10,7 @@ Rectangle {
     property bool showProviders: false
     property bool showMemory: false
     property bool showKnowledge: false
+    property string pendingClearKind: ""
 
     signal providersVisibilityRequested(bool value)
     signal memoryVisibilityRequested(bool value)
@@ -598,7 +599,10 @@ Rectangle {
                         small: true
                         text: "清空"
                         enabled: backend.aiMemoryCount > 0
-                        onClicked: backend.aiClearMemory()
+                        onClicked: {
+                            settingsPanel.pendingClearKind = "memory"
+                            clearConfirmDialog.open()
+                        }
                     }
                 }
             }
@@ -729,8 +733,8 @@ Rectangle {
                         text: "清空"
                         enabled: backend.aiKnowledgeCount > 0
                         onClicked: {
-                            backend.aiClearKnowledge()
-                            kbResult.text = ""
+                            settingsPanel.pendingClearKind = "knowledge"
+                            clearConfirmDialog.open()
                         }
                     }
                 }
@@ -747,5 +751,28 @@ Rectangle {
                 }
             }
         }
+    }
+
+    ConfirmDialog {
+        id: clearConfirmDialog
+        objectName: "aiClearConfirmDialog"
+        heading: pendingClearKind === "memory" ? "清空记忆？" : "清空知识库？"
+        message: pendingClearKind === "memory"
+                 ? ("将删除当前保存的 " + backend.aiMemoryCount
+                    + " 条记忆，删除后无法恢复。")
+                 : ("将删除已导入的 " + backend.aiKnowledgeCount
+                    + " 份资料和 " + backend.aiKnowledgeChunks
+                    + " 个文本块，删除后无法恢复。")
+        confirmText: "确认清空"
+        onConfirmed: {
+            if (settingsPanel.pendingClearKind === "memory")
+                backend.aiClearMemory()
+            else if (settingsPanel.pendingClearKind === "knowledge") {
+                backend.aiClearKnowledge()
+                kbResult.text = ""
+            }
+            settingsPanel.pendingClearKind = ""
+        }
+        onClosed: settingsPanel.pendingClearKind = ""
     }
 }

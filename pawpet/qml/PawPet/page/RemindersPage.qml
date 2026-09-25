@@ -11,6 +11,7 @@ import PawPet 1.0
      * 窄窗口下输入行溢出，控件被挤出卡片外面 */
 Flickable {
     id: page
+    objectName: "remindersPage"
     contentWidth: width
     contentHeight: column.implicitHeight + 24
     clip: true
@@ -19,6 +20,8 @@ Flickable {
 
     property int repeatIndex: 1
     property int intervalMinutes: 30
+    property string timeError: ""
+    property string editTimeError: ""
 
     // 当前选中的重复方式（从 backend 的表里取，不在这里另写一份）
     readonly property var currentRepeat: {
@@ -30,9 +33,19 @@ Flickable {
     readonly property bool needInterval:
         currentRepeat ? currentRepeat.needsInterval : false
 
+    function isValidTime(value) {
+        return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value || "")
+    }
+
     function addReminder() {
         if (!titleInput.text.trim())
             return
+        if (page.needTime && !page.isValidTime(timeField.text)) {
+            page.timeError = "时间格式不对，请用 24 小时制，例如 09:30"
+            timeField.forceActiveFocus()
+            return
+        }
+        page.timeError = ""
         backend.reminders.add(titleInput.text, timeField.text,
                               currentRepeat ? currentRepeat.key : "daily",
                               page.intervalMinutes)
@@ -53,10 +66,12 @@ Flickable {
         return list.length > index ? list[index] : null
     }
 
-    function beginEdit(reminderId, title, when, repeat) {
+    function beginEdit(reminderId, title, when, repeat, every) {
         page.editingId = reminderId
+        page.editTimeError = ""
         editTitle.text = title
         editTime.text = when
+        page.editInterval = every > 0 ? every : 30
         // 把当前的重复方式反查成下拉的 index
         var list = backend.repeatOptions
         for (var i = 0; i < list.length; ++i) {
@@ -75,6 +90,13 @@ Flickable {
             editTitle.forceActiveFocus()
             return
         }
+        if (page.editRepeat && page.editRepeat.needsTime
+                && !page.isValidTime(editTime.text)) {
+            page.editTimeError = "时间格式不对，请用 24 小时制，例如 09:30"
+            editTime.forceActiveFocus()
+            return
+        }
+        page.editTimeError = ""
         backend.reminders.update(page.editingId, editTitle.text, editTime.text,
                                  page.editRepeat ? page.editRepeat.key : "",
                                  page.editInterval)
@@ -109,6 +131,7 @@ Flickable {
             // 两行各自都能在 300px 宽度下放下。
             PawField {
                 id: titleInput
+                objectName: "reminderTitleField"
                 Layout.fillWidth: true
                 placeholderText: "提醒内容，比如「喝水」「站起来走走」"
                 onAccepted: page.addReminder()
@@ -121,12 +144,14 @@ Flickable {
                 // 时间框：间隔重复不需要它（那个不看几点，只看距上次多久）
                 PawField {
                     id: timeField
+                    objectName: "reminderTimeField"
                     Layout.preferredWidth: 96
                     visible: page.needTime
                     horizontalAlignment: TextInput.AlignHCenter
                     text: "09:00"
                     font.family: Theme.fontMono
                     inputMask: "99:99"
+                    onTextChanged: page.timeError = ""
                     onAccepted: page.addReminder()
                 }
 
@@ -141,7 +166,10 @@ Flickable {
                     currentIndex: page.repeatIndex
                     font.family: Theme.font
                     font.pixelSize: Theme.fsBody
-                    onActivated: page.repeatIndex = currentIndex
+                    onActivated: {
+                        page.repeatIndex = currentIndex
+                        page.timeError = ""
+                    }
 
                     contentItem: Text {
                         leftPadding: 11
@@ -211,6 +239,17 @@ Flickable {
                         }
                     }
                 }
+            }
+
+            Text {
+                objectName: "reminderTimeError"
+                Layout.fillWidth: true
+                visible: page.timeError.length > 0 && page.needTime
+                text: page.timeError
+                color: Theme.rose
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
             }
 
             // ------------------------------------------------ 间隔选择
@@ -437,8 +476,10 @@ Flickable {
                             font.family: Theme.fontMono
                             font.pixelSize: Theme.px(model.repeat === "interval" ? 15 : 20)
                             font.bold: true
-                            // 时间列宽度固定，标题那列才好对齐
-                            Layout.preferredWidth: 56
+                            // 24 小时制的「10:30」需要比「每隔」更宽，
+                            // 否则标题会贴到时间尾部；窄窗口仍允许适度收缩。
+                            Layout.preferredWidth: model.repeat === "interval" ? 56 : 68
+                            Layout.minimumWidth: model.repeat === "interval" ? 48 : 62
                             horizontalAlignment: Text.AlignLeft
                         }
 
@@ -473,6 +514,7 @@ Flickable {
                             small: true
                             variant: "ghost"
                             text: "×"
+                            tooltipText: "删除提醒"
                             implicitWidth: 30
                             onClicked: backend.reminders.remove(model.reminderId)
                         }
@@ -491,14 +533,13 @@ Flickable {
                     //     布局会覆写锚点算出来的位置。
                     //     （我上一版就是这么写的，冒烟测试报出了这条警告。）
                     //
-                    // 现在挂在 delegate 根节点（那个 Rectangle）下、锚到开关
-                    // 左边：既不参与布局的宽度分配，也不跟布局抢位置。
-                    // 锚 `enabledSwitch.left` 而不是写死右边距 —— 开关宽度
-                    // 变了这里自动跟着走。
+                    // 现在挂在 delegate 根节点（那个 Rectangle）下、锚到根节点
+                    // 右边：既不参与布局的宽度分配，也不跟布局抢位置。
+                    // 右边距动态留出开关宽度，开关尺寸变化时浮层仍然不遮住它。
                     Row {
-                        anchors.right: enabledSwitch.left
-                        anchors.rightMargin: 8
-                        anchors.verticalCenter: enabledSwitch.verticalCenter
+                        anchors.right: parent.right
+                        anchors.rightMargin: enabledSwitch.width + 8
+                        anchors.verticalCenter: parent.verticalCenter
                         spacing: 4
                         visible: reminderMouse.containsMouse
 
@@ -518,7 +559,8 @@ Flickable {
                             onClicked: page.beginEdit(model.reminderId,
                                                       model.title,
                                                       model.time,
-                                                      model.repeat)
+                                                      model.repeat,
+                                                      model.every)
                         }
                     }
                 }
@@ -676,11 +718,17 @@ Flickable {
     // ------------------------------------------------------------ 编辑对话框
     Dialog {
         id: editDialog
+        objectName: "editReminderDialog"
         anchors.centerIn: parent
         width: Math.min(420, page.width - 48)
         modal: true
         padding: 0
         closePolicy: Popup.CloseOnEscape
+
+        onClosed: {
+            page.editingId = ""
+            page.editTimeError = ""
+        }
 
         background: Rectangle {
             color: Theme.surface
@@ -714,6 +762,7 @@ Flickable {
 
                 PawField {
                     id: editTime
+                    objectName: "editReminderTimeField"
                     Layout.preferredWidth: 96
                     visible: {
                         var r = page.editRepeat
@@ -722,6 +771,7 @@ Flickable {
                     horizontalAlignment: TextInput.AlignHCenter
                     font.family: Theme.fontMono
                     inputMask: "99:99"
+                    onTextChanged: page.editTimeError = ""
                     onAccepted: page.commitEdit()
                 }
 
@@ -734,7 +784,10 @@ Flickable {
                     currentIndex: page.editRepeatIndex
                     font.family: Theme.font
                     font.pixelSize: Theme.fsBody
-                    onActivated: page.editRepeatIndex = currentIndex
+                    onActivated: {
+                        page.editRepeatIndex = currentIndex
+                        page.editTimeError = ""
+                    }
 
                     contentItem: Text {
                         leftPadding: 11
@@ -772,6 +825,17 @@ Flickable {
                 }
 
                 Item { Layout.fillWidth: true }
+            }
+
+            Text {
+                objectName: "editReminderTimeError"
+                Layout.fillWidth: true
+                visible: page.editTimeError.length > 0
+                text: page.editTimeError
+                color: Theme.rose
+                font.family: Theme.font
+                font.pixelSize: Theme.fsTiny
+                wrapMode: Text.Wrap
             }
 
             // 间隔输入：只在「每 N 分钟」时出现
@@ -834,6 +898,59 @@ Flickable {
                     variant: "primary"
                     onClicked: page.commitEdit()
                 }
+            }
+        }
+    }
+
+    Timer {
+        id: undoTimer
+        interval: 6000
+        onTriggered: backend.reminders.clearUndo()
+    }
+
+    Connections {
+        target: backend.reminders
+        function onUndoChanged() {
+            if (backend.reminders.canUndo)
+                undoTimer.restart()
+            else
+                undoTimer.stop()
+        }
+    }
+
+    Rectangle {
+        objectName: "reminderUndoBar"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.gap
+        z: 10
+        width: Math.min(360, Math.max(260, parent.width - Theme.gap * 2))
+        height: 52
+        radius: Theme.radiusMd
+        visible: backend.reminders.canUndo
+        color: Theme.surfaceHi
+        border.width: 1
+        border.color: Theme.accent
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 8
+            spacing: 8
+
+            Text {
+                Layout.fillWidth: true
+                text: "已删除提醒：" + backend.reminders.lastRemovedTitle
+                color: Theme.text
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                elide: Text.ElideRight
+            }
+            PawButton {
+                small: true
+                text: "撤销"
+                variant: "accent"
+                onClicked: backend.reminders.undoRemove()
             }
         }
     }

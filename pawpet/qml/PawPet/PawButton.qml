@@ -9,6 +9,7 @@ Button {
     property string variant: "subtle"     // primary | accent | subtle | ghost | danger
     property string glyph: ""
     property bool small: false
+    property string tooltipText: ""
 
     implicitHeight: small ? 28 : 34
     implicitWidth: Math.max(small ? 60 : 76, row.implicitWidth + (small ? 20 : 28))
@@ -16,6 +17,11 @@ Button {
     font.family: Theme.font
     font.pixelSize: small ? Theme.fsSmall : Theme.fsBody
     hoverEnabled: true
+
+    ToolTip.visible: tooltipText.length > 0 && hovered
+    ToolTip.text: tooltipText
+    ToolTip.delay: 550
+    ToolTip.timeout: 3500
 
     readonly property color _bg: {
         switch (variant) {

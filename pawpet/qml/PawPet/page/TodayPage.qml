@@ -130,6 +130,34 @@ Flickable {
                 StatChip { value: String(backend.tasks.pendingCount); label: "待办剩余"; color: Theme.accent }
                 Item { Layout.fillWidth: true }
             }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                PawButton {
+                    objectName: "todayFocusAction"
+                    Layout.fillWidth: true
+                    text: backend.focus.running
+                          ? "查看" + backend.focus.modeLabel
+                          : (backend.focus.progress > 0.001
+                             ? "继续" + backend.focus.modeLabel
+                             : "开始" + backend.focus.modeLabel)
+                    glyph: backend.focus.running ? "◷" : "▶"
+                    variant: "primary"
+                    onClicked: backend.focus.running
+                               ? backend.showDashboard("focus")
+                               : backend.focus.toggle()
+                }
+                PawButton {
+                    objectName: "todayTasksAction"
+                    Layout.fillWidth: true
+                    text: "处理待办"
+                    glyph: "☑"
+                    variant: "ghost"
+                    onClicked: backend.showDashboard("tasks")
+                }
+            }
         }
 
         // ------------------------------------------------------ 近 7 天

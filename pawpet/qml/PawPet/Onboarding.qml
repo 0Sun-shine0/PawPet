@@ -74,9 +74,17 @@ Window {
     }
 
     function place() {
-        var area = backend.screenAt(0, 0)
+        var area = backend.primaryScreenArea()
         x = Math.round(area.x + (area.width - width) / 2)
         y = Math.round(area.y + (area.height - height) / 2)
+    }
+
+    Connections {
+        target: backend
+        function onScreenGeometryChanged() {
+            if (onboarding.visible)
+                onboarding.place()
+        }
     }
 
     // 关掉引导。done=true 表示用户走完了流程（两种都算走完）。

@@ -158,6 +158,137 @@ Flickable {
             }
         }
 
+        // ------------------------------------------------------ 关联待办
+        Card {
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.gap
+            Layout.rightMargin: Theme.gap
+            title: "本轮专注任务"
+            subtitle: "完成一轮专注后，自动给关联待办记 1 个番茄"
+
+            Text {
+                Layout.fillWidth: true
+                text: "不关联也可以；计时开始后不能中途更换，避免番茄记到错误的任务。"
+                color: Theme.textFaint
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.Wrap
+            }
+
+            ComboBox {
+                id: focusTaskBox
+                objectName: "focusTaskBox"
+                Layout.fillWidth: true
+                implicitHeight: 36
+                textRole: "text"
+                valueRole: "taskId"
+                model: backend.focusTaskOptions
+                enabled: !backend.focus.running
+                font.family: Theme.font
+                font.pixelSize: Theme.fsBody
+
+                function syncCurrentIndex() {
+                    var selected = String(backend.focus.taskId || "")
+                    var options = backend.focusTaskOptions || []
+                    var index = 0
+                    for (var i = 0; i < options.length; ++i) {
+                        if (String(options[i].taskId || "") === selected) {
+                            index = i
+                            break
+                        }
+                    }
+                    currentIndex = index
+                }
+
+                Component.onCompleted: syncCurrentIndex()
+                onActivated: function(index) {
+                    var options = backend.focusTaskOptions || []
+                    if (index >= 0 && index < options.length)
+                        backend.focus.taskId = String(options[index].taskId || "")
+                }
+
+                contentItem: Text {
+                    leftPadding: 11
+                    text: focusTaskBox.displayText || "暂无未完成待办"
+                    color: focusTaskBox.enabled ? Theme.text : Theme.textFaint
+                    font: focusTaskBox.font
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+                background: Rectangle {
+                    color: Theme.surfaceAlt
+                    radius: Theme.radiusMd
+                    border.width: 1
+                    border.color: focusTaskBox.activeFocus || focusTaskBox.hovered
+                                  ? Theme.accent : Theme.border
+                }
+                indicator: Text {
+                    x: focusTaskBox.width - width - 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "▾"
+                    color: focusTaskBox.enabled ? Theme.textDim : Theme.textFaint
+                    font.pixelSize: Theme.px(12)
+                }
+                popup: Popup {
+                    y: focusTaskBox.height + 4
+                    width: focusTaskBox.width
+                    implicitHeight: contentItem.implicitHeight + 8
+                    padding: 4
+                    background: Rectangle {
+                        color: Theme.surfaceHi
+                        radius: Theme.radiusMd
+                        border.width: 1
+                        border.color: Theme.border
+                    }
+                    contentItem: ListView {
+                        clip: true
+                        implicitHeight: contentHeight
+                        model: focusTaskBox.popup.visible ? focusTaskBox.delegateModel : null
+                        currentIndex: focusTaskBox.highlightedIndex
+                    }
+                }
+                delegate: ItemDelegate {
+                    id: focusTaskItem
+                    width: focusTaskBox.width - 8
+                    implicitHeight: 32
+                    contentItem: Text {
+                        leftPadding: 8
+                        text: modelData && modelData.text ? modelData.text : ""
+                        color: Theme.text
+                        font.family: Theme.font
+                        font.pixelSize: Theme.fsBody
+                        elide: Text.ElideRight
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: focusTaskItem.highlighted ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+                        radius: Theme.radiusSm
+                    }
+                }
+                Connections {
+                    target: backend
+                    function onTaskOptionsChanged() { focusTaskBox.syncCurrentIndex() }
+                }
+                Connections {
+                    target: backend.focus
+                    function onTick() { focusTaskBox.syncCurrentIndex() }
+                }
+            }
+
+            Text {
+                objectName: "focusTaskStatus"
+                Layout.fillWidth: true
+                visible: backend.focus.taskId.length > 0
+                text: backend.focus.taskLabel === "待办已删除"
+                      ? "原关联待办已删除，本轮完成后不会增加番茄。"
+                      : "当前关联：" + backend.focus.taskLabel + " · 完成本轮后 +1 个番茄"
+                color: backend.focus.taskLabel === "待办已删除" ? Theme.rose : Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.Wrap
+            }
+        }
+
         // ------------------------------------------------------ 快捷时长
         Card {
             Layout.fillWidth: true

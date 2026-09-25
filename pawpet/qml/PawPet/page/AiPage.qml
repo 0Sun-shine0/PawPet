@@ -19,6 +19,8 @@ Item {
     property bool showProviders: false
     // 「历史对话」面板。对话持久化之后，这是翻回去看的入口。
     property bool showHistory: false
+    property string pendingHistoryAction: ""
+    property string pendingHistorySessionId: ""
     // 「外部工具」的详情（server 清单、工具名、配置路径）。
     // **默认收起**：那部分有 200px 高，常驻会把右栏撑到 2000px 以上 ——
     // 「太占视野」是用户明确抱怨过的。标题行（状态点 + 开关）常驻就够用了。
@@ -26,15 +28,45 @@ Item {
     // 给自测用的只读探针：两栏的真实宽度
     readonly property real leftColumnWidth: leftColumn.width
     readonly property real rightColumnWidth: rightColumn.width
+
+    function revealPendingCard() {
+        var target = null
+        if (backend.ai.hasPendingQuestion) {
+            target = askCard
+        } else if (backend.ai.hasPendingApproval) {
+            target = approvalCard
+        } else if (backend.ai.hasPendingBatch) {
+            target = batchCard
+        }
+        if (!target || !target.visible || rightScroll.height <= 0)
+            return
+
+        var maxY = Math.max(0, rightScroll.contentHeight - rightScroll.height)
+        rightScroll.contentY = maxY
+    }
+
+    Timer {
+        id: pendingRevealTimer
+        interval: 0
+        repeat: false
+        onTriggered: page.revealPendingCard()
+    }
+
+    Connections {
+        target: backend.ai
+        function onApprovalChanged() {
+            if (backend.ai.hasPendingApproval || backend.ai.hasPendingBatch)
+                pendingRevealTimer.restart()
+        }
+    }
     // 对话区填满右栏滚动视口剩余的空间。放在页面级计算，避免把
     // `y` 直接写进卡片的 Layout.preferredHeight 后出现绑定不刷新的情况。
 
-    RowLayout {
+    Item {
         id: aiRow
         objectName: "aiRow"          // 联调脚本靠它量布局
         anchors.fill: parent
         anchors.margins: Theme.gap
-        spacing: Theme.gap
 
         // ============================================================ 左栏
         ColumnLayout {
@@ -43,10 +75,11 @@ Item {
             // preferredWidth 只是个偏好：一旦右栏的隐式宽度很大（聊天气泡里的
             // 长文本），RowLayout 会把空间让给「更想要宽」的那一侧，右栏就会被
             // 压成 0 宽。所以这里必须同时钉死上下限，让左栏宽度不可协商。
-            Layout.preferredWidth: 320
-            Layout.minimumWidth: 280
-            Layout.maximumWidth: 360
-            Layout.fillHeight: true
+            x: 0
+            y: 0
+            width: Math.min(360, Math.max(280,
+                          aiRow.width - Theme.gap - 380))
+            height: aiRow.height
             spacing: Theme.gap
 
             // -------------------------------------------------- 屏幕预览
@@ -207,9 +240,10 @@ Item {
         ColumnLayout {
             id: rightPane
             objectName: "aiRightPane"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumWidth: 380
+            x: leftColumn.x + leftColumn.width + Theme.gap
+            y: 0
+            width: Math.max(380, aiRow.width - leftColumn.width - Theme.gap)
+            height: aiRow.height
             spacing: Theme.gap
         Flickable {
             id: rightScroll
@@ -318,12 +352,12 @@ Item {
             AiHistoryPanel {
                 id: historyCard
                 expanded: page.showHistory
-                onClearHistoryRequested: backend.ai.clearHistory()
+                onClearHistoryRequested: page.confirmClearHistory()
                 onOpenConversationRequested: function (sessionId) {
                     backend.ai.openConversation(sessionId)
                 }
                 onDeleteConversationRequested: function (sessionId) {
-                    backend.ai.deleteConversation(sessionId)
+                    page.confirmDeleteHistory(sessionId)
                 }
             }
 
@@ -458,17 +492,17 @@ Item {
                     // messages 是 QVariantList，delegate 里用 modelData 取元素
                     delegate: AiBubble {
                         width: chat.width
-                        role: modelData.role
-                        text: modelData.text
+                        role: modelData.role || "info"
+                        text: modelData.text || ""
                         html: modelData.html || ""
                         plain: modelData.plain || ""
-                        detail: modelData.detail
-                        toolName: modelData.tool
-                        risk: modelData.risk
-                        ok: modelData.ok
-                        stamp: modelData.time
-                        seconds: modelData.seconds
-                        imageSource: modelData.image
+                        detail: modelData.detail || ""
+                        toolName: modelData.tool || ""
+                        risk: modelData.risk || ""
+                        ok: modelData.ok === undefined ? true : modelData.ok
+                        stamp: modelData.time || ""
+                        seconds: Number(modelData.seconds || 0)
+                        imageSource: modelData.image || ""
                         recovery: modelData.recovery || ""
                         report: modelData.report || ""
                     }
@@ -724,13 +758,16 @@ Item {
             // 「你想怎么做」，所以给的是选项按钮或输入框，不是允许/拒绝。
             Rectangle {
                 id: askCard
+                objectName: "askCard"
                 Layout.fillWidth: true
                 visible: backend.ai.hasPendingQuestion
-                implicitHeight: askColumn.implicitHeight + 26
+                implicitHeight: Math.max(askColumn.implicitHeight + 26, 228)
                 radius: Theme.radiusLg
                 color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.09)
                 border.width: 2
                 border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.45)
+                onVisibleChanged: if (visible) pendingRevealTimer.restart()
+                onHeightChanged: if (visible && height > 0) pendingRevealTimer.restart()
 
                 property var answerOptions: backend.ai.pendingApproval.options
                                                ? backend.ai.pendingApproval.options : []
@@ -836,14 +873,18 @@ Item {
 
             // -------------------------------------------------- 审批卡片
             Rectangle {
+                id: approvalCard
+                objectName: "approvalCard"
                 Layout.fillWidth: true
                 // 提问卡和审批卡不能同时出现，样式也完全不同
                 visible: backend.ai.hasPendingApproval && !backend.ai.hasPendingQuestion
-                implicitHeight: approveColumn.implicitHeight + 26
+                implicitHeight: Math.max(approveColumn.implicitHeight + 26, 210)
                 radius: Theme.radiusLg
                 color: Qt.rgba(Theme.gold.r, Theme.gold.g, Theme.gold.b, 0.10)
                 border.width: 2
                 border.color: Qt.rgba(Theme.gold.r, Theme.gold.g, Theme.gold.b, 0.65)
+                onVisibleChanged: if (visible) pendingRevealTimer.restart()
+                onHeightChanged: if (visible && height > 0) pendingRevealTimer.restart()
 
                 ColumnLayout {
                     id: approveColumn
@@ -938,13 +979,19 @@ Item {
             // 关键：减少的是「问几次」，不是「给多少信息」——清单仍然是完整的。
             Rectangle {
                 id: batchCard
+                objectName: "batchCard"
                 Layout.fillWidth: true
                 visible: backend.ai.hasPendingBatch
-                implicitHeight: batchColumn.implicitHeight + 26
+                implicitHeight: Math.max(
+                    batchColumn.implicitHeight + 26,
+                    146 + backend.ai.pendingBatch.length * 38)
+                Layout.minimumHeight: 184
                 radius: Theme.radiusLg
                 color: Qt.rgba(Theme.violet.r, Theme.violet.g, Theme.violet.b, 0.10)
                 border.width: 2
                 border.color: Qt.rgba(Theme.violet.r, Theme.violet.g, Theme.violet.b, 0.65)
+                onVisibleChanged: if (visible) pendingRevealTimer.restart()
+                onHeightChanged: if (visible && height > 0) pendingRevealTimer.restart()
 
                 // 用户逐条勾选的状态。默认全选 —— 嫌烦就一键全允许，
                 // 想细看就点掉不想做的。
@@ -1227,6 +1274,47 @@ Item {
                 }
             }
         }
+    }
+
+    ConfirmDialog {
+        id: historyConfirmDialog
+        objectName: "historyConfirmDialog"
+        heading: page.pendingHistoryAction === "clear"
+                 ? "清空历史对话？" : "删除这段历史对话？"
+        message: page.pendingHistoryAction === "clear"
+                 ? "将删除除当前对话外的所有历史记录，删除后无法恢复。"
+                 : "这段对话会从历史记录中永久删除，删除后无法恢复。"
+        confirmText: page.pendingHistoryAction === "clear"
+                     ? "清空历史" : "删除对话"
+        onConfirmed: {
+            if (page.pendingHistoryAction === "clear")
+                backend.ai.clearHistory()
+            else if (page.pendingHistoryAction === "delete"
+                     && page.pendingHistorySessionId.length > 0)
+                backend.ai.deleteConversation(page.pendingHistorySessionId)
+            page.pendingHistoryAction = ""
+            page.pendingHistorySessionId = ""
+        }
+        onClosed: {
+            page.pendingHistoryAction = ""
+            page.pendingHistorySessionId = ""
+        }
+    }
+
+    function confirmClearHistory() {
+        if (backend.ai.conversationCount <= 1)
+            return
+        page.pendingHistoryAction = "clear"
+        page.pendingHistorySessionId = ""
+        historyConfirmDialog.open()
+    }
+
+    function confirmDeleteHistory(sessionId) {
+        if (!sessionId)
+            return
+        page.pendingHistoryAction = "delete"
+        page.pendingHistorySessionId = sessionId
+        historyConfirmDialog.open()
     }
 
     function submit() {

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
+import shutil
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -163,6 +165,11 @@ def default_state() -> dict:
             "remaining": 25 * 60,      # 暂停/空闲时的剩余秒数
             "round": 0,
             "total_minutes": 25,
+            # 当前专注轮关联的待办。空串表示不关联。
+            "task_id": "",
+            # 专注完成后待记入的番茄，先落盘再由 Backend 消费，
+            # 这样程序恰好在结算后退出也不会丢统计。
+            "pending_task_pomodoro": "",
         },
         "counters": {
             "focus_rounds": 0,
@@ -172,6 +179,470 @@ def default_state() -> dict:
     }
 
 
+def _safe_int(value, default: int | None = 0, low: int | None = None,
+              high: int | None = None) -> int | None:
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        result = default
+    if result is None:
+        return None
+    if low is not None:
+        result = max(low, result)
+    if high is not None:
+        result = min(high, result)
+    return result
+
+
+def _safe_float(value, default: float = 0.0, low: float | None = None,
+                high: float | None = None) -> float:
+    try:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        result = default
+    if low is not None:
+        result = max(low, result)
+    if high is not None:
+        result = min(high, result)
+    return result
+
+
+def _safe_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on", "是", "开"}:
+            return True
+        if text in {"0", "false", "no", "off", "否", "关"}:
+            return False
+    return default
+
+
+def _safe_text(value, default: str = "", limit: int | None = None) -> str:
+    if isinstance(value, bool):
+        return default
+    if not isinstance(value, (str, int, float)):
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    return text[:limit] if limit is not None else text
+
+
+def _safe_timestamp(value, default: float | None = None) -> float | None:
+    result = _safe_float(value, float("nan"))
+    if not math.isfinite(result) or result < 0 or result > 4102444800:
+        return default
+    return result
+
+
+def _safe_date(value: object) -> str | None:
+    text = _safe_text(value, "")
+    if not text:
+        return None
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return text
+
+
+def _safe_clock(value: object, default: str = "09:00") -> str:
+    text = _safe_text(value, "")
+    if not text:
+        return default
+    parts = text.split(":", 1)
+    if len(parts) != 2:
+        return default
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return default
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _safe_schema(value: object) -> tuple[int, bool]:
+    if value is None:
+        return 0, False
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError
+        version = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return SCHEMA_VERSION, True
+    if version < 0:
+        return SCHEMA_VERSION, True
+    return version, False
+
+
+def _different(raw, normalized) -> bool:
+    try:
+        return raw != normalized
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _normalize_settings(raw_settings: object) -> tuple[dict, bool]:
+    repaired = raw_settings is not None and not isinstance(raw_settings, dict)
+    defaults = default_settings()
+    settings = dict(defaults)
+    if isinstance(raw_settings, dict):
+        settings.update(raw_settings)
+
+    int_limits = {
+        "focus_minutes": (1, 240),
+        "short_break_minutes": (1, 240),
+        "long_break_minutes": (1, 240),
+        "rounds_before_long_break": (1, 12),
+        "move_step": (1, 200),
+        "sit_reminder_minutes": (5, 480),
+        "afk_minutes": (1, 120),
+        "daily_goal_minutes": (1, 1440),
+        "ai_max_steps": (1, 100),
+        "pet_snap_distance": (1, 300),
+    }
+    float_limits = {
+        "pet_scale": (0.6, 2.4),
+        "pet_opacity": (0.05, 1.0),
+        "ui_scale": (0.0, 3.0),
+        "pet_snap_hide_ratio": (0.0, 0.95),
+        "update_last_check": (0.0, 4102444800.0),
+    }
+    enum_values = {
+        "ai_level": {"read_only", "confirm", "auto", "full"},
+        "pet_click_action": {"command", "dashboard"},
+        "command_bar_anchor": {"pet", "bottom"},
+        "ai_extension_level": {"note", "recipe", "code"},
+    }
+    extra_ints = {
+        "ai_timeout": (5, 600, 90),
+        "ai_monitor": (1, 16, 1),
+    }
+
+    for key, default in defaults.items():
+        if key not in settings:
+            continue
+        raw_value = settings[key]
+        if isinstance(default, bool):
+            normalized = _safe_bool(raw_value, default)
+        elif isinstance(default, int):
+            low, high = int_limits.get(key, (None, None))
+            normalized = _safe_int(raw_value, default, low, high)
+        elif isinstance(default, float):
+            low, high = float_limits.get(key, (None, None))
+            normalized = _safe_float(raw_value, default, low, high)
+        else:
+            normalized = _safe_text(raw_value, default)
+        if key in enum_values and normalized not in enum_values[key]:
+            normalized = default
+        if _different(raw_value, normalized):
+            repaired = True
+        settings[key] = normalized
+
+    for key, (low, high, default) in extra_ints.items():
+        if key not in settings:
+            continue
+        raw_value = settings[key]
+        normalized = _safe_int(raw_value, default, low, high)
+        if _different(raw_value, normalized):
+            repaired = True
+        settings[key] = normalized
+
+    return settings, repaired
+
+
+def _normalize_task(raw: dict, now: float, used: set[str]) -> tuple[dict | None, bool]:
+    repaired = False
+    item = dict(raw)
+    raw_id = raw.get("id")
+    task_id = _safe_text(raw_id, "")
+    if not task_id or task_id in used:
+        task_id = _new_id("t")
+        repaired = True
+    elif _different(raw_id, task_id):
+        repaired = True
+    used.add(task_id)
+
+    raw_text = raw.get("text")
+    text = _safe_text(raw_text, "", 200)
+    if not text:
+        return None, True
+    if _different(raw_text, text):
+        repaired = True
+
+    done = _safe_bool(raw.get("done"), False)
+    if "done" in raw and _different(raw.get("done"), done):
+        repaired = True
+    created = _safe_timestamp(raw.get("created"), now)
+    if "created" in raw and _different(raw.get("created"), created):
+        repaired = True
+    priority = _safe_int(raw.get("priority"), 0, 0, 2)
+    if "priority" in raw and _different(raw.get("priority"), priority):
+        repaired = True
+    pomodoros = _safe_int(raw.get("pomodoros"), 0, 0, 999999)
+    if "pomodoros" in raw and _different(raw.get("pomodoros"), pomodoros):
+        repaired = True
+    if done:
+        done_at = _safe_timestamp(raw.get("done_at"), created)
+    else:
+        done_at = None
+    if "done_at" in raw and _different(raw.get("done_at"), done_at):
+        repaired = True
+    due = _safe_date(raw.get("due"))
+    if "due" in raw and _different(raw.get("due"), due):
+        repaired = True
+
+    item.update({
+        "id": task_id,
+        "text": text,
+        "done": done,
+        "created": created,
+        "done_at": done_at,
+        "priority": priority,
+        "due": due,
+        "pomodoros": pomodoros,
+    })
+    return item, repaired
+
+
+def _normalize_tasks(raw_items: object, now: float) -> tuple[list, bool]:
+    if not isinstance(raw_items, list):
+        return [], raw_items is not None
+    repaired = False
+    used: set[str] = set()
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            repaired = True
+            continue
+        item, item_repaired = _normalize_task(raw, now, used)
+        repaired = repaired or item_repaired
+        if item is not None:
+            items.append(item)
+    if len(items) > MAX_TASKS:
+        items = items[-MAX_TASKS:]
+        repaired = True
+    return items, repaired
+
+
+def _normalize_reminder(raw: dict, now: float, used: set[str]) -> tuple[dict, bool]:
+    repaired = False
+    item = dict(raw)
+    raw_id = raw.get("id")
+    reminder_id = _safe_text(raw_id, "")
+    if not reminder_id or reminder_id in used:
+        reminder_id = _new_id("r")
+        repaired = True
+    elif _different(raw_id, reminder_id):
+        repaired = True
+    used.add(reminder_id)
+
+    title = _safe_text(raw.get("title"), "提醒", 80)
+    if "title" in raw and _different(raw.get("title"), title):
+        repaired = True
+    clock = _safe_clock(raw.get("time"), "09:00")
+    if "time" in raw and _different(raw.get("time"), clock):
+        repaired = True
+    repeat = _safe_text(raw.get("repeat"), "once")
+    if repeat not in {"once", "daily", "weekdays", "weekly", "interval"}:
+        repeat = "once"
+        repaired = True
+    enabled = _safe_bool(raw.get("enabled"), True)
+    if "enabled" in raw and _different(raw.get("enabled"), enabled):
+        repaired = True
+    created = _safe_timestamp(raw.get("created"), now)
+    if "created" in raw and _different(raw.get("created"), created):
+        repaired = True
+    date_value = _safe_date(raw.get("date"))
+    if repeat not in {"once", "weekly"}:
+        date_value = None
+    if "date" in raw and _different(raw.get("date"), date_value):
+        repaired = True
+    if repeat == "interval":
+        last_fired = _safe_timestamp(raw.get("last_fired"), None)
+        every = _safe_int(raw.get("every"), 30, 1, 720)
+    else:
+        last_fired = _safe_date(raw.get("last_fired"))
+        every = 0
+    if "last_fired" in raw and _different(raw.get("last_fired"), last_fired):
+        repaired = True
+    if "every" in raw and _different(raw.get("every"), every):
+        repaired = True
+
+    item.update({
+        "id": reminder_id,
+        "title": title,
+        "time": clock,
+        "date": date_value,
+        "repeat": repeat,
+        "enabled": enabled,
+        "last_fired": last_fired,
+        "created": created,
+        "every": every,
+    })
+    return item, repaired
+
+
+def _normalize_reminders(raw_items: object, now: float) -> tuple[list, bool]:
+    if not isinstance(raw_items, list):
+        return [], raw_items is not None
+    repaired = False
+    used: set[str] = set()
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            repaired = True
+            continue
+        item, item_repaired = _normalize_reminder(raw, now, used)
+        repaired = repaired or item_repaired
+        items.append(item)
+    if len(items) > 200:
+        items = items[-200:]
+        repaired = True
+    return items, repaired
+
+
+def _normalize_note(raw: dict, now: float, used: set[str]) -> tuple[dict, bool]:
+    repaired = False
+    item = dict(raw)
+    raw_id = raw.get("id")
+    note_id = _safe_text(raw_id, "")
+    if not note_id or note_id in used:
+        note_id = _new_id("n")
+        repaired = True
+    elif _different(raw_id, note_id):
+        repaired = True
+    used.add(note_id)
+
+    title = _safe_text(raw.get("title"), "无标题", 60)
+    text = _safe_text(raw.get("text"), "")
+    created = _safe_timestamp(raw.get("created"), now)
+    updated = _safe_timestamp(raw.get("updated"), created)
+    for key, normalized in (("title", title), ("text", text),
+                            ("created", created), ("updated", updated)):
+        if key in raw and _different(raw.get(key), normalized):
+            repaired = True
+    item.update({
+        "id": note_id,
+        "title": title,
+        "text": text,
+        "created": created,
+        "updated": updated,
+    })
+    return item, repaired
+
+
+def _normalize_notes(raw_items: object, now: float) -> tuple[list, bool]:
+    if not isinstance(raw_items, list):
+        return [], raw_items is not None
+    repaired = False
+    used: set[str] = set()
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            repaired = True
+            continue
+        item, item_repaired = _normalize_note(raw, now, used)
+        repaired = repaired or item_repaired
+        items.append(item)
+    if len(items) > 200:
+        items = items[-200:]
+        repaired = True
+    return items, repaired
+
+
+def _normalize_session(raw: dict, now: float, used: set[str]) -> tuple[dict, bool]:
+    repaired = False
+    item = dict(raw)
+    raw_id = raw.get("id")
+    session_id = _safe_text(raw_id, "")
+    if not session_id or session_id in used:
+        session_id = _new_id("s")
+        repaired = True
+    elif _different(raw_id, session_id):
+        repaired = True
+    used.add(session_id)
+    start = _safe_timestamp(raw.get("start"), 0.0)
+    end = _safe_timestamp(raw.get("end"), start or now)
+    minutes = _safe_int(raw.get("minutes"), 0, 0, 1440)
+    label = _safe_text(raw.get("label"), "专注", 80)
+    offline = _safe_bool(raw.get("offline"), False)
+    for key, normalized in (("start", start), ("end", end),
+                            ("minutes", minutes), ("label", label),
+                            ("offline", offline)):
+        if key in raw and _different(raw.get(key), normalized):
+            repaired = True
+    item.update({
+        "id": session_id,
+        "start": start,
+        "end": end,
+        "minutes": minutes,
+        "label": label,
+        "offline": offline,
+    })
+    return item, repaired
+
+
+def _normalize_sessions(raw_items: object, now: float) -> tuple[list, bool]:
+    if not isinstance(raw_items, list):
+        return [], raw_items is not None
+    repaired = False
+    used: set[str] = set()
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            repaired = True
+            continue
+        item, item_repaired = _normalize_session(raw, now, used)
+        repaired = repaired or item_repaired
+        items.append(item)
+    if len(items) > 500:
+        items = items[-500:]
+        repaired = True
+    return items, repaired
+
+
+def _normalize_stats(raw_stats: object) -> tuple[dict, bool]:
+    if not isinstance(raw_stats, dict):
+        return {}, raw_stats is not None
+    repaired = False
+    stats = {}
+    for raw_day, raw_entry in raw_stats.items():
+        day = _safe_text(raw_day, "")
+        if not day:
+            repaired = True
+            continue
+        if not isinstance(raw_entry, dict):
+            stats[day] = {}
+            repaired = True
+            continue
+        entry = dict(raw_entry)
+        for key in ("focus_minutes", "focus_rounds", "tasks_done"):
+            if key not in entry:
+                continue
+            normalized = _safe_int(entry[key], 0, 0, 100000000)
+            if _different(entry[key], normalized):
+                repaired = True
+            entry[key] = normalized
+        stats[day] = entry
+        if _different(raw_day, day):
+            repaired = True
+    return stats, repaired
+
+
 class Store:
     """线程安全的数据仓库。所有修改最后都要调用 save()。"""
 
@@ -179,20 +650,35 @@ class Store:
         self.path = Path(path)
         self.backup_path = Path(backup)
         self._lock = threading.RLock()
+        self._save_lock = threading.Lock()
         self.state: dict = default_state()
         self.migrated_from: str | None = None
+        self.repaired: bool = False
+        self._preserve_backup_once: bool = False
         # 主文件读失败时的原始异常信息，用来给用户一个准确的解释
         self.load_error: str = ""
+        # 主文件无法解析时，会在保存前把原文留成一个独立快照，避免
+        # 「没有备份 → 启动后第一次自动保存 → 唯一证据被覆盖」。
+        self.corrupt_path: Path | None = None
 
     # ------------------------------------------------------------------ 读写
     def load(self) -> dict:
         with self._lock:
+            self.repaired = False
+            self._preserve_backup_once = False
+            self.migrated_from = None
+            self.load_error = ""
+            self.corrupt_path = None
             raw = self._read_json(self.path)
             if raw is None:
                 # 主文件确实存在却读不出来，说明它真的坏了（或者不是合法 JSON）。
                 # 这时才回退到备份，并且记录下来让界面能提示用户。
                 if self.path.exists():
                     self.load_error = "主数据文件无法解析"
+                    self.corrupt_path = self._preserve_corrupt_file()
+                    self._preserve_backup_once = True
+                elif self.backup_path.exists():
+                    self.load_error = "主数据文件不存在"
                 raw = self._read_json(self.backup_path)
                 if raw is not None:
                     self.migrated_from = "backup"
@@ -200,7 +686,38 @@ class Store:
                 self.state = default_state()
                 return self.state
             self.state = self._migrate(raw)
+            if self.repaired:
+                self._preserve_backup_once = True
             return self.state
+
+    def _preserve_corrupt_file(self) -> Path | None:
+        """保存一份无法解析的主文件原文，避免后续 save() 覆盖证据。"""
+        if not self.path.is_file():
+            return None
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stem = self.path.stem or self.path.name
+        suffix = self.path.suffix
+        for index in range(1000):
+            extra = "" if index == 0 else f"-{index}"
+            candidate = self.path.with_name(
+                f"{stem}.corrupt-{stamp}{extra}{suffix}"
+            )
+            try:
+                with self.path.open("rb") as source, candidate.open("xb") as target:
+                    shutil.copyfileobj(source, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                return candidate
+            except FileExistsError:
+                continue
+            except OSError:
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+        return None
 
     @staticmethod
     def _read_json(path: Path) -> dict | None:
@@ -221,7 +738,8 @@ class Store:
 
     # ------------------------------------------------------------------ 迁移
     def _migrate(self, raw: dict) -> dict:
-        version = int(raw.get("schema") or 0)
+        version, invalid_schema = _safe_schema(raw.get("schema"))
+        self.repaired = invalid_schema
 
         if version < 2:
             # v1 = 旧 pet.py 的扁平结构：tasks/note/focus_seconds/timer_mode/break_minutes
@@ -280,27 +798,150 @@ class Store:
         # 通用的 `v is not None` 会把它们过滤掉，于是每次启动都回到默认角。
         state.update({k: v for k, v in raw.items()
                       if v is not None or k in ("pet_x", "pet_y")})
-        merged_settings = default_settings()
-        merged_settings.update(raw.get("settings") or {})
+        raw_settings = raw.get("settings")
+        merged_settings, settings_repaired = _normalize_settings(raw_settings)
+        self.repaired = self.repaired or settings_repaired
         state["settings"] = merged_settings
         merged_focus = default_state()["focus"]
-        merged_focus.update(raw.get("focus") or {})
+        raw_focus = raw.get("focus")
+        if isinstance(raw_focus, dict):
+            merged_focus.update(raw_focus)
+        elif raw_focus is not None:
+            self.repaired = True
         state["focus"] = merged_focus
         merged_counters = default_state()["counters"]
-        merged_counters.update(raw.get("counters") or {})
+        raw_counters = raw.get("counters")
+        if isinstance(raw_counters, dict):
+            merged_counters.update(raw_counters)
+        elif raw_counters is not None:
+            self.repaired = True
         state["counters"] = merged_counters
-        for key in ("tasks", "reminders", "notes", "sessions"):
-            if not isinstance(state.get(key), list):
-                state[key] = []
-        if not isinstance(state.get("stats"), dict):
-            state["stats"] = {}
         # 老版本没有 memory / knowledge 这两个键，补空字典让上层自己去解析
         if not isinstance(state.get("memory"), dict):
             state["memory"] = {}
+            if raw.get("memory") is not None:
+                self.repaired = True
         if not isinstance(state.get("knowledge"), dict):
             state["knowledge"] = {}
+            if raw.get("knowledge") is not None:
+                self.repaired = True
+
+        state, state_repaired = self._normalize_state(state, raw)
+        self.repaired = self.repaired or state_repaired
         state["schema"] = SCHEMA_VERSION
         return state
+
+    def _normalize_state(self, state: dict, raw: dict | None = None) -> tuple[dict, bool]:
+        source = raw if isinstance(raw, dict) else state
+        now = time.time()
+        repaired = False
+
+        tasks, changed = _normalize_tasks(source.get("tasks"), now)
+        state["tasks"] = tasks
+        repaired = repaired or changed
+        reminders, changed = _normalize_reminders(source.get("reminders"), now)
+        state["reminders"] = reminders
+        repaired = repaired or changed
+        notes, changed = _normalize_notes(source.get("notes"), now)
+        state["notes"] = notes
+        repaired = repaired or changed
+        sessions, changed = _normalize_sessions(source.get("sessions"), now)
+        state["sessions"] = sessions
+        repaired = repaired or changed
+        stats, changed = _normalize_stats(source.get("stats"))
+        state["stats"] = stats
+        repaired = repaired or changed
+
+        settings = state.get("settings")
+        if not isinstance(settings, dict):
+            settings = default_settings()
+            repaired = True
+        state["settings"], changed = _normalize_settings(settings)
+        repaired = repaired or changed
+
+        focus = dict(default_state()["focus"])
+        raw_focus = source.get("focus")
+        if isinstance(raw_focus, dict):
+            focus.update(raw_focus)
+        elif raw_focus is not None:
+            repaired = True
+        mode = _safe_text(focus.get("mode"), "focus")
+        if mode not in {"focus", "short_break", "long_break"}:
+            mode = "focus"
+            repaired = True
+        running = _safe_bool(focus.get("running"), False)
+        if "running" in focus and _different(focus.get("running"), running):
+            repaired = True
+        remaining_default = max(1, _safe_int(
+            state["settings"].get("focus_minutes"), 25, 1, 240)) * 60.0
+        remaining = _safe_float(focus.get("remaining"), remaining_default, 0.0, 7 * 24 * 3600.0)
+        total_minutes = _safe_int(focus.get("total_minutes"), 25, 1, 240)
+        round_number = _safe_int(focus.get("round"), 0, 0, 100000000)
+        end_epoch = _safe_timestamp(focus.get("end_epoch"), 0.0) or 0.0
+        raw_end = focus.get("end_epoch")
+        if running and (not raw_end or end_epoch <= 0):
+            running = False
+            end_epoch = 0.0
+            repaired = True
+        task_id = _safe_text(focus.get("task_id"), "")
+        pending = _safe_text(focus.get("pending_task_pomodoro"), "")
+        for key, normalized in (
+            ("mode", mode), ("remaining", remaining),
+            ("total_minutes", total_minutes), ("round", round_number),
+            ("end_epoch", end_epoch), ("task_id", task_id),
+            ("pending_task_pomodoro", pending),
+        ):
+            if key in focus and _different(focus.get(key), normalized):
+                repaired = True
+        focus.update({
+            "mode": mode,
+            "running": running,
+            "end_epoch": end_epoch,
+            "remaining": remaining,
+            "round": round_number,
+            "total_minutes": total_minutes,
+            "task_id": task_id,
+            "pending_task_pomodoro": pending,
+        })
+        state["focus"] = focus
+
+        counters = dict(default_state()["counters"])
+        raw_counters = source.get("counters")
+        if isinstance(raw_counters, dict):
+            counters.update(raw_counters)
+        elif raw_counters is not None:
+            repaired = True
+        for key, default, high in (
+            ("focus_rounds", 0, 100000000),
+            ("completed_total", 0, 100000000),
+        ):
+            normalized = _safe_int(counters.get(key), default, 0, high)
+            if key in counters and _different(counters.get(key), normalized):
+                repaired = True
+            counters[key] = normalized
+        sit_since = _safe_timestamp(counters.get("sit_since_epoch"), now) or now
+        if "sit_since_epoch" in counters and _different(
+                counters.get("sit_since_epoch"), sit_since):
+            repaired = True
+        counters["sit_since_epoch"] = sit_since
+        state["counters"] = counters
+
+        for key in ("pet_x", "pet_y"):
+            value = state.get(key)
+            if value is None:
+                continue
+            normalized = _safe_int(value, None, -100000, 100000)
+            if _different(value, normalized):
+                repaired = True
+            state[key] = normalized
+        edge = _safe_text(state.get("pet_edge"), "")
+        if edge not in {"", "left", "right", "top", "bottom"}:
+            edge = ""
+            repaired = True
+        if "pet_edge" in state and _different(state.get("pet_edge"), edge):
+            repaired = True
+        state["pet_edge"] = edge
+        return state, repaired
 
     # ------------------------------------------------------------------ 保存
     #
@@ -325,33 +966,37 @@ class Store:
     # 所以节流省的是 0 次调用，拆文件省的是 0.6ms。debounce 还会带来一个
     # 真实的新风险：崩在 flush 之前就丢数据。拿 0.6ms 换这个是亏的。
     def save(self) -> bool:
-        with self._lock:
-            payload = copy.deepcopy(self.state)
-        payload["schema"] = SCHEMA_VERSION
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            # 保存前留一份上一版备份
-            if self.path.exists():
+        with self._save_lock:
+            with self._lock:
+                payload = copy.deepcopy(self.state)
+                preserve_backup = self._preserve_backup_once
+            payload["schema"] = SCHEMA_VERSION
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                # 保存前留一份上一版备份
+                if self.path.exists() and not preserve_backup:
+                    try:
+                        with open(self.path, "rb") as src:
+                            previous = src.read()
+                        if previous.strip():
+                            with open(self.backup_path, "wb") as dst:
+                                dst.write(previous)
+                    except OSError:
+                        pass
+                os.replace(tmp, self.path)
+                with self._lock:
+                    self._preserve_backup_once = False
+                return True
+            except OSError:
                 try:
-                    with open(self.path, "rb") as src:
-                        previous = src.read()
-                    if previous.strip():
-                        with open(self.backup_path, "wb") as dst:
-                            dst.write(previous)
+                    tmp.unlink(missing_ok=True)
                 except OSError:
                     pass
-            os.replace(tmp, self.path)
-            return True
-        except OSError:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return False
+                return False
 
     # ------------------------------------------------------------- 属性访问
     @property

@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,8 @@ def main() -> int:
     QQuickStyle.setStyle("Basic")
     app = QApplication(sys.argv[:1])
 
+    os.environ["OPENAI_API_KEY"] = "ui-test-key"
+
     store = Store(SCRATCH / "pet_data.json", SCRATCH / "pet_data.backup.json")
     store.load()
     # 造一点内容，不然截图里全是空状态看不清布局
@@ -71,6 +74,7 @@ def main() -> int:
     def pump(times: int = 20) -> None:
         for _ in range(times):
             app.processEvents()
+            time.sleep(0.004)
 
     pump()
     dash = root.findChild(QObject, "dashboardWindow", Qt.FindChildrenRecursively)
@@ -137,14 +141,12 @@ def main() -> int:
                     settings_scroll = child
                     break
     if settings_scroll is not None:
-        from PySide6.QtCore import QMetaObject as _QMO2
-        _QMO2.invokeMethod(settings_scroll, "positionViewAtEnd")
+        content_height = float(settings_scroll.property("contentHeight") or 0)
+        viewport_height = float(settings_scroll.property("height") or 0)
+        max_y = max(0.0, content_height - viewport_height)
+        settings_scroll.setProperty("contentY", max_y)
         pump(20)
-        _QMO2.invokeMethod(settings_scroll, "positionViewAtBeginning")
-        pump(20)
-        settings_scroll.setProperty(
-            "contentY",
-            float(settings_scroll.property("contentHeight")) * 0.42)
+        settings_scroll.setProperty("contentY", max_y * 0.42)
         pump(20)
         grab("01-settings-配色")
     else:
@@ -180,11 +182,11 @@ def main() -> int:
     ai.messagesChanged.emit()
     pump(30)
     # 把对话列表滚到底，否则新加的这条落在可视区外，截出来是空的。
-    # 注意 positionViewAtEnd 是 QML 函数，Python 侧要用元对象系统调。
-    from PySide6.QtCore import QMetaObject as _QMO
     chat = dash.findChild(QObject, "chat", Qt.FindChildrenRecursively)
     if chat is not None:
-        _QMO.invokeMethod(chat, "positionViewAtEnd")
+        content_height = float(chat.property("contentHeight") or 0)
+        viewport_height = float(chat.property("height") or 0)
+        chat.setProperty("contentY", max(0.0, content_height - viewport_height))
         pump(20)
     grab("10-带长交代")
     ai._messages.pop()

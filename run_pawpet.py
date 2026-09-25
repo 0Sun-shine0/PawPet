@@ -41,6 +41,19 @@ def safe_print(message: str = "", **_kwargs: object) -> None:
     stream = getattr(sys, "stdout", None)
     if stream is not None:
         try:
+            # PyInstaller 的窗口程序不会继承 Python 启动器对
+            # PYTHONIOENCODING 的处理；重定向到管道时仍可能拿到 GBK。
+            # 管道/文件是机器读取的诊断输出，统一写 UTF-8；真正连着
+            # 控制台时则沿用控制台编码，避免老式 cmd 显示乱码。
+            is_tty = bool(stream.isatty())
+            encoding = str(getattr(stream, "encoding", "") or "").lower()
+            normalized = encoding.replace("-", "")
+            if not is_tty and normalized not in {"utf8", "utf8sig"}:
+                raw = getattr(stream, "buffer", None)
+                if raw is not None:
+                    raw.write(text.encode("utf-8", errors="backslashreplace"))
+                    raw.flush()
+                    return
             stream.write(text)
             stream.flush()
             return

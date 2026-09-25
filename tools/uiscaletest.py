@@ -154,6 +154,23 @@ def main() -> int:
               abs(obj.property("scale") - auto) < 1e-6,
               str(obj.property("scale")))
 
+        # 真实设置页是 QML 直接给 backend.uiScale 赋值，不是 Python
+        # 直接改 store；这个路径必须单独测，否则 getter-only 属性会漏掉。
+        setter_probe = QQmlComponent(engine)
+        setter_probe.setData(b"""
+            import QtQuick
+            QtObject {
+                Component.onCompleted: backend.uiScale = 1.65
+            }
+        """, QUrl.fromLocalFile(str(QML_DIR / "PawPet" / "ui_scale_probe.qml")))
+        setter_obj = setter_probe.create(engine.rootContext())
+        app.processEvents()
+        check("QML 滑杆赋值真的写回设置",
+              setter_obj is not None
+              and abs(float(store.settings.get("ui_scale", 0)) - 1.65) < 1e-6,
+              f"实际 {store.settings.get('ui_scale')}; "
+              f"错误 {[e.toString() for e in setter_probe.errors()][:1]}")
+
         # 改设置，QML 应该跟着变
         store.settings["ui_scale"] = 1.6
         backend.settingsChanged.emit()

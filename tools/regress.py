@@ -63,11 +63,15 @@ SUITES: list[tuple[str, str, str]] = [
     # ---- 逻辑与安全
     # 静态检查放第一个：不执行代码、秒级完成，语法层面的问题先挡住
     ("core", "静态检查（导入完整性）", "importcheck.py"),
+    ("core", "上传工具（多提交与父提交合法性）", "uploadtest.py"),
     ("core", "核心逻辑", "selftest.py"),
     ("core", "文件读写安全", "filetest.py"),
+    ("core", "并发保存安全", "storeconcurrencytest.py"),
     ("core", "工具消息历史", "historytest.py"),
     ("core", "对话持久化", "convtest.py"),
     ("core", "提醒与间隔重复", "remindertest.py"),
+    ("core", "专注关联待办与番茄记账", "focustasktest.py"),
+    ("core", "损坏数据容错", "corruptdatatest.py"),
     ("core", "Markdown 渲染", "mdtest.py"),
     ("core", "字体与字形", "glyphcheck.py"),
     ("core", "版本号比较", "updatetest.py"),
@@ -85,6 +89,8 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "两栏布局", "layouttest.py"),
     ("ui", "气泡渲染", "bubshot.py"),
     ("ui", "弹窗与指令栏", "popupcheck.py"),
+    ("ui", "待确认卡片可见性", "approvalviewtest.py"),
+    ("ui", "AI 页面视觉预览", "aipreview.py"),
     ("ui", "启动冒烟", "smoketest.py"),
     ("ui", "界面配色定制", "themetest.py"),
     ("ui", "模型配置向导", "setuptest2.py"),
@@ -107,15 +113,19 @@ SUITES: list[tuple[str, str, str]] = [
     ("ai", "UI Automation", "uia_test.py"),
     # ---- 宠物
     ("pet", "宠物情绪动画", "moodtest.py"),
+    ("pet", "透明碰撞箱", "hitboxtest.py"),
     ("pet", "贴边吸附与滑出", "snaptest.py"),
+    ("pet", "多屏与断开恢复", "screengeometrytest.py"),
     # 跑真实宠物窗口 —— 上面那个测的是 Python 判定逻辑，
     # 这个测「什么时候请求吸附」的 QML 时序
     ("pet", "贴边时序（真窗口）", "snapqmltest.py"),
+    ("pet", "长期运行稳定性", "stabilitytest.py"),
     # ---- 曾经真出过的 bug
     ("reg", "轮次串台", "turntest.py"),
     ("reg", "任务收尾", "finishtest.py"),
     ("reg", "步数上限", "steptest.py"),
     ("reg", "用户反馈三问题", "fixtest.py"),
+    ("reg", "用户体验回归", "uxregress.py"),
 ]
 
 # 每档的中文名，给输出用

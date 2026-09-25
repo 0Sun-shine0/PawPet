@@ -103,7 +103,7 @@ def main() -> int:
             break
     check("找到宠物窗口", win is not None)
     if win is None:
-        backend.shutdown()
+        pawapp.shutdown()
         return 1
 
     area = backend.screenAt(0, 0)
@@ -348,7 +348,10 @@ def main() -> int:
           f"x={win.x()}，屏幕 {area['x']}~{area['x'] + area['width']}")
     store.settings["pet_snap_enabled"] = True
 
-    backend.shutdown()
+    # 复用正式应用的收尾顺序：先停计时器并销毁 QML，再释放 backend。
+    # 直接 backend.shutdown() 会让仍在活着的 QML 绑定读到 null，
+    # 在测试日志里刷出大量误导性的 TypeError。
+    pawapp.shutdown()
 
     print(f"\n{'=' * 56}")
     if FAILED:

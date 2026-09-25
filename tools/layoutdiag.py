@@ -30,10 +30,18 @@ def geom(obj) -> str:
     if obj is None:
         return "（找不到）"
     try:
-        return (f"x={obj.property('x'):.0f} y={obj.property('y'):.0f} "
+        pos = obj.position()
+        return (f"x={pos.x():.0f} y={pos.y():.0f} "
                 f"w={obj.property('width'):.0f} h={obj.property('height'):.0f}")
     except Exception:  # noqa: BLE001
         return "（读不到几何）"
+
+
+def item_y(obj) -> float:
+    try:
+        return float(obj.position().y())
+    except Exception:  # noqa: BLE001
+        return float(obj.property("y") or 0)
 
 
 def walk_layouts(obj, depth=0, out=None):
@@ -121,29 +129,19 @@ def main() -> int:
         app.processEvents()
         app.processEvents()
         left = page.findChild(QObject, "aiLeftColumn", Qt.FindChildrenRecursively)
+        pane = page.findChild(QObject, "aiRightPane", Qt.FindChildrenRecursively)
+        scroll = page.findChild(QObject, "rightScroll", Qt.FindChildrenRecursively)
         right = page.findChild(QObject, "aiRightColumn", Qt.FindChildrenRecursively)
-        if right is None or left is None:
+        if pane is None or scroll is None or right is None or left is None:
             continue
-        col_h = right.property("height")
-        left_w = left.property("width")
-        right_w = right.property("width")
-        # 只统计**可见**项 —— ColumnLayout 会跳过隐藏项
-        items = []
-        for child in right.children():
-            try:
-                h = child.property("height")
-                if h is None:
-                    continue
-                items.append((child.property("y"), h, child.property("visible")))
-            except Exception:  # noqa: BLE001
-                continue
-        items.sort()
-        vis_total = sum(h for _, h, v in items if v)
-        overflow = vis_total - col_h
-        flag = "  [!!] 塞不下" if overflow > 2 else ""
-        print(f"  页面 {width}x{height}：左栏 {left_w:.0f} 右栏 {right_w:.0f}，"
-              f"右栏高 {col_h:.0f}，可见内容合计 {vis_total:.0f}，"
-              f"超出 {overflow:.0f}{flag}")
+        left_w = float(left.property("width") or 0)
+        pane_w = float(pane.property("width") or 0)
+        pane_h = float(pane.property("height") or 0)
+        viewport_h = float(scroll.property("height") or 0)
+        content_h = float(scroll.property("contentHeight") or 0)
+        print(f"  页面 {width}x{height}：左栏 {left_w:.0f} 右栏 {pane_w:.0f}，"
+              f"右栏高 {pane_h:.0f}，滚动视口 {viewport_h:.0f}，"
+              f"内容高 {content_h:.0f}")
 
     host.setProperty("pw", 620)
     host.setProperty("ph", 620)
@@ -155,14 +153,16 @@ def main() -> int:
         row = page.findChild(QObject, "aiRow", Qt.FindChildrenRecursively)
         print(f"  RowLayout     {geom(row)}")
         left = page.findChild(QObject, "aiLeftColumn", Qt.FindChildrenRecursively)
+        pane = page.findChild(QObject, "aiRightPane", Qt.FindChildrenRecursively)
         right = page.findChild(QObject, "aiRightColumn", Qt.FindChildrenRecursively)
         print(f"  左栏          {geom(left)}")
-        print(f"  右栏          {geom(right)}")
-        if left is not None and right is not None:
+        print(f"  右栏外层      {geom(pane)}")
+        print(f"  右栏内容列    {geom(right)}")
+        if left is not None and pane is not None:
             left_right_edge = left.property("x") + left.property("width")
-            gap = right.property("x") - left_right_edge
+            gap = pane.property("x") - left_right_edge
             print(f"  左栏右边界={left_right_edge:.0f}  右栏左边界="
-                  f"{right.property('x'):.0f}  间距={gap:.0f}")
+                  f"{pane.property('x'):.0f}  间距={gap:.0f}")
             if gap < -1:
                 print(f"  [!!] 左栏压到右栏了，重叠 {-gap:.0f}px")
 
@@ -200,7 +200,7 @@ def main() -> int:
                 height = child.property("height")
                 if height is None:
                     continue
-                items.append((child.property("y"), child.property("height"),
+                items.append((item_y(child), child.property("height"),
                               child.metaObject().className(),
                               child.property("visible")))
             except Exception:  # noqa: BLE001
@@ -221,7 +221,7 @@ def main() -> int:
                 height = child.property("height")
                 if height is None:
                     continue
-                items.append((child.property("y"), child.property("height"),
+                items.append((item_y(child), child.property("height"),
                               child.metaObject().className(),
                               child.property("visible")))
             except Exception:  # noqa: BLE001

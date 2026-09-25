@@ -118,12 +118,14 @@ def main() -> int:
 
     # 审批卡片
     print("[2] 审批卡片")
-    ai._approvalIn.emit("a1", "click", "confirm", "点击 (640, 360) · 单击")
+    ai._approvalIn.emit("a1", "click", "confirm", "点击 (640, 360) · 单击",
+                        False, [])
     pump(800)
     shot_window(dash, "12_ai_approval")
 
     # 高危审批
-    ai._approvalIn.emit("a2", "run_command", "danger", "执行命令：pip install requests")
+    ai._approvalIn.emit("a2", "run_command", "danger",
+                        "执行命令：pip install requests", False, [])
     pump(800)
     shot_window(dash, "13_ai_approval_danger")
 

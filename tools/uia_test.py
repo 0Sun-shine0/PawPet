@@ -355,51 +355,73 @@ TESTS: list[tuple[str, str, int, str]] = [
     ''', 30, "同一窗口第二次读取必须瞬间返回，不再白等超时"),
 
     ("位置数据的正确性（本质检验）", '''
-        import time
+        import time, tkinter as tk
         from pawpet.ai import uia
-        c = uia.get_client()
 
         # 本质检验：问「(x,y) 上是什么控件」，返回的控件，
         # 它的包围盒就**必须包含 (x,y)**。这是位置数据正确性的直接证明。
         #
-        # （不去比较两次调用是否返回同一个控件 —— ElementFromPoint 的
-        #   返回粒度会随时机变化：同一个点可能给整页 Document，
-        #   也可能给具体的某个 Group。那是 UIA 的正常行为，不是错误。）
-        probes = [(960, 540), (600, 400), (1300, 300), (400, 800), (1500, 700)]
+        # 不再探测固定屏幕坐标：那会被用户当前打开的程序、DPI 缩放或弹窗
+        # 改写，导致同一份代码在不同桌面上随机变红。这里自己创建置顶窗口，
+        # 从真实控件的中心取样，验证的是 UIA 数据本身而不是测试环境。
+        root = tk.Tk()
+        root.title("PawPetUiaBounds")
+        root.geometry("360x170+80+80")
+        root.attributes("-topmost", True)
+        label = tk.Label(root, text="PawPet 矩形探针")
+        label.pack(pady=12)
+        button = tk.Button(root, text="位置测试按钮")
+        button.pack()
+        root.update_idletasks()
+        root.update()
+        root.lift()
+        root.focus_force()
+        time.sleep(0.6)
 
-        checked = 0
-        contained = 0
-        details = []
-        for (x, y) in probes:
-            ok, el = uia.call_with_timeout(lambda px=x, py=y: c.element_at(px, py), 6)
-            if not ok:
-                details.append(f"({x},{y}) 超时")
-                continue
-            if el is None:
-                details.append(f"({x},{y}) 无控件")
-                continue
-            checked += 1
-            # 允许一点边界误差（有些控件的矩形是圆整过的）
-            inside = (el.left - 2 <= x <= el.right + 2
-                      and el.top - 2 <= y <= el.bottom + 2)
-            if inside:
-                contained += 1
-            details.append(
-                f"({x},{y})→{el.type_name} rect=({el.left},{el.top},{el.right},{el.bottom}) "
-                f"包含={inside}")
+        try:
+            # Tk 的 UIA provider 对跨 COM 线程的 ElementFromPoint 不稳定；
+            # 在创建窗口的同一线程读取，才能验证真实的边界数据。
+            c = uia.get_client()
+            probes = []
+            for widget in (label, button):
+                left = widget.winfo_rootx()
+                top = widget.winfo_rooty()
+                probes.append((left + widget.winfo_width() // 2,
+                               top + widget.winfo_height() // 2))
 
-        # 要求：只要读到了控件，位置就必须包含查询点。
-        # 若一个都没读到（桌面全是不支持 UIA 的程序），视为环境限制而非失败。
-        if checked == 0:
-            good = True
-            verdict = "环境里没有可读的控件（桌面程序都不支持 UIA），跳过"
-        else:
-            good = contained == checked
-            verdict = f"{contained}/{checked} 个控件的矩形包含被查询的坐标"
+            checked = 0
+            contained = 0
+            details = []
+            for (x, y) in probes:
+                el = c.element_at(x, y)
+                if el is None:
+                    details.append(f"({x},{y}) 无控件")
+                    continue
+                checked += 1
+                # 允许一点边界误差（有些控件的矩形是圆整过的）
+                inside = (el.left - 2 <= x <= el.right + 2
+                          and el.top - 2 <= y <= el.bottom + 2)
+                if inside:
+                    contained += 1
+                details.append(
+                    f"({x},{y})→{el.type_name} "
+                    f"rect=({el.left},{el.top},{el.right},{el.bottom}) "
+                    f"包含={inside}")
 
-        for line in details:
-            print(f"    {line}")
-        print(f"RESULT: {'ok' if good else 'fail'} {verdict}")
+            # 要求：只要读到了控件，位置就必须包含查询点。
+            # 若当前 Windows/UIA 提供程序完全不暴露 Tk 控件，视为环境限制。
+            if checked == 0:
+                good = True
+                verdict = "测试窗口没有暴露可读控件，按环境限制跳过"
+            else:
+                good = contained == checked
+                verdict = f"{contained}/{checked} 个控件的矩形包含被查询的坐标"
+
+            for line in details:
+                print(f"    {line}")
+            print(f"RESULT: {'ok' if good else 'fail'} {verdict}")
+        finally:
+            root.destroy()
     ''', 60, "返回的控件矩形必须包含被查询的坐标"),
 
     ("永不卡死（对所有调用的硬要求）", '''

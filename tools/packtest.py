@@ -261,6 +261,8 @@ def main() -> int:
     # 认 ASCII 标记而不是中文：见 run_pawpet.selfcheck 里的说明
     check("关键模块全部就位（没有 [XX]）", "[XX]" not in probe_out,
           "有模块没被打进包里 —— 见上面的 [XX] 行")
+    check("自检中文输出没有乱码", "\ufffd" not in probe_out,
+          repr(probe_out[:240]))
     check("自检明确报告通过", "SELFCHECK OK" in probe_out,
           "没看到 SELFCHECK OK 标记")
     check("没有失败标记", "SELFCHECK FAILED" not in probe_out)

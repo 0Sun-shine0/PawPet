@@ -30,6 +30,10 @@ SCRATCH = ROOT / ".cache" / "moodtest"
 OUT = ROOT / ".cache" / "shots"
 os.environ["PAWPET_HOME"] = str(SCRATCH)
 os.environ["PAWPET_INSTANCE_SUFFIX"] = "moodtest"
+# Windows/远程桌面环境下 threaded 渲染循环可能暂停 QML 动画时钟。
+# 回归脚本需要验证动画本身，固定使用兼容性更好的 basic 渲染循环；
+# 不改用户运行时的渲染设置。
+os.environ.setdefault("QSG_RENDER_LOOP", "basic")
 
 PASSED = 0
 FAILED: list[str] = []
@@ -53,7 +57,7 @@ def main() -> int:
     SCRATCH.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    from PySide6.QtCore import QObject, Qt, QUrl
+    from PySide6.QtCore import QEventLoop, QObject, QTimer, Qt, QUrl
     from PySide6.QtQml import QQmlComponent, QQmlEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtWidgets import QApplication
@@ -143,10 +147,10 @@ def main() -> int:
 
     def pump(ms: int) -> None:
         """推进事件循环 ms 毫秒，让动画真的走起来。"""
-        deadline = time.time() + ms / 1000.0
-        while time.time() < deadline:
-            app.processEvents()
-            time.sleep(0.008)
+        loop = QEventLoop()
+        QTimer.singleShot(max(0, int(ms)), loop.quit)
+        loop.exec()
+        app.processEvents()
 
     # 各状态的呼吸半周期（和 Pet.qml 里的 breathMs 一致）。
     # **采样窗口必须盖过一个完整周期**，否则量到的只是「这一段走了多远」，

@@ -107,6 +107,11 @@ def main() -> int:
     # 热键可能被别的程序占用，这里只报告不判定失败
     print(f"  热键已注册：{pawpet._hotkeys.registered or '（无）'}")
     print(f"  热键失败：{pawpet._hotkeys.failed or '（无）'}")
+    hotkey_status = str(pawpet._backend.hotkeyRegistrationStatus)
+    check("热键注册结果已反馈给界面", bool(hotkey_status), hotkey_status)
+    check("热键失败时给出可读提示",
+          not pawpet._hotkeys.failed or "未生效" in hotkey_status,
+          hotkey_status)
 
     # 单实例管道：启动服务端之后 ping 一下
     check("管道服务端已启动", pawpet._pipe is not None)

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -20,6 +21,18 @@ from .store import new_id, pretty_day, today_key
 # 待办
 # --------------------------------------------------------------------------
 PRIORITY_LABEL = {0: "普通", 1: "重要", 2: "紧急"}
+DEFAULT_REMINDER_TIME = "09:00"
+_CLOCK_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def _normalize_clock(value, fallback: str = DEFAULT_REMINDER_TIME) -> str:
+    match = _CLOCK_RE.fullmatch(str(value or "").strip())
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    return fallback
 
 
 def _age_text(created: float | None) -> str:
@@ -57,6 +70,17 @@ def _due_text(due: str | None) -> tuple[str, bool]:
     return f"{day.month}/{day.day} 到期", False
 
 
+def _completion_day(task: dict) -> str:
+    """返回待办上次完成时对应的统计日期。"""
+    completed_at = task.get("done_at")
+    try:
+        if completed_at:
+            return datetime.fromtimestamp(float(completed_at)).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    return today_key()
+
+
 class TaskModel(QAbstractListModel):
     Roles = {
         Qt.UserRole + 1: b"taskId",
@@ -73,13 +97,16 @@ class TaskModel(QAbstractListModel):
 
     changed = Signal()
     countsChanged = Signal()
+    undoChanged = Signal()
 
     def __init__(self, store, parent=None) -> None:
         super().__init__(parent)
         self._store = store
         self._show_done = False
         self._sort = "smart"          # smart | created | priority
+        self._search = ""
         self._visible: list[dict] = []
+        self._last_removed: dict | None = None
         self._rebuild()
 
     # ----------------------------------------------------------- Qt 接口
@@ -109,7 +136,7 @@ class TaskModel(QAbstractListModel):
         return mapping.get(role)
 
     # ----------------------------------------------------------- 计算属性
-    @Property(int, notify=countsChanged)
+    @Property(int, notify=changed)
     def count(self) -> int:
         """QAbstractListModel 本身没有 count 属性，QML 里要用得自己加上。"""
         return len(self._visible)
@@ -125,6 +152,16 @@ class TaskModel(QAbstractListModel):
     @Property(int, notify=countsChanged)
     def totalCount(self) -> int:
         return len(self._store.tasks)
+
+    @Property(bool, notify=undoChanged)
+    def canUndo(self) -> bool:
+        return self._last_removed is not None
+
+    @Property(str, notify=undoChanged)
+    def lastRemovedText(self) -> str:
+        if self._last_removed is None:
+            return ""
+        return str(self._last_removed.get("task", {}).get("text", ""))
 
     @Property(bool, notify=changed)
     def showDone(self) -> bool:
@@ -152,9 +189,28 @@ class TaskModel(QAbstractListModel):
         self._rebuild()
         self.changed.emit()
 
+    @Property(str, notify=changed)
+    def searchText(self) -> str:
+        return self._search
+
+    @searchText.setter
+    def searchText(self, value: str) -> None:
+        value = str(value or "")
+        if value == self._search:
+            return
+        self._search = value
+        self._rebuild()
+        self.changed.emit()
+
     # ----------------------------------------------------------- 内部逻辑
     def _rebuild(self) -> None:
         items = [t for t in self._store.tasks if self._show_done or not t.get("done")]
+        query = self._search.strip().casefold()
+        if query:
+            items = [
+                task for task in items
+                if query in str(task.get("text") or "").casefold()
+            ]
 
         if self._sort == "created":
             items.sort(key=lambda t: t.get("created") or 0, reverse=True)
@@ -183,6 +239,7 @@ class TaskModel(QAbstractListModel):
         给「导入备份」用：store 被整个换掉之后，_visible 还指着旧数据的
         那批 dict，界面会继续显示导入前的内容。
         """
+        self._clear_undo()
         self._rebuild()
         self.countsChanged.emit()
         self.changed.emit()
@@ -205,6 +262,7 @@ class TaskModel(QAbstractListModel):
         text = (text or "").strip()
         if not text:
             return
+        self._clear_undo()
         self._store.tasks.append({
             "id": new_id("t"),
             "text": text[:200],
@@ -223,14 +281,22 @@ class TaskModel(QAbstractListModel):
         task = self._find(task_id)
         if task is None:
             return
+        self._clear_undo()
+        was_done = bool(task.get("done"))
+        completion_day = _completion_day(task) if was_done else ""
         task["done"] = not task.get("done")
         task["done_at"] = time.time() if task["done"] else None
         if task["done"]:
             self._store.stats.setdefault(today_key(), {})
             day = self._store.stats[today_key()]
             day["tasks_done"] = int(day.get("tasks_done", 0)) + 1
+        elif was_done:
+            day = self._store.stats.get(completion_day)
+            if day is not None:
+                day["tasks_done"] = max(0, int(day.get("tasks_done", 0)) - 1)
         row = self._index_of(task_id)
-        if row >= 0 and (self._show_done or not task["done"]):
+        needs_resort = self._show_done and self._sort == "smart"
+        if row >= 0 and (self._show_done or not task["done"]) and not needs_resort:
             idx = self.index(row, 0)
             self.dataChanged.emit(idx, idx)
             self.countsChanged.emit()
@@ -241,10 +307,40 @@ class TaskModel(QAbstractListModel):
 
     @Slot(str)
     def remove(self, task_id: str) -> None:
-        before = len(self._store.tasks)
-        self._store.tasks[:] = [t for t in self._store.tasks if t.get("id") != task_id]
-        if len(self._store.tasks) != before:
+        for index, task in enumerate(self._store.tasks):
+            if task.get("id") != task_id:
+                continue
+            self._last_removed = {"task": dict(task), "index": index}
+            del self._store.tasks[index]
             self._touch()
+            self.undoChanged.emit()
+            return
+
+    @Slot()
+    def undoRemove(self) -> None:
+        if self._last_removed is None:
+            return
+        removed = self._last_removed
+        task = dict(removed.get("task", {}))
+        task_id = task.get("id")
+        if not task_id or self._find(task_id) is not None:
+            self._last_removed = None
+            self.undoChanged.emit()
+            return
+        index = max(0, min(len(self._store.tasks), int(removed.get("index", 0))))
+        self._store.tasks.insert(index, task)
+        self._last_removed = None
+        self._touch()
+        self.undoChanged.emit()
+
+    @Slot()
+    def clearUndo(self) -> None:
+        self._clear_undo()
+
+    def _clear_undo(self) -> None:
+        if self._last_removed is not None:
+            self._last_removed = None
+            self.undoChanged.emit()
 
     @Slot(str, str)
     def rename(self, task_id: str, text: str) -> None:
@@ -252,11 +348,11 @@ class TaskModel(QAbstractListModel):
         text = (text or "").strip()
         if task is None or not text:
             return
+        self._clear_undo()
         task["text"] = text[:200]
-        row = self._index_of(task_id)
-        if row >= 0:
-            idx = self.index(row, 0)
-            self.dataChanged.emit(idx, idx)
+        # 改名可能改变当前搜索结果；也可能让 smart 排序后的可见顺序
+        # 需要重新计算。不能只发 dataChanged，否则旧行会留在筛选列表里。
+        self._rebuild()
         self.changed.emit()
         self._store.save()
 
@@ -265,6 +361,7 @@ class TaskModel(QAbstractListModel):
         task = self._find(task_id)
         if task is None:
             return
+        self._clear_undo()
         task["priority"] = max(0, min(2, int(priority)))
         self._touch()
 
@@ -273,6 +370,7 @@ class TaskModel(QAbstractListModel):
         task = self._find(task_id)
         if task is None:
             return
+        self._clear_undo()
         task["due"] = due or None
         self._touch()
 
@@ -281,6 +379,7 @@ class TaskModel(QAbstractListModel):
         task = self._find(task_id)
         if task is None:
             return
+        self._clear_undo()
         task["pomodoros"] = int(task.get("pomodoros", 0)) + 1
         row = self._index_of(task_id)
         if row >= 0:
@@ -290,6 +389,7 @@ class TaskModel(QAbstractListModel):
 
     @Slot()
     def clearDone(self) -> None:
+        self._clear_undo()
         self._store.tasks[:] = [t for t in self._store.tasks if not t.get("done")]
         self._touch()
 
@@ -369,14 +469,17 @@ class ReminderModel(QAbstractListModel):
         Qt.UserRole + 5: b"repeatLabel",
         Qt.UserRole + 6: b"enabled",
         Qt.UserRole + 7: b"nextText",
+        Qt.UserRole + 8: b"every",
     }
 
     changed = Signal()
     countsChanged = Signal()
+    undoChanged = Signal()
 
     def __init__(self, store, parent=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._last_removed: dict | None = None
         self._rebuild()
 
     def roleNames(self):
@@ -397,6 +500,7 @@ class ReminderModel(QAbstractListModel):
             Qt.UserRole + 5: REPEAT_LABEL.get(item.get("repeat", "once"), "仅一次"),
             Qt.UserRole + 6: bool(item.get("enabled", True)),
             Qt.UserRole + 7: self._next_text(item),
+            Qt.UserRole + 8: int(item.get("every") or 0),
         }
         return mapping.get(role)
 
@@ -413,6 +517,16 @@ class ReminderModel(QAbstractListModel):
     @Property(int, notify=countsChanged)
     def activeCount(self) -> int:
         return sum(1 for r in self._store.reminders if r.get("enabled", True))
+
+    @Property(bool, notify=undoChanged)
+    def canUndo(self) -> bool:
+        return self._last_removed is not None
+
+    @Property(str, notify=undoChanged)
+    def lastRemovedTitle(self) -> str:
+        if self._last_removed is None:
+            return ""
+        return str(self._last_removed.get("reminder", {}).get("title", "无标题"))
 
     def _rebuild(self) -> None:
         items = sorted(self._store.reminders, key=lambda r: str(r.get("time", "")))
@@ -444,6 +558,7 @@ class ReminderModel(QAbstractListModel):
         title = (title or "").strip()
         if not title:
             return
+        self._clear_undo()
         repeat = repeat if repeat in REPEAT_LABEL else "daily"
         date_part = None
         time_part = when or "09:00"
@@ -451,7 +566,7 @@ class ReminderModel(QAbstractListModel):
             date_part, _, time_part = time_part.partition("T")
         elif " " in time_part:
             date_part, _, time_part = time_part.partition(" ")
-        time_part = time_part[:5] or "09:00"
+        time_part = _normalize_clock(time_part[:5])
 
         entry = {
             "id": new_id("r"),
@@ -473,16 +588,51 @@ class ReminderModel(QAbstractListModel):
 
     @Slot(str)
     def remove(self, reminder_id: str) -> None:
-        before = len(self._store.reminders)
-        self._store.reminders[:] = [r for r in self._store.reminders if r.get("id") != reminder_id]
-        if len(self._store.reminders) != before:
+        for index, reminder in enumerate(self._store.reminders):
+            if reminder.get("id") != reminder_id:
+                continue
+            self._last_removed = {
+                "reminder": dict(reminder),
+                "index": index,
+            }
+            del self._store.reminders[index]
             self._touch()
+            self.undoChanged.emit()
+            return
+
+    @Slot()
+    def undoRemove(self) -> None:
+        if self._last_removed is None:
+            return
+        removed = self._last_removed
+        reminder = dict(removed.get("reminder", {}))
+        reminder_id = reminder.get("id")
+        if not reminder_id or self._find(reminder_id) is not None:
+            self._last_removed = None
+            self.undoChanged.emit()
+            return
+        index = max(0, min(len(self._store.reminders),
+                           int(removed.get("index", 0))))
+        self._store.reminders.insert(index, reminder)
+        self._last_removed = None
+        self._touch()
+        self.undoChanged.emit()
+
+    @Slot()
+    def clearUndo(self) -> None:
+        self._clear_undo()
+
+    def _clear_undo(self) -> None:
+        if self._last_removed is not None:
+            self._last_removed = None
+            self.undoChanged.emit()
 
     @Slot(str)
     def toggle(self, reminder_id: str) -> None:
         item = self._find(reminder_id)
         if item is None:
             return
+        self._clear_undo()
         item["enabled"] = not item.get("enabled", True)
         # **重新开启时把触发标记清掉。**
         #
@@ -499,6 +649,7 @@ class ReminderModel(QAbstractListModel):
         item = self._find(reminder_id)
         if item is None:
             return
+        self._clear_undo()
         title = (title or "").strip()
         if title:
             item["title"] = title[:80]
@@ -509,7 +660,10 @@ class ReminderModel(QAbstractListModel):
             date_part, _, time_part = time_part.partition("T")
         elif " " in time_part:
             date_part, _, time_part = time_part.partition(" ")
-        item["time"] = time_part[:5] or "09:00"
+        fallback_time = _normalize_clock(
+            item.get("time", DEFAULT_REMINDER_TIME)
+        )
+        item["time"] = _normalize_clock(time_part[:5], fallback_time)
 
         if repeat and repeat in REPEAT_LABEL and repeat != item.get("repeat"):
             item["repeat"] = repeat
@@ -539,6 +693,7 @@ class ReminderModel(QAbstractListModel):
         item = self._find(reminder_id)
         if item is None:
             return
+        self._clear_undo()
         minutes = max(1, min(24 * 60, int(minutes or 10)))
 
         if item.get("repeat") == "interval":
@@ -573,22 +728,27 @@ class NoteModel(QAbstractListModel):
 
     changed = Signal()
     currentChanged = Signal()
+    undoChanged = Signal()
 
     def __init__(self, store, parent=None) -> None:
         super().__init__(parent)
         self._store = store
         self._visible: list[dict] = []
         self._current = 0
+        self._last_removed: dict | None = None
         self._ensure_seed()
         self._rebuild()
 
-    def _ensure_seed(self) -> None:
+    def _ensure_seed(self) -> dict | None:
         if not self._store.notes:
             now = time.time()
-            self._store.notes.append({
+            seed = {
                 "id": new_id("n"), "title": "随手记", "text": "",
                 "created": now, "updated": now,
-            })
+            }
+            self._store.notes.append(seed)
+            return seed
+        return None
 
     def roleNames(self):
         return self.Roles
@@ -643,12 +803,31 @@ class NoteModel(QAbstractListModel):
             return self._visible[self._current].get("text", "")
         return ""
 
+    @Property(bool, notify=undoChanged)
+    def canUndo(self) -> bool:
+        return self._last_removed is not None
+
+    @Property(str, notify=undoChanged)
+    def lastRemovedTitle(self) -> str:
+        if self._last_removed is None:
+            return ""
+        return str(self._last_removed.get("note", {}).get("title", "无标题"))
+
     def _rebuild(self) -> None:
+        selected_id = ""
+        if 0 <= self._current < len(self._visible):
+            selected_id = str(self._visible[self._current].get("id") or "")
         items = sorted(self._store.notes, key=lambda n: -(n.get("updated") or 0))
         self.beginResetModel()
         self._visible = items
         self.endResetModel()
-        if self._current >= len(self._visible):
+        if selected_id:
+            self._current = next(
+                (index for index, item in enumerate(self._visible)
+                 if item.get("id") == selected_id),
+                max(0, min(self._current, len(self._visible) - 1)),
+            )
+        elif self._current >= len(self._visible):
             self._current = max(0, len(self._visible) - 1)
         self.currentChanged.emit()
 
@@ -664,6 +843,7 @@ class NoteModel(QAbstractListModel):
         （用户就是没写过），界面会停在一个空编辑器上，连「新建」的落点都
         找不到。_ensure_seed 保证至少有一条可以写的便签。
         """
+        self._clear_undo()
         self._ensure_seed()
         self._current = 0
         self._rebuild()
@@ -671,6 +851,7 @@ class NoteModel(QAbstractListModel):
 
     @Slot(str, str)
     def add(self, title: str = "", text: str = "") -> None:
+        self._clear_undo()
         now = time.time()
         self._store.notes.append({
             "id": new_id("n"),
@@ -686,15 +867,57 @@ class NoteModel(QAbstractListModel):
 
     @Slot(str)
     def remove(self, note_id: str) -> None:
-        before = len(self._store.notes)
-        self._store.notes[:] = [n for n in self._store.notes if n.get("id") != note_id]
-        if len(self._store.notes) == before:
+        for index, note in enumerate(self._store.notes):
+            if note.get("id") != note_id:
+                continue
+            self._last_removed = {"note": dict(note), "index": index}
+            del self._store.notes[index]
+            seed = self._ensure_seed()
+            if seed is not None:
+                self._last_removed["seed_id"] = seed.get("id", "")
+            self._touch()
+            self.undoChanged.emit()
             return
-        self._ensure_seed()
+
+    @Slot()
+    def undoRemove(self) -> None:
+        if self._last_removed is None:
+            return
+        removed = self._last_removed
+        note = dict(removed.get("note", {}))
+        note_id = note.get("id")
+        if not note_id or any(item.get("id") == note_id for item in self._store.notes):
+            self._clear_undo()
+            return
+        seed_id = removed.get("seed_id")
+        if seed_id:
+            self._store.notes[:] = [
+                item for item in self._store.notes
+                if item.get("id") != seed_id
+            ]
+        index = max(0, min(len(self._store.notes), int(removed.get("index", 0))))
+        self._store.notes.insert(index, note)
+        self._last_removed = None
         self._touch()
+        for visible_index, item in enumerate(self._visible):
+            if item.get("id") == note_id:
+                self._current = visible_index
+                break
+        self.currentChanged.emit()
+        self.undoChanged.emit()
+
+    @Slot()
+    def clearUndo(self) -> None:
+        self._clear_undo()
+
+    def _clear_undo(self) -> None:
+        if self._last_removed is not None:
+            self._last_removed = None
+            self.undoChanged.emit()
 
     @Slot(str, str, str)
     def update(self, note_id: str, title: str, text: str) -> None:
+        self._clear_undo()
         for note in self._store.notes:
             if note.get("id") == note_id:
                 note["title"] = (title or "").strip()[:60] or "无标题"

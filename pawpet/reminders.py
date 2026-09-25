@@ -99,6 +99,8 @@ class ReminderEngine(QObject):
             hour, minute = (int(x) for x in str(item.get("time", "09:00")).split(":")[:2])
         except (ValueError, TypeError):
             return False
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return False
         today = now.date()
 
         # ---------------- 按间隔重复 ----------------
@@ -211,11 +213,38 @@ class ReminderEngine(QObject):
         for item in self._store.reminders:
             if not item.get("enabled", True):
                 continue
+            repeat = item.get("repeat", "once")
+
+            # 间隔提醒没有固定的时刻，不能把创建时遗留的 time 当成
+            # 下一次触发时间，否则用户会看到「09:00 喝水」，但真正响铃
+            # 可能是在 5 分钟后。last_fired 存的是时间戳，正好可以算出
+            # 下一次；从未触发过的提醒则从现在开始算一个间隔。
+            if repeat == "interval":
+                try:
+                    every = int(item.get("every") or INTERVAL_DEFAULT_MINUTES)
+                except (TypeError, ValueError):
+                    every = INTERVAL_DEFAULT_MINUTES
+                every = max(INTERVAL_MIN_MINUTES, min(INTERVAL_MAX_MINUTES, every))
+                stamp = item.get("last_fired")
+                try:
+                    next_epoch = (
+                        float(stamp) + every * 60
+                        if stamp not in (None, "")
+                        else now.timestamp() + every * 60
+                    )
+                except (TypeError, ValueError):
+                    next_epoch = now.timestamp() + every * 60
+                gap = max(0.0, next_epoch - now.timestamp())
+                minutes = max(1, int(round(gap / 60)))
+                upcoming.append((gap, f"约 {minutes} 分钟后  {item.get('title', '')}"))
+                continue
+
             try:
                 hour, minute = (int(x) for x in str(item.get("time", "09:00")).split(":")[:2])
             except (ValueError, TypeError):
                 continue
-            repeat = item.get("repeat", "once")
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                continue
             for offset in range(0, 8):
                 day = now.date() + timedelta(days=offset)
                 if repeat == "weekdays" and day.weekday() >= 5:

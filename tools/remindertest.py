@@ -62,6 +62,7 @@ def main() -> int:
         INTERVAL_PRESETS,
         REPEAT_LABEL,
         _clamp_interval,
+        _normalize_clock,
         _repeat_text,
     )
     from pawpet.reminders import ReminderEngine
@@ -214,6 +215,11 @@ def main() -> int:
     created = store.reminders[-1]
     check("add 支持 interval", created["repeat"] == "interval",
           repr(created["repeat"]))
+    upcoming_interval = engine.next_upcoming(20)
+    check("接下来正确显示间隔提醒的相对时间",
+          any("约 " in text and "喝水" in text and "09:00" not in text
+              for text in upcoming_interval),
+          str(upcoming_interval))
     check("add 记下了 every", created.get("every") == 5,
           repr(created.get("every")))
     check("间隔提醒不带 date", created.get("date") is None,
@@ -268,6 +274,40 @@ def main() -> int:
     check("稍后之后是启用的", fixed["enabled"] is True)
 
     # ================================================================ 八
+    print("\n=== 八、非法时间容错 ===")
+    check("合法时间会统一补零", _normalize_clock("9:05") == "09:05")
+    check("非法小时回退到安全默认值",
+          _normalize_clock("24:00") == "09:00")
+    check("非法分钟回退到安全默认值",
+          _normalize_clock("12:60") == "09:00")
+    model.add("坏时间", "99:99", "daily")
+    bad_time = store.reminders[-1]
+    check("新增提醒不会保存非法时间", bad_time["time"] == "09:00",
+          repr(bad_time["time"]))
+
+    model.add("可编辑时间", "14:30", "daily")
+    editable = store.reminders[-1]
+    model.update(editable["id"], "可编辑时间", "25:61", "daily")
+    check("编辑提醒不会覆盖成非法时间", editable["time"] == "14:30",
+          repr(editable["time"]))
+
+    invalid_item = {
+        "id": "invalid-clock", "title": "坏历史数据", "time": "99:99",
+        "repeat": "daily", "enabled": True, "last_fired": None,
+    }
+    try:
+        match = engine._schedule_matches(invalid_item, at(0))
+        store.reminders.append(invalid_item)
+        upcoming = engine.next_upcoming()
+        store.reminders.remove(invalid_item)
+        safe = match is False and isinstance(upcoming, list)
+        detail = f"match={match}, upcoming={len(upcoming)}"
+    except Exception as exc:  # noqa: BLE001
+        safe = False
+        detail = f"{type(exc).__name__}: {exc}"
+    check("历史坏时间不会让调度器抛异常", safe, detail)
+
+    # ================================================================ 九
     print("\n=== 八、界面接线（QML）===")
     qml = (ROOT / "pawpet" / "qml" / "PawPet" / "page"
            / "RemindersPage.qml").read_text(encoding="utf-8")
@@ -296,6 +336,11 @@ def main() -> int:
           "visible: page.needTime" in qml)
     check("提示文案跟着重复方式变",
           "page.needInterval" in qml)
+    check("新建提醒拒绝非法时间",
+          "isValidTime" in qml and "timeError" in qml
+          and "reminderTimeError" in qml)
+    check("编辑提醒拒绝非法时间",
+          "editTimeError" in qml and "editReminderTimeError" in qml)
 
     check("有编辑对话框", "editDialog" in qml and "beginEdit" in qml)
     check("编辑能改重复方式", "editRepeatBox" in qml)
@@ -309,14 +354,16 @@ def main() -> int:
     # 「Detected anchors on an item that is managed by a layout.
     #  This is undefined behavior」（冒烟测试报出来了）。
     #
-    # 现在浮层挂在 delegate 根节点下、锚到开关左边。所以断言要检查的是
-    # **它不在 RowLayout 里**，而不是某个具体坐标。
+    # 现在浮层挂在 delegate 根节点下、锚到根节点右边，并动态给开关
+    # 留出空间。所以断言要检查的是合法锚点和布局隔离，而不是某个具体坐标。
     check("稍后/改 按钮用浮层定位（不挤走开关）",
-          "anchors.right: enabledSwitch.left" in qml,
-          "锚到开关左边：既不参与布局分配，也不跟布局抢位置")
+          "anchors.right: parent.right" in qml
+          and "anchors.rightMargin: enabledSwitch.width + 8" in qml,
+          "锚到 delegate 右边并为开关动态留白：既不参与布局分配，也不遮住开关")
     check("浮层挂在 delegate 根节点下（不在 RowLayout 里）",
-          "id: enabledSwitch" in qml,
-          "要能锚到开关，开关就得有 id")
+          "id: enabledSwitch" in qml
+          and "anchors.verticalCenter: parent.verticalCenter" in qml,
+          "浮层应锚到 delegate 根节点，而不是跨层级锚到 RowLayout 子项")
 
     # 那条 anchors-on-layout 警告本身也钉一下：浮层行必须在 RowLayout
     # 闭合之后。用缩进深度判断太脆，这里检查「Row {」出现在
@@ -328,7 +375,7 @@ def main() -> int:
                             and "anchors.fill: parent" in "\n".join(
                                 lines[i:i + 3])), None)
     overlay_line = next((i for i, ln in enumerate(lines)
-                         if "anchors.right: enabledSwitch.left" in ln), None)
+                         if "anchors.rightMargin: enabledSwitch.width + 8" in ln), None)
     check("浮层在 RowLayout 之外（避免 undefined behavior）",
           row_layout_line is not None and overlay_line is not None
           and overlay_line > row_layout_line,

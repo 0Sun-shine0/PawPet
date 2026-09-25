@@ -193,6 +193,7 @@ def test_task_model(tmp: Path) -> None:
     from PySide6.QtCore import QCoreApplication, Qt
 
     from pawpet.backend import Backend
+    from pawpet.store import today_key
 
     app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
     sub = tmp / "tasks"
@@ -217,6 +218,22 @@ def test_task_model(tmp: Path) -> None:
     check("勾选后完成数增加", model.doneCount == 1, f"实际 {model.doneCount}")
     check("默认视图隐藏已完成", model.count == 11, f"实际 {model.count}")
 
+    completed_before_undo = int(
+        store.stats.get(today_key(), {}).get("tasks_done", 0)
+    )
+    model.toggle(first_id)
+    check("取消完成后待办恢复", model.pendingCount == 12 and model.doneCount == 0,
+          f"pending={model.pendingCount}, done={model.doneCount}")
+    check("取消完成后今日统计回退",
+          store.stats.get(today_key(), {}).get("tasks_done", 0)
+          == max(0, completed_before_undo - 1),
+          str(store.stats.get(today_key(), {})))
+    model.toggle(first_id)
+    check("重新完成后统计再次增加",
+          store.stats.get(today_key(), {}).get("tasks_done", 0)
+          == completed_before_undo,
+          str(store.stats.get(today_key(), {})))
+
     model.showDone = True
     check("切到全部后 12 条都在", model.count == 12, f"实际 {model.count}")
     model.showDone = False
@@ -234,6 +251,14 @@ def test_task_model(tmp: Path) -> None:
           model.data(model.index(0, 0), ROLE_PRIORITY) == 2,
           f"实际 {model.data(model.index(0, 0), ROLE_PRIORITY)}")
     model.sortMode = "smart"
+
+    model.searchText = "重要的"
+    check("task search filters", model.count == 1 and
+          model.data(model.index(0, 0), ROLE_TEXT) == "重要的事",
+          f"count={model.count}")
+    model.searchText = ""
+    check("task search clears", model.count == model.pendingCount,
+          f"count={model.count}, pending={model.pendingCount}")
 
     model.add("", 0)
     check("空文本不会创建待办", model.totalCount == 13, f"实际 {model.totalCount}")
@@ -401,8 +426,18 @@ def test_note_model(tmp: Path) -> None:
     check("新增后共两条", notes.count == 2, f"实际 {notes.count}")
     notes.remove(first)
     check("删除后剩一条", notes.count == 1, f"实际 {notes.count}")
+    check("便签删除后可撤销", notes.canUndo)
+    check("撤销提示保留标题", notes.lastRemovedTitle == "标题改过",
+          notes.lastRemovedTitle)
+    notes.undoRemove()
+    check("撤销后恢复便签", notes.titleOf(first) == "标题改过",
+          notes.titleOf(first))
+    notes.remove(first)
     notes.remove(notes.currentId)
     check("删光后会自动补一条，不会出现空编辑器", notes.count == 1, f"实际 {notes.count}")
+    notes.undoRemove()
+    check("撤销删除唯一便签不会多出空白便签", notes.count == 1 and
+          notes.currentTitle == "第二条", f"实际 {notes.count} / {notes.currentTitle}")
 
     reminders = ReminderModel(store)
     reminders.add("喝水", "10:30", "daily")

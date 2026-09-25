@@ -103,8 +103,11 @@ def main() -> int:
 
     def verify_shape(label: str) -> None:
         pump(260)
-        hitbox.refresh()
-        # refresh() 已经同步抓取并应用了这一帧；这里不能再等一拍，
+        # **用 refresh_now()**：这里验的是「区域算得对不对」，不是限频。
+        # 走限频那条路的话，刚换完风格可能被跳过，断言就会去比一个
+        # 滞后好几百毫秒的旧区域（第一版就是这么误报的）。
+        hitbox.refresh_now()
+        # 已经同步抓取并应用了这一帧；这里不能再等一拍，
         # 否则高 DPI 下宠物的呼吸位移会被放大成几像素的假偏差。
         image = pet.grabWindow()
         mask = pet.mask()
@@ -145,6 +148,83 @@ def main() -> int:
     backend.petVisible = True
     backend.pet_scale = 1.0
     verify_shape("恢复显示")
+
+    # ================================================================ 调用次数
+    #
+    # 这一段盯的是「**没事不要动窗口区域**」。
+    #
+    # 原来 `refresh()` 每次（默认 60ms，即每秒 16 次）都无条件调
+    # `setMask()`，哪怕宠物一动不动、区域和上次完全一样。在 Windows 上
+    # `setMask()` 就是 `SetWindowRgn`：让窗口失效、打断绘制、**重新评估
+    # 鼠标捕获**。后果有两类，都是用户直接能感觉到的：
+    #
+    #   · 一秒 16 次的窗口失效 —— 工作台那边跟着卡顿
+    #     （实测事件循环 p95 延迟 16ms → 32ms，翻倍）
+    #   · 点击的「按下」和「抬起」之间如果夹了一次 setMask，
+    #     那次点击就配不成对 —— 表现是**单击没反应**
+    #
+    # 所以现在两条规则：区域没变就不设；鼠标按着的时候不设。
+    print("\n=== 调用次数（没事不要动窗口区域）===")
+    calls: list[object] = []
+    original_set = hitbox._set_native_mask
+
+    def counting_set(region) -> None:
+        calls.append(region)
+        original_set(region)
+
+    hitbox._set_native_mask = counting_set  # type: ignore[method-assign]
+
+    # 1) 频率上限：这是这次修的主要目标。
+    #
+    #    原来 `refresh()` 每次（默认 60ms，每秒 16 次）都无条件调
+    #    `setMask()`。断言用「一段时间的总次数」而不是「某个短窗口内为 0」——
+    #    后者太脆：定时器本身的周期和限频周期接近时，总会有一两次撞进来。
+    calls.clear()
+    started = time.monotonic()
+    window_seconds = 2.0
+    deadline = started + window_seconds
+    while time.monotonic() < deadline:
+        hitbox.refresh()
+        pump(15)
+    elapsed = time.monotonic() - started
+    rate = len(calls) / elapsed
+    check("设置区域的频率被压到每秒 6 次以内（原来是 16 次）",
+          rate <= 6.0, f"{elapsed:.1f}s 里设了 {len(calls)} 次 "
+                       f"→ {rate:.1f} 次/秒")
+    check("确实还在更新（不是完全不更新了）", len(calls) >= 1,
+          "一次都没设的话，点击区域永远停在启动那一帧")
+
+    # 2) 离散变化走 refresh_now，不受限频（尺寸/风格切换后必须立刻生效）
+    hitbox.refresh()
+    pump(30)
+    calls.clear()
+    backend.pet_style = "fox" if backend.pet_style != "fox" else "mochi"
+    backend.pet_scale = 2.4 if backend.pet_scale < 2.0 else 1.0
+    pump(500)
+    calls.clear()
+    hitbox.refresh_now()
+    check("离散变化走 refresh_now 会立刻重设（不受限频）", len(calls) >= 1,
+          "尺寸/风格变了还沿用旧区域，点击位置会和画面对不上")
+
+    # 3) 鼠标按着的时候不设（模拟点击/拖动进行中）
+    calls.clear()
+    hitbox.interaction_in_progress = lambda: True   # type: ignore[method-assign]
+    backend.pet_style = "penguin"
+    pump(500)
+    hitbox.refresh()
+    hitbox.refresh_now()      # 连 force 也不能破这条规则
+    check("鼠标按着时不改窗口区域（force 也不行）", len(calls) == 0,
+          f"实际设了 {len(calls)} 次")
+
+    # 松开之后要恢复更新
+    hitbox.interaction_in_progress = lambda: False   # type: ignore[method-assign]
+    pump(100)
+    calls.clear()
+    hitbox.refresh_now()
+    check("松开鼠标后恢复更新", len(calls) >= 1,
+          "一直不更新的话，拖动之后区域就停在旧形状上了")
+
+    hitbox._set_native_mask = original_set  # type: ignore[method-assign]
 
     hitbox.stop()
     root.deleteLater()

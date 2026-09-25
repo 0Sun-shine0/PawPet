@@ -183,6 +183,11 @@ class FocusEngine(QObject):
                 "offline": bool(offline),
             })
             del self._store.state["sessions"][:-500]
+            task_id = str(focus.get("task_id") or "").strip()
+            if task_id:
+                # 先把待记账的任务 ID 和本轮结算一起落盘，再由 Backend
+                # 消费。这样结算后程序立刻退出也不会让番茄数凭空少一个。
+                focus["pending_task_pomodoro"] = task_id
 
         next_mode = self._next_mode(mode, advance=(mode == "focus"))
         focus["mode"] = next_mode
@@ -201,6 +206,15 @@ class FocusEngine(QObject):
         self.modeChanged.emit(next_mode)
         self.completed.emit(mode, rounded)
         self._emit(force=True)
+
+    @Slot(result=str)
+    def takePendingTaskPomodoro(self) -> str:
+        """取出并清掉待记账任务；没有待记账时返回空串。"""
+        task_id = str(self.focus.get("pending_task_pomodoro") or "").strip()
+        if task_id:
+            self.focus["pending_task_pomodoro"] = ""
+            self._store.save()
+        return task_id
 
     def poll(self) -> None:
         """由主窗口的定时器调用；只在秒数变化或阶段结束时发出信号。"""
@@ -230,6 +244,29 @@ class FocusEngine(QObject):
             self.tick.emit()
 
     # ------------------------------------------------------------ QML 接口
+    @Property(str, notify=tick)
+    def taskId(self) -> str:
+        return str(self.focus.get("task_id") or "")
+
+    @taskId.setter
+    def taskId(self, value: str) -> None:
+        task_id = str(value or "").strip()
+        if task_id == self.taskId:
+            return
+        self.focus["task_id"] = task_id
+        self._store.save()
+        self.tick.emit()
+
+    @Property(str, notify=tick)
+    def taskLabel(self) -> str:
+        task_id = self.taskId
+        if not task_id:
+            return ""
+        for task in self._store.tasks:
+            if task.get("id") == task_id:
+                return str(task.get("text") or "")
+        return "待办已删除"
+
     @Property(str, notify=tick)
     def mode(self) -> str:
         return self.focus.get("mode", "focus")

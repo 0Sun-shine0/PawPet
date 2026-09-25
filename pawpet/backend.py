@@ -111,7 +111,17 @@ def _setting_property(key: str, qtype, notify):
 
 
 class Backend(QObject):
+    HOTKEY_LABELS = {
+        "ask": "让小爪做事",
+        "dashboard": "打开工作台",
+        "focus": "开始 / 暂停专注",
+        "task": "快速加待办",
+    }
+
     settingsChanged = Signal()
+    # 自动缩放除了会被设置页改动，也会随着主屏/DPI 变化而改变。
+    # 单独的通知让 QML 不必等用户重启应用才重新计算字号和间距。
+    uiScaleChanged = Signal()
     petStyleChanged = Signal()
     dashboardVisibilityChanged = Signal()
     petVisibilityChanged = Signal()
@@ -120,9 +130,14 @@ class Backend(QObject):
     showDashboardRequested = Signal(str)       # (page)
     hideDashboardRequested = Signal()
     quitRequested = Signal()
+    # 退出前给 QML 一次同步提交编辑内容的机会（例如便签输入框里
+    # 还没等到自动保存计时器触发的文字）。
+    shutdownRequested = Signal()
     clockChanged = Signal()
     sitChanged = Signal()
     upcomingChanged = Signal()
+    # 专注页的待办下拉选项变了（新增、改名、完成或删除待办时通知）。
+    taskOptionsChanged = Signal()
     # 用户改了界面配色。QML 的 Theme 单例订阅它，改完立刻生效、不用重启。
     themeChanged = Signal()
     # 上手指引该弹出来了。由启动流程发出，QML 的引导窗口订阅它。
@@ -131,11 +146,15 @@ class Backend(QObject):
     dataTransferFinished = Signal(bool, str)
     # 自动更新检查完（无论有没有新版）。QML 订阅它刷新「关于」那一块。
     updateChecked = Signal()
+    hotkeyStatusChanged = Signal()
     # 贴边位置变了：贴上了 / 解除了 / 滑出滑回。QML 收到就移动到新位置。
     #
     # 用信号 + 只读属性而不是双向绑定：窗口的 x/y 会被用户拖动直接改写，
     # 双向绑定会被拖动打破。这里让 Python 算、QML 听，方向单一。
     petGeometryChanged = Signal()
+    # 显示器拔插、分辨率或任务栏区域变化。宠物之外的独立窗口也要用
+    # 这个信号把自己从已经不存在的屏幕上收回来。
+    screenGeometryChanged = Signal()
 
     # --------------------------------------------------------------- 构造
     def __init__(self, store, parent=None) -> None:
@@ -165,11 +184,21 @@ class Backend(QObject):
         self._last_clock = ""
         self._upcoming: list[str] = []
         self._last_save = 0.0
+        self._ui_scale_save_timer = QTimer(self)
+        self._ui_scale_save_timer.setSingleShot(True)
+        self._ui_scale_save_timer.setInterval(450)
+        self._ui_scale_save_timer.timeout.connect(self.flush)
+        # 现有代码和部分迁移逻辑仍然统一发 settingsChanged；把它转成
+        # 专用通知，保证 uiScale 的 QML 绑定继续兼容旧的设置写入路径。
+        self.settingsChanged.connect(self._emit_ui_scale_changed)
+        self.screenGeometryChanged.connect(self._emit_ui_scale_changed)
         self._started_at = datetime.now().astimezone()
         self._dashboard_visible = False
         self._command_bar_visible = False
         self._pet_visible = True
         self._user_away = False
+        self._hotkey_registered: tuple[str, ...] = ()
+        self._hotkey_failed: tuple[str, ...] = ()
 
         # 更新检查的在途结果。都是内存态的 —— 关掉程序就重来，
         # 没必要落盘（落盘反而会给用户「它在惦记什么」的感觉）。
@@ -182,6 +211,7 @@ class Backend(QObject):
         self._focus.tick.connect(self._on_focus_tick)
         self.reminder_engine.fired.connect(self._on_reminder_fired)
         self._reminders.changed.connect(self._refresh_upcoming)
+        self._tasks.changed.connect(self._on_task_options_changed)
         self._tasks.countsChanged.connect(self._on_focus_tick)
         self._ai.toastRequested.connect(self._on_ai_toast)
         self._ai.memoryChanged.connect(self.memoryChanged)
@@ -201,6 +231,16 @@ class Backend(QObject):
         self._pet_hover_timer.timeout.connect(self._pet_check_peek)
 
         self._refresh_upcoming()
+        # FocusEngine 在这些信号接线前就会处理「关机期间已经结束」的
+        # 专注，所以这里要刷新一次记录模型，并消费可能留下的待记账番茄。
+        self._sessions.refresh()
+        self._week.refresh()
+        self._on_task_options_changed()
+        self._consume_pending_task_pomodoro()
+
+    @Slot()
+    def _emit_ui_scale_changed(self) -> None:
+        self.uiScaleChanged.emit()
 
     # ------------------------------------------------------- 子对象（给 QML）
     @Property(QObject, constant=True)
@@ -210,6 +250,25 @@ class Backend(QObject):
     @Property(QObject, constant=True)
     def tasks(self) -> QObject:
         return self._tasks
+
+    @Property("QVariantList", notify=taskOptionsChanged)
+    def focusTaskOptions(self) -> list:
+        """专注页可关联的待办，只展示尚未完成的项目。"""
+        options = [{"taskId": "", "text": "不关联待办"}]
+        pending = [
+            task for task in self._store.tasks
+            if not task.get("done") and str(task.get("id") or "").strip()
+        ]
+        pending.sort(key=lambda task: (
+            -int(task.get("priority", 0)),
+            -(float(task.get("created") or 0)),
+        ))
+        for task in pending:
+            task_id = str(task.get("id") or "").strip()
+            text = " ".join(str(task.get("text") or "").split())
+            if text:
+                options.append({"taskId": task_id, "text": text[:200]})
+        return options
 
     @Property(QObject, constant=True)
     def reminders(self) -> QObject:
@@ -267,11 +326,34 @@ class Backend(QObject):
         self._sessions.refresh()
         self._week.refresh()
         if mode == "focus":
+            task_label = self._consume_pending_task_pomodoro()
+            detail = f"「{task_label}」+1 个番茄。" if task_label else ""
             self._notify("focus_done", "专注完成 🎉",
-                         f"这一轮 {minutes} 分钟拿下了。站起来活动一下，喝口水。", "focus_done")
+                         f"这一轮 {minutes} 分钟拿下了。{detail}站起来活动一下，喝口水。",
+                         "focus_done")
         else:
             self._notify("break_done", "休息结束", "准备好了就继续下一轮专注吧。", "break_done")
         self.clockChanged.emit()
+
+    def _on_task_options_changed(self) -> None:
+        self.taskOptionsChanged.emit()
+        self._focus.tick.emit()
+
+    def _consume_pending_task_pomodoro(self) -> str:
+        """把专注引擎落盘的待记账番茄安全地结算一次。"""
+        task_id = self._focus.takePendingTaskPomodoro()
+        if not task_id:
+            return ""
+        task = next(
+            (item for item in self._store.tasks if item.get("id") == task_id),
+            None,
+        )
+        if task is None:
+            # 待办可能在专注结束前被删掉；消费掉 pending，避免下次启动重复尝试。
+            return ""
+        label = " ".join(str(task.get("text") or "").split())[:80]
+        self._tasks.bumpPomodoro(task_id)
+        return label
 
     def _on_focus_tick(self) -> None:
         self.clockChanged.emit()
@@ -397,6 +479,7 @@ class Backend(QObject):
 
     def shutdown(self) -> None:
         """退出前收尾：停掉 AI 线程和 MCP 子进程。"""
+        self._ui_scale_save_timer.stop()
         try:
             self._ai.shutdown()
         except Exception:  # noqa: BLE001
@@ -948,7 +1031,7 @@ class Backend(QObject):
 
         return FONT_LATIN
 
-    @Property(float, notify=settingsChanged)
+    @Property(float, notify=uiScaleChanged)
     def uiScale(self) -> float:
         """界面整体缩放系数。
 
@@ -969,7 +1052,27 @@ class Backend(QObject):
 
         return _auto_ui_scale(self)
 
-    @Property(bool, notify=settingsChanged)
+    @uiScale.setter
+    def uiScale(self, value: float) -> None:
+        """保存设置页滑杆写回来的手动缩放值。"""
+        try:
+            configured = float(value)
+        except (TypeError, ValueError):
+            return
+        configured = max(0.8, min(2.0, configured))
+        try:
+            current = float(self._store.settings.get("ui_scale", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            current = 0.0
+        if current > 0 and abs(current - configured) < 1e-6:
+            return
+        self._store.settings["ui_scale"] = configured
+        self.settingsChanged.emit()
+        # 第一次改动立即保存，连续拖动则由短定时器合并最后一次写入。
+        self.save()
+        self._ui_scale_save_timer.start()
+
+    @Property(bool, notify=uiScaleChanged)
     def uiScaleIsAuto(self) -> bool:
         try:
             return float(self._store.settings.get("ui_scale", 0.0) or 0.0) <= 0
@@ -991,7 +1094,7 @@ class Backend(QObject):
                 "它们要先自己准备资料、或者先知道 MCP 是什么才用得上。"
                 "包里自带的那些只读小工具不受影响，照常能用。")
 
-    @Property(str, notify=settingsChanged)
+    @Property(str, notify=uiScaleChanged)
     def uiScaleHint(self) -> str:
         scale = self.uiScale
         percent = int(round(scale * 100))
@@ -1003,6 +1106,7 @@ class Backend(QObject):
     def resetUiScale(self, auto: bool = True) -> None:
         """切回自动。"""
         self._store.settings["ui_scale"] = 0.0 if auto else self.uiScale
+        self._ui_scale_save_timer.stop()
         self.settingsChanged.emit()
         self.flush()
 
@@ -1133,18 +1237,67 @@ class Backend(QObject):
     @Property(str, notify=settingsChanged)
     def hotkeySummary(self) -> str:
         parts = [spec.upper() for spec in
-                 (self.hotkey_dashboard, self.hotkey_focus, self.hotkey_task) if spec]
+                 (self.hotkey_ask, self.hotkey_dashboard,
+                  self.hotkey_focus, self.hotkey_task) if spec]
         return " / ".join(parts) if parts else "未设置"
+
+    def setHotkeyStatus(self, registered: list[str], failed: list[str]) -> None:
+        registered_state = tuple(str(item) for item in (registered or ()))
+        failed_state = tuple(str(item) for item in (failed or ()))
+        if (registered_state, failed_state) == (
+                self._hotkey_registered, self._hotkey_failed):
+            return
+        self._hotkey_registered = registered_state
+        self._hotkey_failed = failed_state
+        self.hotkeyStatusChanged.emit()
+
+    def _hotkeyDisplayName(self, action: str) -> str:
+        label = self.HOTKEY_LABELS.get(action, action)
+        spec = str(getattr(self, f"hotkey_{action}", "") or "").strip().upper()
+        return f"{label}（{spec}）" if spec else label
+
+    @Property(str, notify=hotkeyStatusChanged)
+    def hotkeyRegistrationStatus(self) -> str:
+        if not self._hotkey_registered and not self._hotkey_failed:
+            return "注册结果尚未返回"
+        parts: list[str] = []
+        if self._hotkey_registered:
+            parts.append("已生效：" + "、".join(
+                self._hotkeyDisplayName(action)
+                for action in self._hotkey_registered
+            ))
+        if self._hotkey_failed:
+            parts.append(
+                "未生效：" + "、".join(
+                    self._hotkeyDisplayName(action)
+                    for action in self._hotkey_failed
+                ) + "（可能被其他程序占用，或格式不支持）"
+            )
+        return "；".join(parts)
 
     @Property(str, notify=settingsChanged)
     def migrationNote(self) -> str:
         source = self._store.migrated_from
+        corrupt_path = self._store.corrupt_path
+        preserved = (
+            f"损坏原文已另存为 {corrupt_path.name}，仍保留在数据目录。"
+            if corrupt_path else ""
+        )
         if source == "v1":
             return "已从旧版 tkinter 数据自动升级：待办、便签和休息间隔都保留了下来。"
         if source == "backup":
             detail = self._store.load_error or "主数据文件损坏"
-            return (f"{detail}，已自动从备份恢复。"
+            return (f"{detail}，已自动从备份恢复。{preserved}"
                     "如果发现少了最近改的内容，可以打开数据文件夹检查 pet_data.json。")
+        if self._store.load_error:
+            if preserved:
+                return (f"{self._store.load_error}，已创建安全空数据。{preserved}"
+                        "请检查数据目录中的原始文件，确认无误后再继续使用。")
+            return (f"{self._store.load_error}，已创建安全空数据，但原始文件无法另存。"
+                    "请先手动复制数据文件，再继续使用。")
+        if self._store.repaired:
+            return ("检测到数据文件里有格式异常的字段，已自动修复并使用安全默认值。"
+                    "如果刚手动编辑过数据，建议关闭程序后再检查一次。")
         return ""
 
     # ------------------------------------------------------------ QML 动作
@@ -1183,6 +1336,24 @@ class Backend(QObject):
             screen = QGuiApplication.primaryScreen()
         if screen is None:
             return {"x": 0, "y": 0, "width": 1280, "height": 720}
+        rect = screen.availableGeometry()
+        return {
+            "x": rect.x(),
+            "y": rect.y(),
+            "width": rect.width(),
+            "height": rect.height(),
+        }
+
+    @Slot(result="QVariantMap")
+    def primaryScreenArea(self) -> dict:
+        """返回主屏的可用区域，而不是坐标恰好包含 (0, 0) 的屏幕。
+
+        多屏布局允许主屏位于负坐标；这时 `screenAt(0, 0)` 可能命中
+        另一块屏，首次打开工作台/引导会跑到错误的显示器。
+        """
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return self.screenAt(0, 0)
         rect = screen.availableGeometry()
         return {
             "x": rect.x(),
@@ -1755,6 +1926,7 @@ class Backend(QObject):
         # 「主数据文件无法解析」这条已经过期的提示。
         self._store.load_error = ""
         self._store.migrated_from = None
+        self._store.repaired = False
         self._store.load()
 
         # ---- 2. 界面配色（数据目录里的 theme.json）

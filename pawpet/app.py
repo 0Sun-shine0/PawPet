@@ -10,7 +10,9 @@ import sys
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QObject, QTimer, QUrl, Qt, Slot
+from PySide6.QtCore import (
+    QCoreApplication, QEvent, QObject, QTimer, QUrl, Qt, Slot,
+)
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -29,6 +31,7 @@ from .config import (
     is_frozen,
     safe_print,
 )
+from .hitbox import PetHitbox
 from .services import SingleInstanceServer
 from .store import Store
 
@@ -71,6 +74,8 @@ class PawPetApp(QObject):
         self._icon = make_icon()
         self._shutting_down = False
         self._qml_root = None
+        self._pet_hitbox = None
+        self._screen_refresh_pending = False
 
         self._engine = QQmlApplicationEngine()
         self._engine.addImportPath(str(QML_DIR))
@@ -83,6 +88,18 @@ class PawPetApp(QObject):
         if not roots:
             raise RuntimeError("QML 加载失败，请检查 pawpet/qml 目录下的文件")
         self._qml_root = roots[0]
+
+        pet_window = self._qml_root.findChild(
+            QObject, "petWindow", Qt.FindChildrenRecursively
+        )
+        if pet_window is not None:
+            self._pet_hitbox = PetHitbox(pet_window, self)
+
+        self._app.screenAdded.connect(self._on_screen_added)
+        self._app.screenRemoved.connect(self._schedule_screen_refresh)
+        self._app.primaryScreenChanged.connect(self._schedule_screen_refresh)
+        for screen in self._app.screens():
+            self._watch_screen(screen)
 
         self._tray = self._build_tray()
         self._hotkeys = self._build_hotkeys()
@@ -123,6 +140,38 @@ class PawPetApp(QObject):
         self._backend.refresh_dynamic()
         if self._tray is not None:
             self._tray.setToolTip(f"{APP_NAME} · {self._backend.statusLine}")
+
+    def _schedule_screen_refresh(self, *_args) -> None:
+        """在显示器拓扑稳定后让宠物重新计算位置。"""
+        if self._shutting_down or self._screen_refresh_pending:
+            return
+        self._screen_refresh_pending = True
+        QTimer.singleShot(250, self._refresh_screen_geometry)
+
+    def _on_screen_added(self, screen) -> None:
+        self._watch_screen(screen)
+        self._schedule_screen_refresh()
+
+    def _watch_screen(self, screen) -> None:
+        # 分辨率、任务栏、DPI 和虚拟桌面变化都可能改变窗口的可用区域
+        # 或自动缩放。统一合并到一次延迟刷新，避免 Windows 拖动设置时抖动。
+        for signal_name in (
+            "geometryChanged",
+            "availableGeometryChanged",
+            "logicalDotsPerInchChanged",
+            "physicalDotsPerInchChanged",
+            "virtualGeometryChanged",
+        ):
+            signal = getattr(screen, signal_name, None)
+            if signal is not None:
+                signal.connect(self._schedule_screen_refresh)
+
+    def _refresh_screen_geometry(self) -> None:
+        self._screen_refresh_pending = False
+        if self._shutting_down:
+            return
+        self._backend.screenGeometryChanged.emit()
+        self._backend.petGeometryChanged.emit()
 
     def _greet(self) -> None:
         note = self._backend.migrationNote
@@ -235,6 +284,7 @@ class PawPetApp(QObject):
             safe_print(f"[小爪] 热键注册失败（可能被占用）：{', '.join(manager.failed)}")
         if manager.registered:
             safe_print(f"[小爪] 全局热键已注册：{', '.join(manager.registered)}")
+        self._backend.setHotkeyStatus(manager.registered, manager.failed)
         return manager
 
     def _on_hotkey(self, action: str) -> None:
@@ -293,18 +343,28 @@ class PawPetApp(QObject):
 
         self._heartbeat.stop()
         self._slow.stop()
+        if self._pet_hitbox is not None:
+            self._pet_hitbox.stop()
         self._hotkeys.stop()
         self._pipe.stop()
         if self._tray is not None:
             self._tray.hide()
-        self._backend.shutdown()
-        self._backend.flush()
+
+        # 先让仍在活着的 QML 页面提交尚未到自动保存时间的编辑内容，
+        # 再销毁对象树；否则用户刚输入的便签可能在托盘退出时丢失。
+        self._backend.shutdownRequested.emit()
 
         # 先销毁 QML 对象树，断开所有对 backend 的绑定
         for obj in self._engine.rootObjects():
             obj.deleteLater()
         self._qml_root = None
         self._app.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self._app.processEvents()
+
+        # QML 已经断开后再停 AI / MCP，避免退出过程中绑定重新求值并读到 null。
+        self._backend.shutdown()
+        self._backend.flush()
 
         self._app.quit()
 

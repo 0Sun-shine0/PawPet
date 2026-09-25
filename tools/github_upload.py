@@ -171,14 +171,20 @@ def request_with_retry(method: str, path: str, token: str,
 # ==========================================================================
 #  读取本地提交
 # ==========================================================================
-def read_tree(ref: str = "HEAD") -> list[tuple[str, str, bytes]]:
+def read_tree(ref: str = "HEAD") -> list[tuple[str, str, bytes, str]]:
     """读出提交里的所有文件。
 
-    返回 [(path, mode, content_bytes)]。
+    返回 [(path, mode, content_bytes, blob_sha)]。
     **从 git 对象库读**而不是读工作区 —— 这样保证上传的内容和提交完全一致
     （换行符已经按 .gitattributes 规范化过）。
 
     用 -z 拿到 NUL 分隔的原始输出，避免中文文件名被转义。
+
+    **第四个元素（blob_sha）是给「一次传多个提交」用的。** git 的 blob
+    是按内容寻址的：内容相同的文件共用一个 SHA。连着传 N 个提交时，
+    绝大多数文件在相邻提交之间没变 → 它们的 blob_sha 一样 → 只需要传一次。
+    没有它的话，`git ls-tree` 拿到的 SHA 会被丢掉，只能按路径去重
+    （路径一样但内容变了就白跳过），或者老实传 N 遍全量文件。
     """
     result = subprocess.run(
         ["git", "ls-tree", "-r", "-z", ref],
@@ -187,7 +193,7 @@ def read_tree(ref: str = "HEAD") -> list[tuple[str, str, bytes]]:
     if result.returncode != 0:
         raise GitHubError(f"git ls-tree 失败：{result.stderr.decode('utf-8', 'replace')}")
 
-    entries: list[tuple[str, str, bytes]] = []
+    entries: list[tuple[str, str, bytes, str]] = []
     for record in result.stdout.split(b"\x00"):
         if not record:
             continue
@@ -214,7 +220,7 @@ def read_tree(ref: str = "HEAD") -> list[tuple[str, str, bytes]]:
         )
         if blob.returncode != 0:
             raise GitHubError(f"读取 blob 失败：{path}")
-        entries.append((path, mode, blob.stdout))
+        entries.append((path, mode, blob.stdout, sha))
 
     return entries
 
@@ -328,8 +334,8 @@ def local_parents(ref: str = "HEAD") -> list[str]:
     return parts[1:] if len(parts) > 1 else []
 
 
-def is_ancestor(sha: str) -> bool:
-    """sha 是不是本地 HEAD 的祖先。
+def is_ancestor(sha: str, ref: str = "HEAD") -> bool:
+    """sha 是不是 ref 的祖先。
 
     本地没有这个对象时返回 False（比如远端那份提交不是我们推的）。
     """
@@ -342,10 +348,68 @@ def is_ancestor(sha: str) -> bool:
     if exists.returncode != 0:
         return False
     result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=str(ROOT),
+        ["git", "merge-base", "--is-ancestor", sha, ref], cwd=str(ROOT),
         capture_output=True, timeout=30,
     )
     return result.returncode == 0
+
+
+def commits_to_publish(existing_sha: str, ref: str = "HEAD") -> list[str]:
+    """算出要上传哪些提交，**从旧到新**排列。
+
+    ## 为什么必须单独算（这是工具原来最危险的地方）
+
+    原来它只上传 `ref` 这**一个**提交，父提交直接照搬本地的：
+
+        payload["parents"] = info["parents"]     # 来自本地 HEAD~1
+
+    本地只领先远端 1 个提交时这是对的。**领先 2 个以上就错了** ——
+    新提交的父提交在远端根本不存在，GitHub 会以
+    「父提交不存在 / Invalid request」422 拒掉；就算某天它容忍了，
+    远端也会留下一条断掉的历史。
+
+    而这个状态很容易出现：攒了几个提交没推、然后跑发版
+    （`release.py` 会在 version.json 上再压一个提交再调这个工具）。
+
+    ## 规则
+
+    * 远端头 == ref        → 空列表（没有要传的）
+    * 远端头是 ref 的祖先  → `远端头..ref`，按时间**从旧到新**
+    * 远端没有能当基础的东西（空仓库、或上次中断留下的孤立提交）
+                          → ref 可达的**整条历史**，同样从旧到新
+
+    第三种情况原来也是错的：那时传上去的提交带着一个远端不存在的父提交。
+    只有「本地恰好只有一个根提交」（全新仓库第一次发版）时才碰巧能过 ——
+    而那正是这个工具最早被写出来的场景，所以一直没暴露。
+
+    返回旧的在前是**必须的**：GitHub 建提交时父提交必须已经存在，
+    所以只能先建父、再建子。
+    """
+    if not ref:
+        ref = "HEAD"
+    tip = local_sha(ref)
+    if not tip:
+        return []
+
+    if existing_sha and existing_sha == tip:
+        return []
+
+    if existing_sha and is_ancestor(existing_sha, ref):
+        # 远端是我们历史的一部分 → 只补它之后的那几个（快进）
+        args = ["rev-list", "--reverse", f"{existing_sha}..{ref}"]
+    else:
+        # 远端没有可用基础 → 整条历史都要传
+        args = ["rev-list", "--reverse", ref]
+
+    result = subprocess.run(
+        ["git", *args], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace",
+    )
+    if result.returncode != 0:
+        raise GitHubError(
+            f"算不出要上传的提交：{result.stderr.strip()[:200]}")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 # ==========================================================================
@@ -357,6 +421,128 @@ def human(size: float) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+def publish_commit(owner: str, repo: str, token: str, commit_sha: str,
+                   info: dict, blob_cache: dict[str, str],
+                   label: str = "") -> tuple[int, str]:
+    """把一个本地提交完整地搬到远端：blob → tree → commit。
+
+    返回 `(返回码, 远端提交 SHA)`。失败时返回 `(1, "")`。
+
+    `blob_cache` 是 `{本地 blob SHA: 远端 blob SHA}`，**由调用方在多个提交
+    之间共享** —— 相邻提交里没变的文件只传一次。传 9 个提交时这是主要开销
+    的来源（每个提交都有一百多个文件，但绝大多数是重复的）。
+
+    `info` 必须**正好是这个 commit_sha 的**信息。父提交、author/committer
+    时间、消息任何一处对不上，远端算出的 SHA 就和本地不同。
+    """
+    heading = f"（{label}）" if label else ""
+    print(f"\n=== 读取提交 {commit_sha[:10]}{heading} ===")
+    entries = read_tree(commit_sha)
+    total_bytes = sum(len(content) for _p, _m, content, _s in entries)
+    print(f"  {len(entries)} 个文件，合计 {human(total_bytes)}")
+
+    # ------------------------------------------------------------ 上传 blobs
+    tree_items: list[dict] = []
+    failed: list[tuple[str, str]] = []
+    reused = 0
+    started = time.time()
+
+    for index, (path, mode, content, blob_sha) in enumerate(entries, 1):
+        cached = blob_cache.get(blob_sha)
+        if cached:
+            # 这个内容这次运行里已经传过了（按内容寻址，不是按路径）
+            tree_items.append({"path": path, "mode": mode,
+                               "type": "blob", "sha": cached})
+            reused += 1
+            continue
+
+        payload = {
+            "content": base64.b64encode(content).decode("ascii"),
+            "encoding": "base64",
+        }
+        try:
+            status, body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/blobs",
+                                   token, payload)
+        except GitHubError as exc:
+            failed.append((path, str(exc)))
+            print(f"  [XX] {path}: {exc}")
+            continue
+
+        if status not in (200, 201):
+            detail = body.get("message", str(body)[:120]) if isinstance(body, dict) else str(body)[:120]
+            failed.append((path, detail))
+            print(f"  [XX] {path}: {detail}")
+            continue
+
+        tree_items.append({
+            "path": path,
+            "mode": mode,
+            "type": "blob",
+            "sha": body["sha"],
+        })
+        blob_cache[blob_sha] = body["sha"]
+
+        if index % 20 == 0 or index == len(entries):
+            elapsed = time.time() - started
+            rate = (index - reused) / elapsed if elapsed else 0
+            print(f"  {index:>3}/{len(entries)}  "
+                  f"(实传 {index - reused}, {rate:.1f} 个/秒, 已用 {elapsed:.0f}s)")
+
+    if failed:
+        print(f"\n  [XX] {len(failed)} 个文件上传失败，中止")
+        for path, detail in failed[:10]:
+            print(f"       {path}: {detail}")
+        return 1, ""
+    if reused:
+        print(f"  [ok] 其中 {reused} 个文件复用了已传过的内容（相同 blob）")
+    print(f"  [ok] {len(tree_items) - reused} 个新 blob 上传完成")
+
+    # ------------------------------------------------------------ 建 tree
+    print(f"\n=== 创建 tree ===")
+    status, tree_body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/trees", token,
+                                {"tree": tree_items})
+    if status not in (200, 201):
+        print(f"  [XX] 失败（{status}）：{str(tree_body)[:300]}")
+        return 1, ""
+    tree_sha = tree_body["sha"]
+
+    # 本地 tree 与远端 tree 必须一致，否则说明有文件在上传过程中被改动过
+    local_tree = info["tree"]
+    if tree_sha == local_tree:
+        print(f"  [ok] tree {tree_sha[:10]} —— 与本地完全一致")
+    else:
+        print(f"  [!!] tree {tree_sha[:10]} 与本地 {local_tree[:10]} 不同")
+        print("       内容有偏差，SHA 会对不上（仍然继续，最后会核对）")
+
+    # ------------------------------------------------------------ 建 commit
+    parents = info.get("parents") or []
+    payload = {
+        "message": info["message"],
+        "tree": tree_sha,
+        # 姓名/邮箱/时间全部显式指定，让服务端算出和本地相同的 SHA
+        "author": info["author"],
+        "committer": info["committer"],
+    }
+    if parents:
+        payload["parents"] = parents
+
+    status, commit_body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/commits", token, payload)
+    if status not in (200, 201):
+        message = str(commit_body)[:300]
+        print(f"  [XX] 建提交失败（{status}）：{message}")
+        if "parent" in message.lower() or status == 422:
+            print("       如果提示父提交不存在，说明它还没被上传 —— "
+                  "这个工具现在会自动按顺序补全，看到这条说明顺序算错了。")
+        return 1, ""
+
+    remote_sha = commit_body["sha"]
+    if remote_sha == commit_sha:
+        print(f"  [ok] commit {remote_sha[:10]} —— SHA 与本地相同")
+    else:
+        print(f"  [!!] commit {remote_sha[:10]} 与本地 {commit_sha[:10]} 不同")
+    return 0, remote_sha
 
 
 def upload(owner: str, repo: str, token: str, branch: str,
@@ -443,97 +629,35 @@ def upload(owner: str, repo: str, token: str, branch: str,
         bootstrapped = True
         print("  [ok] 引导提交已创建，底层 API 现在可用了")
 
-    # ---------------------------------------------------------- 3. 读本地内容
-    print(f"\n=== 3. 读取本地提交 ===")
-    # **必须用和上面同一个 ref。** 原来这里写死 "HEAD"，配上 --ref 补传
-    # 中间提交时就会「元信息取自 ref、文件内容取自 HEAD」——
-    # 本地自检用 info["tree"]（ref 的树）所以能过，但实际传上去的树
-    # 是 HEAD 的，于是远端 SHA 和本地对不上（实测 78bfa80 vs 08c1e50）。
-    entries = read_tree(ref)
-    total_bytes = sum(len(content) for _p, _m, content in entries)
-    print(f"  {len(entries)} 个文件，合计 {human(total_bytes)}")
-
-    if dry_run:
-        print("\n=== 计划上传的文件 ===")
-        for path, mode, content in sorted(entries):
-            print(f"  {human(len(content)):>9}  {path}")
-        print(f"\n[dry-run] 共 {len(entries)} 个文件，未实际上传")
+    # ------------------------------------------------- 3. 算出要传哪些提交
+    #
+    # **这一步是这次修的 bug 的核心。** 原来这里直接读 `ref` 一个提交就开传，
+    # 本地领先远端 2 个以上时会带着一个远端不存在的父提交 → 422。
+    print(f"\n=== 3. 计算要上传的提交 ===")
+    pending = commits_to_publish(existing_sha, ref)
+    if not pending:
+        print(f"  远端已经指向 {existing_sha[:10]}，和本地一致 —— 没有要上传的")
         return 0
 
-    # ---------------------------------------------------------- 4. 上传 blobs
-    print(f"\n=== 4. 上传文件（blob）===")
-    tree_items: list[dict] = []
-    started = time.time()
-    failed: list[tuple[str, str]] = []
+    tip = local_sha(ref)
+    print(f"  要上传 {len(pending)} 个提交（从旧到新）：")
+    for index, sha in enumerate(pending, 1):
+        subject = subprocess.run(
+            ["git", "log", "-1", "--format=%s", sha], cwd=str(ROOT),
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace",
+        ).stdout.strip()[:52]
+        print(f"    {index}. {sha[:10]}  {subject}")
 
-    for index, (path, mode, content) in enumerate(entries, 1):
-        payload = {
-            "content": base64.b64encode(content).decode("ascii"),
-            "encoding": "base64",
-        }
-        try:
-            status, body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/blobs",
-                                   token, payload)
-        except GitHubError as exc:
-            failed.append((path, str(exc)))
-            print(f"  [XX] {path}: {exc}")
-            continue
-
-        if status not in (200, 201):
-            detail = body.get("message", str(body)[:120]) if isinstance(body, dict) else str(body)[:120]
-            failed.append((path, detail))
-            print(f"  [XX] {path}: {detail}")
-            continue
-
-        tree_items.append({
-            "path": path,
-            "mode": mode,
-            "type": "blob",
-            "sha": body["sha"],
-        })
-
-        if index % 10 == 0 or index == len(entries):
-            elapsed = time.time() - started
-            rate = index / elapsed if elapsed else 0
-            print(f"  {index:>3}/{len(entries)}  "
-                  f"({rate:.1f} 个/秒, 已用 {elapsed:.0f}s)")
-
-    if failed:
-        print(f"\n  [XX] {len(failed)} 个文件上传失败，中止")
-        for path, detail in failed[:10]:
-            print(f"       {path}: {detail}")
-        return 1
-
-    print(f"  [ok] {len(tree_items)} 个 blob 全部上传完成")
-
-    # 本地 tree 与远端 tree 必须一致，否则说明有文件在上传过程中被改动过
-    local_tree = info["tree"]
-    print(f"       本地 tree {local_tree[:10]}")
-
-    # ---------------------------------------------------------- 4. 建 tree
-    print(f"\n=== 4. 创建 tree ===")
-    status, tree_body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/trees", token,
-                                {"tree": tree_items})
-    if status not in (200, 201):
-        print(f"  [XX] 失败（{status}）：{str(tree_body)[:300]}")
-        return 1
-    tree_sha = tree_body["sha"]
-    print(f"  [ok] tree {tree_sha[:10]}")
-
-    if tree_sha == local_tree:
-        print("       [ok] tree 与本地完全一致（说明内容没有任何偏差）")
-    else:
-        print(f"       [!!] tree 与本地不一致（本地 {local_tree[:10]}）—— 内容可能有差异")
-
-    # ------------------------------------------------ 5. 组装父提交
-    # 父提交**直接照搬本地的**（local_commit_info 里已经取好）。
-    # SHA 是父提交的哈希的一部分，只要父子关系和本地一致、
-    # tree / 作者 / 时间 / 消息也一致，服务端算出的 SHA 就必然相同。
-    parents = info.get("parents") or []
-    if parents:
-        print(f"\n  本地提交的父：{[p[:10] for p in parents]}")
-    else:
-        print(f"\n  本地是根提交，远端也建成根提交（SHA 才能对上）")
+    if len(pending) > 1:
+        print(f"  （本地领先远端 {len(pending)} 个提交。"
+              "父提交必须先存在，所以按从旧到新的顺序传）")
+        if info.get("message"):
+            print("  （--message 只作用于最后一个提交；"
+                  "中间那些用它们各自本来的提交信息）")
+    if pending[-1] != tip:
+        print(f"  [!!] 要传的最后一个不是 {ref} —— 结束后远端会停在 "
+              f"{pending[-1][:10]}，本地 HEAD 还是 {tip[:10]}")
 
     # 判断改 ref 要不要 force。
     #
@@ -546,52 +670,99 @@ def upload(owner: str, repo: str, token: str, branch: str,
     # 于是会误判成「需要覆盖」。所以改成查祖先关系。
     need_force = False
     if branch_existed:
-        if existing_sha == local_sha() or is_ancestor(existing_sha):
-            print("  远端是我们历史的一部分 → 正常快进更新")
+        if existing_sha == tip or is_ancestor(existing_sha, ref):
+            print(f"\n  远端是我们历史的一部分 → 正常快进更新")
         elif not remote_parents:
             need_force = True
-            print(f"  远端当前 {existing_sha[:10]} 不在我们历史里，")
+            print(f"\n  远端当前 {existing_sha[:10]} 不在我们历史里，")
             print("  但它是根提交（上次尝试的产物），可以安全覆盖")
         else:
-            print(f"  [XX] 远端已有 {len(remote_parents)} 个父提交的真实历史，")
+            print(f"\n  [XX] 远端已有 {len(remote_parents)} 个父提交的真实历史，")
             print("       用 API 覆盖会丢东西，已中止。请改用 git push。")
             return 1
     elif bootstrapped:
         # 远端只有引导提交，它不是我们祖先，必须覆盖
         need_force = True
-        print("  远端只有引导提交，需要覆盖")
+        print("\n  远端只有引导提交，需要覆盖")
 
-    # ---------------------------------------------------------- 6. 建 commit
-    print(f"\n=== 5. 创建 commit ===")
-    print(f"  作者   : {info['author']['name']} <{info['author']['email']}>")
-    print(f"  作者时间: {info['author']['date']}")
-    print(f"  提交时间: {info['committer']['date']}")
+    # ------------------------------------------------------------ dry-run
+    if dry_run:
+        print("\n=== 计划上传的内容 ===")
+        seen_blobs: set[str] = set()
+        for sha in pending:
+            entries = read_tree(sha)
+            fresh = {s for _p, _m, _c, s in entries} - seen_blobs
+            seen_blobs |= fresh
+            size = sum(len(c) for _p, _m, c, s in entries if s in fresh)
+            subject = subprocess.run(
+                ["git", "log", "-1", "--format=%s", sha], cwd=str(ROOT),
+                capture_output=True, text=True, timeout=30,
+                encoding="utf-8", errors="replace",
+            ).stdout.strip()[:44]
+            print(f"  {sha[:10]}  {len(entries):>3} 个文件"
+                  f"（新增 {len(fresh):>3} 个，{human(size)}）  {subject}")
+        print(f"\n  合计要传 {len(seen_blobs)} 个不同的 blob"
+              f"（跨提交按内容去重，不是 {len(pending)} 份全量）")
+        print(f"  [dry-run] 未实际上传")
+        return 0
 
-    payload = {
-        "message": info["message"],
-        "tree": tree_sha,
-        # 姓名/邮箱/时间全部显式指定，让服务端算出和本地相同的 SHA
-        "author": info["author"],
-        "committer": info["committer"],
-    }
-    if parents:
-        payload["parents"] = parents
+    # ------------------------------------------------- 4-6. 逐个提交上传
+    started = time.time()
+    blob_cache: dict[str, str] = {}
+    # 本地提交 SHA → 远端实际建出来的 SHA。
+    #
+    # **父提交要用这张表翻译一遍，不能直接用本地的。** 正常情况下
+    # 「远端 SHA == 本地 SHA」（这个工具的核心承诺），但只要有偏差
+    # —— 服务端对某个字段的理解不同、或者历史上遗留的老提交 ——
+    # 子提交就会指向一个远端不存在的父提交，于是 422。
+    # 链条的每一环都必须指向**远端真的有的那个提交**。
+    #
+    # 这个不是理论问题：写这套测试时，假 API 算出的 SHA 和本地不同，
+    # 第二个提交立刻就被 422 拒了 —— 正好是这里要防的情况。
+    parent_map: dict[str, str] = {}
+    commit_sha = ""
+    for index, sha in enumerate(pending, 1):
+        # **中间提交的元信息从 git 现取，最后一个用调用方传进来的 `info`。**
+        # 这样「只领先 1 个提交」这条最常见的路径和改之前**完全一样**，
+        # 多提交这条新路径才走 local_commit_info。
+        #
+        # 必须 copy 一份再用 —— 直接改调用方的 info，会让 main() 里
+        # 那次自检的结果和实际上传的不一致。
+        if index == len(pending):
+            this_info = dict(info)
+        else:
+            this_info = dict(local_commit_info(sha))
+            this_info["sha"] = sha
 
-    status, commit_body = request_with_retry("POST", f"/repos/{owner}/{repo}/git/commits", token, payload)
-    if status not in (200, 201):
-        print(f"  [XX] 失败（{status}）：{str(commit_body)[:300]}")
-        return 1
-    commit_sha = commit_body["sha"]
-    print(f"  [ok] commit {commit_sha[:10]}")
+        parents = this_info.get("parents") or []
+        if parents:
+            mapped = [parent_map.get(p, p) for p in parents]
+            if mapped != parents:
+                print(f"  父提交按远端 SHA 换算：{[p[:8] for p in parents]}"
+                      f" → {[p[:8] for p in mapped]}")
+            this_info["parents"] = mapped
 
-    local = local_sha()
+        label = f"{index}/{len(pending)}"
+        code, commit_sha = publish_commit(owner, repo, token, sha, this_info,
+                                          blob_cache, label)
+        if code != 0:
+            print(f"\n  [XX] 第 {index} 个提交（{sha[:10]}）失败，中止。")
+            if index > 1:
+                print(f"       前 {index - 1} 个已经建好了，但分支还指着旧位置 ——")
+                print(f"       远端 {branch} 没动过，重跑一次即可（已传的 blob 会重传）。")
+            return 1
+        parent_map[sha] = commit_sha
+
+    local = local_sha(ref)
     if commit_sha == local:
-        print("       [ok] 与本地 HEAD 的 SHA 完全相同 —— 本地和远程天然同步")
+        print(f"\n  [ok] 远端 tip {commit_sha[:10]} 与本地 {ref} 的 SHA 完全相同"
+              " —— 本地和远程天然同步")
         sha_matches = True
     else:
-        print(f"       [!!] 与本地 HEAD 不同（本地 {local[:10]}）")
-        print("            内容一致但 SHA 不同，以后 push 需要先 fetch 再 reset")
+        print(f"\n  [!!] 远端 tip {commit_sha[:10]} 与本地 {local[:10]} 不同")
+        print("       内容一致但 SHA 不同，以后 push 需要先 fetch 再 reset")
         sha_matches = False
+
 
     # ---------------------------------------------------------- 7. 更新 ref
     print(f"\n=== 6. 更新分支 {branch} ===")

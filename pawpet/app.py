@@ -75,6 +75,9 @@ class PawPetApp(QObject):
         self._shutting_down = False
         self._qml_root = None
         self._pet_hitbox = None
+        self._dashboard_window = None
+        self._command_bar_window = None
+        self._onboarding_window = None
         self._screen_refresh_pending = False
 
         self._engine = QQmlApplicationEngine()
@@ -92,8 +95,30 @@ class PawPetApp(QObject):
         pet_window = self._qml_root.findChild(
             QObject, "petWindow", Qt.FindChildrenRecursively
         )
+        self._dashboard_window = self._qml_root.findChild(
+            QObject, "dashboardWindow", Qt.FindChildrenRecursively
+        )
+        self._command_bar_window = self._qml_root.findChild(
+            QObject, "commandBar", Qt.FindChildrenRecursively
+        )
+        self._onboarding_window = self._qml_root.findChild(
+            QObject, "onboardingWindow", Qt.FindChildrenRecursively
+        )
         if pet_window is not None:
             self._pet_hitbox = PetHitbox(pet_window, self)
+            self._backend.dashboardVisibilityChanged.connect(
+                self._sync_pet_hitbox_interaction
+            )
+            self._backend.commandBarVisibilityChanged.connect(
+                self._sync_pet_hitbox_interaction
+            )
+            for window in (self._dashboard_window, self._command_bar_window,
+                           self._onboarding_window):
+                if window is not None:
+                    signal = getattr(window, "visibleChanged", None)
+                    if signal is not None:
+                        signal.connect(self._sync_pet_hitbox_interaction)
+            self._sync_pet_hitbox_interaction()
 
         self._app.screenAdded.connect(self._on_screen_added)
         self._app.screenRemoved.connect(self._schedule_screen_refresh)
@@ -172,6 +197,24 @@ class PawPetApp(QObject):
             return
         self._backend.screenGeometryChanged.emit()
         self._backend.petGeometryChanged.emit()
+
+    def _sync_pet_hitbox_interaction(self, *_args) -> None:
+        """覆盖层交互时不让 setMask 改写宠物窗口。"""
+        hitbox = self._pet_hitbox
+        if hitbox is None:
+            return
+        windows = (self._dashboard_window, self._command_bar_window,
+                   self._onboarding_window)
+        try:
+            overlay_visible = any(
+                window is not None and window.isVisible() for window in windows
+            )
+        except RuntimeError:
+            return
+        if overlay_visible:
+            hitbox.suspend()
+        else:
+            hitbox.resume()
 
     def _greet(self) -> None:
         note = self._backend.migrationNote

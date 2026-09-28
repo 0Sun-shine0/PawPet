@@ -34,24 +34,63 @@ Window {
     visible: backend.commandBarVisible
     title: "小爪指令"
 
+    property int activationAttempts: 0
+
+    Shortcut {
+        sequence: "Escape"
+        context: Qt.WindowShortcut
+        onActivated: backend.commandBarVisible = false
+    }
+
     // ------------------------------------------------------------ 生命周期
     onVisibleChanged: {
         if (visible) {
             place()
             raise()
             requestActivate()
-            Qt.callLater(function () { input.forceActiveFocus() })
+            activationAttempts = 0
+            activationTimer.restart()
+            Qt.callLater(function () {
+                bar.raise()
+                bar.requestActivate()
+                input.forceActiveFocus()
+            })
             popAnim.restart()
             hideTimer.stop()
+        } else {
+            activationTimer.stop()
         }
     }
 
     // 失焦就收起来；但 AI 还在跑时不收，免得看不到进度
     onActiveChanged: {
-        if (active)
+        if (active) {
+            activationTimer.stop()
             hideTimer.stop()
-        else if (visible && !busy)
+        } else if (visible && !busy && !activationTimer.running) {
             hideTimer.restart()
+        }
+    }
+
+    Timer {
+        id: activationTimer
+        interval: 60
+        repeat: true
+        onTriggered: {
+            if (!bar.visible || bar.active) {
+                stop()
+                return
+            }
+            bar.raise()
+            bar.requestActivate()
+            input.forceActiveFocus()
+            bar.activationAttempts += 1
+            if (bar.activationAttempts >= 8) {
+                stop()
+                if (!bar.active && bar.visible && !bar.busy)
+                    hideTimer.restart()
+            }
+        }
     }
 
     Timer {
@@ -191,7 +230,6 @@ Window {
                         enabled: backend.ai.configured && !bar.busy
                         onAccepted: bar.submit()
 
-                        Keys.onEscapePressed: backend.commandBarVisible = false
                     }
                 }
 

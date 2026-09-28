@@ -54,6 +54,7 @@ class PetHitbox(QObject):
         self._last_size: tuple[int, int] | None = None
         self._last_apply_at = 0.0
         self._refresh_pending = False
+        self._suspended = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(max(33, int(interval_ms)))
@@ -97,6 +98,8 @@ class PetHitbox(QObject):
     def _refresh(self, *, force: bool) -> None:
         """Capture the current frame and apply its non-transparent pixels."""
         self._refresh_pending = False
+        if self._suspended:
+            return
         window = self._window
         if window is None:
             return
@@ -200,6 +203,19 @@ class PetHitbox(QObject):
         """Stop refreshing and restore the normal rectangular window."""
         self._timer.stop()
         self.clear()
+
+    def suspend(self) -> None:
+        """暂停原生窗口区域更新，避免覆盖层交互时打断鼠标/焦点。"""
+        self._suspended = True
+        self._timer.stop()
+
+    def resume(self) -> None:
+        """恢复更新，并在覆盖层关闭后立即校准一次碰撞区域。"""
+        if not self._suspended:
+            return
+        self._suspended = False
+        self._timer.start()
+        self.schedule_refresh()
 
     def _clear_native_mask(self) -> None:
         self._set_native_mask(QRegion())

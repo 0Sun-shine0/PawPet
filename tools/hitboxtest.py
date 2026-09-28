@@ -224,6 +224,19 @@ def main() -> int:
     check("松开鼠标后恢复更新", len(calls) >= 1,
           "一直不更新的话，拖动之后区域就停在旧形状上了")
 
+    calls.clear()
+    hitbox.suspend()
+    hitbox.refresh()
+    hitbox.refresh_now()
+    check("覆盖层打开时暂停碰撞箱刷新", len(calls) == 0,
+          f"实际设了 {len(calls)} 次")
+    hitbox.resume()
+    pump(100)
+    calls.clear()
+    hitbox.refresh_now()
+    check("覆盖层关闭后恢复碰撞箱刷新", len(calls) >= 1,
+          "工作台关闭后没有重新校准碰撞区域")
+
     hitbox._set_native_mask = original_set  # type: ignore[method-assign]
 
     hitbox.stop()

@@ -16,6 +16,8 @@ Window {
     color: Theme.bg
     title: "小爪工作台"
 
+    property int activationAttempts: 0
+
     property string currentPage: "today"
     property var pages: [
         { "key": "today",     "label": "今日", "icon": "◉" },
@@ -54,6 +56,27 @@ Window {
             }
             raise()
             requestActivate()
+            activationAttempts = 0
+            activationTimer.restart()
+        } else {
+            activationTimer.stop()
+        }
+    }
+
+    Timer {
+        id: activationTimer
+        interval: 60
+        repeat: true
+        onTriggered: {
+            if (!dash.visible || dash.active) {
+                stop()
+                return
+            }
+            dash.raise()
+            dash.requestActivate()
+            dash.activationAttempts += 1
+            if (dash.activationAttempts >= 8)
+                stop()
         }
     }
 

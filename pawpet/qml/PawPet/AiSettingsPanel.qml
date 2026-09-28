@@ -61,6 +61,7 @@ Rectangle {
             }
             PawField {
                 id: baseField
+                objectName: "aiBaseField"
                 Layout.fillWidth: true
                 text: backend.ai.baseUrl
                 placeholderText: "https://api.deepseek.com/v1"
@@ -81,6 +82,7 @@ Rectangle {
             }
             PawField {
                 id: modelField
+                objectName: "aiModelField"
                 Layout.fillWidth: true
                 text: backend.ai.model
                 // 默认那家（DeepSeek）当前的模型名放在最前面。

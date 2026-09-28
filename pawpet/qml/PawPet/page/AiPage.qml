@@ -19,6 +19,7 @@ Item {
     property bool showProviders: false
     // 「历史对话」面板。对话持久化之后，这是翻回去看的入口。
     property bool showHistory: false
+    property bool showMcpPanel: false
     property string pendingHistoryAction: ""
     property string pendingHistorySessionId: ""
     // 「外部工具」的详情（server 清单、工具名、配置路径）。
@@ -349,15 +350,26 @@ Item {
                 }
             }
 
-            AiHistoryPanel {
-                id: historyCard
+            CollapsibleSection {
+                id: historySection
+                objectName: "historySection"
+                title: backend.ai.conversationCount > 0
+                       ? ("历史对话（" + backend.ai.conversationCount + " 段）")
+                       : "历史对话"
+                subtitle: "查看、切换或删除之前的对话"
                 expanded: page.showHistory
-                onClearHistoryRequested: page.confirmClearHistory()
-                onOpenConversationRequested: function (sessionId) {
-                    backend.ai.openConversation(sessionId)
-                }
-                onDeleteConversationRequested: function (sessionId) {
-                    page.confirmDeleteHistory(sessionId)
+
+                AiHistoryPanel {
+                    id: historyCard
+                    Layout.fillWidth: true
+                    expanded: true
+                    onClearHistoryRequested: page.confirmClearHistory()
+                    onOpenConversationRequested: function (sessionId) {
+                        backend.ai.openConversation(sessionId)
+                    }
+                    onDeleteConversationRequested: function (sessionId) {
+                        page.confirmDeleteHistory(sessionId)
+                    }
                 }
             }
 
@@ -423,16 +435,27 @@ Item {
             }
 
             // -------------------------------------------------- 模型设置
-            AiSettingsPanel {
-                id: settingsPanel
-                Layout.fillWidth: true
-                visible: page.showSettings || !backend.ai.configured
-                showProviders: page.showProviders
-                showMemory: page.showMemory
-                showKnowledge: page.showKnowledge
-                onProvidersVisibilityRequested: page.showProviders = value
-                onMemoryVisibilityRequested: page.showMemory = value
-                onKnowledgeVisibilityRequested: page.showKnowledge = value
+            CollapsibleSection {
+                id: settingsSection
+                objectName: "settingsSection"
+                title: "模型设置"
+                subtitle: backend.ai.configured
+                         ? "已配置 · 需要时展开调整"
+                         : "还没有配置模型，先完成这一步"
+                expanded: page.showSettings
+                forcedExpanded: !backend.ai.configured
+
+                AiSettingsPanel {
+                    id: settingsPanel
+                    Layout.fillWidth: true
+                    visible: page.showSettings || !backend.ai.configured
+                    showProviders: page.showProviders
+                    showMemory: page.showMemory
+                    showKnowledge: page.showKnowledge
+                    onProvidersVisibilityRequested: page.showProviders = value
+                    onMemoryVisibilityRequested: page.showMemory = value
+                    onKnowledgeVisibilityRequested: page.showKnowledge = value
+                }
             }
 
             // -------------------------------------------------- 外部工具（MCP）
@@ -450,12 +473,21 @@ Item {
             // 一屏出现「MCP」「server」「工具名」只会增加理解负担，
             // 而 MCP 开关本身默认就是开的，包里的 pawkit 照常生效，
             // 不看这个卡片一点也不影响使用。
-            AiMcpPanel {
-                id: mcpCard
-                Layout.fillWidth: true
+            CollapsibleSection {
+                id: mcpSection
+                objectName: "mcpSection"
                 visible: backend.advanced_mode
-                showDetail: page.showMcpDetail
-                onDetailVisibilityRequested: page.showMcpDetail = value
+                title: "外部工具"
+                subtitle: "MCP 服务器和可调用工具"
+                expanded: page.showMcpPanel
+
+                AiMcpPanel {
+                    id: mcpCard
+                    Layout.fillWidth: true
+                    visible: backend.advanced_mode
+                    showDetail: page.showMcpDetail
+                    onDetailVisibilityRequested: page.showMcpDetail = value
+                }
             }
 
             // -------------------------------------------------- 对话区
@@ -940,12 +972,14 @@ Item {
                         spacing: 8
 
                         PawButton {
+                            objectName: "approvalAllowButton"
                             text: "允许这一次"
                             glyph: "✓"
                             variant: "primary"
                             onClicked: backend.ai.resolvePending(true)
                         }
                         PawButton {
+                            objectName: "approvalRejectButton"
                             text: "拒绝"
                             variant: "ghost"
                             onClicked: backend.ai.resolvePending(false)

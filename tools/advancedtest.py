@@ -56,7 +56,7 @@ def main() -> int:
 
     from PySide6.QtCore import QEventLoop, QObject, Qt, QTimer, QUrl
     from PySide6.QtQml import QQmlEngine
-    from PySide6.QtQuick import QQuickView
+    from PySide6.QtQuick import QQuickItem, QQuickView
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtWidgets import QApplication
 
@@ -198,6 +198,22 @@ def main() -> int:
         loop.exec()
         view.grabWindow()
 
+    def is_visible(item) -> bool:
+        return isinstance(item, QQuickItem) and item.isVisible()
+
+    def visible_control_counts(root) -> dict[str, int]:
+        counts = {"PawSwitch": 0, "PawSlider": 0,
+                  "PawField": 0, "PawButton": 0}
+        for item in root.findChildren(QObject):
+            if not is_visible(item):
+                continue
+            class_name = str(item.metaObject().className())
+            for key in counts:
+                if key in class_name:
+                    counts[key] += 1
+                    break
+        return counts
+
     ai_host = make_view("ai", """
         import QtQuick
         import PawPet 1.0
@@ -217,21 +233,24 @@ def main() -> int:
     right_column = find(ai_host, "aiRightColumn")
     kb_card = find(ai_host, "kbCard")
     mcp_card = find(ai_host, "mcpCard")
+    mcp_section = find(ai_host, "mcpSection")
     step_box = find(ai_host, "stepBox")
     check("找得到右栏列（aiRightColumn）", right_column is not None)
     check("找得到知识库卡片（kbCard）", kb_card is not None)
     check("找得到外部工具卡片（mcpCard）", mcp_card is not None)
+    check("找得到外部工具折叠区（mcpSection）", mcp_section is not None)
     check("找得到执行步数控件（stepBox）", step_box is not None)
-    if None in (right_column, kb_card, mcp_card, step_box):
+    if None in (right_column, kb_card, mcp_card, mcp_section, step_box):
         return 1
 
     # 知识库那块在「模型设置」展开区里面 —— 不展开的话它整段都不参与
     # 布局，量高度就没意义了。这里替用户点开。
     page.setProperty("showSettings", True)
+    page.setProperty("showMcpPanel", True)
     settle(ai_host)
 
     check("关着时：知识库藏着", kb_card.property("visible") is False)
-    check("关着时：外部工具藏着", mcp_card.property("visible") is False)
+    check("关着时：外部工具整块藏着", not is_visible(mcp_section))
 
     # ★ 反向断言。AI 页是**边改边看**才配得好的东西，
     #   把步数也藏起来，用户遇到「干到一半停了」就找不到原因了。
@@ -246,13 +265,14 @@ def main() -> int:
 
     backend.advanced_mode = True
     check("打开后：知识库出现了", kb_card.property("visible") is True)
-    check("打开后：外部工具出现了", mcp_card.property("visible") is True)
+    check("打开后：外部工具出现了", is_visible(mcp_section)
+          and is_visible(mcp_card))
     check("打开后：执行步数还在这儿（本来就没藏过）",
           step_box.property("visible") is True)
 
     backend.advanced_mode = False
     check("再关回去：知识库又收起来了", kb_card.property("visible") is False)
-    check("再关回去：外部工具又收起来了", mcp_card.property("visible") is False)
+    check("再关回去：外部工具又收起来了", not is_visible(mcp_section))
 
     # 收起之后不能留下一条空缝。
     #
@@ -265,7 +285,7 @@ def main() -> int:
     settle(ai_host)
     h_open = right_column.property("implicitHeight")
     kb_h = kb_card.property("height")
-    mcp_h = mcp_card.property("height")
+    mcp_h = mcp_section.property("height")
 
     backend.advanced_mode = False
     settle(ai_host)
@@ -301,6 +321,20 @@ def main() -> int:
     """)
     check("SettingsPage.qml 加载成功", set_host is not None)
     if set_host is not None:
+        visible_counts = visible_control_counts(set_host)
+        visible_total = sum(visible_counts.values())
+        check("高级模式关闭时可见控件不超过 21 个",
+              visible_total <= 21,
+              f"{visible_total} 个：{visible_counts}")
+        check("高级模式关闭时达到目标 20 个以内",
+              visible_total <= 20,
+              f"{visible_total} 个：{visible_counts}")
+        check("基础入口：宠物大小仍可见",
+              is_visible(find(set_host, "petScaleSlider")))
+        check("基础入口：界面缩放仍可见",
+              is_visible(find(set_host, "uiScaleSlider")))
+        check("基础入口：主题预设仍可见",
+              is_visible(find(set_host, "themePresetSelector")))
         switch = find(set_host, "advancedSwitch")
         check("找得到高级模式开关（advancedSwitch）", switch is not None)
         if switch is not None:
@@ -348,7 +382,7 @@ def main() -> int:
     check("AI 页里没写死 visible: false（藏了就再也开不出来）",
           "visible: false" not in ai_text)
     check("显隐绑到的是 backend.advanced_mode",
-          ai_text.count("visible: backend.advanced_mode") == 2,
+          ai_text.count("visible: backend.advanced_mode") == 3,
           f"实际 {ai_text.count('visible: backend.advanced_mode')} 处")
 
     # 模型设置卡片**不能**被收到高级模式里 —— 没配 Key 的新用户

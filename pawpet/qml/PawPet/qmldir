@@ -3,6 +3,7 @@ module PawPet
 singleton Theme 1.0 Theme.qml
 
 Card 1.0 Card.qml
+CollapsibleSection 1.0 CollapsibleSection.qml
 PawButton 1.0 PawButton.qml
 ConfirmDialog 1.0 ConfirmDialog.qml
 PermissionCard 1.0 PermissionCard.qml

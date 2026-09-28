@@ -18,10 +18,20 @@ os.environ["QT_QPA_PLATFORM"] = "windows"
 
 OUT = ROOT / ".cache" / "preview"
 KEEP: list = []
+FAILED: list[str] = []
+
+
+def check(label: str, ok: bool, detail: str = "") -> None:
+    if ok:
+        print(f"  [ok] {label}")
+    else:
+        FAILED.append(f"{label} {detail}".strip())
+        print(f"  [XX] {label} {detail}")
 
 
 def main() -> int:
-    from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl
+    from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, Qt
+    from PySide6.QtQuick import QQuickItem
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtWidgets import QApplication
@@ -31,6 +41,7 @@ def main() -> int:
     from pawpet.config import QML_DIR, ensure_dirs
     from pawpet.store import Store
 
+    os.environ.pop("OPENAI_API_KEY", None)
     ensure_dirs()
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -113,6 +124,36 @@ def main() -> int:
     dash.setProperty("currentPage", "ai")
     pump(1400)
 
+    ai_page = dash.findChild(QObject, "aiPage", Qt.FindChildrenRecursively)
+    right_scroll = dash.findChild(QObject, "rightScroll", Qt.FindChildrenRecursively)
+    settings_section = dash.findChild(QObject, "settingsSection", Qt.FindChildrenRecursively)
+    settings_panel = dash.findChild(QObject, "settingsCard", Qt.FindChildrenRecursively)
+    base_field = dash.findChild(QObject, "aiBaseField", Qt.FindChildrenRecursively)
+
+    def is_visible(item) -> bool:
+        return bool(item.isVisible()) if isinstance(item, QQuickItem) else bool(
+            item and item.property("visible"))
+
+    check("AI 页面探针齐全", all((ai_page, right_scroll, settings_section,
+                                  settings_panel, base_field)))
+    check("未配置时模型设置强制展开",
+          not backend.ai.configured and is_visible(settings_panel))
+    check("未配置时接口地址可交互",
+          is_visible(base_field) and base_field.isEnabled())
+
+    os.environ["OPENAI_API_KEY"] = "preview-test-key"
+    backend.ai.settingsChanged.emit()
+    ai_page.setProperty("showSettings", False)
+    ai_page.setProperty("showHistory", False)
+    ai_page.setProperty("showMcpPanel", False)
+    pump(500)
+    configured_height = float(right_scroll.property("contentHeight"))
+    check("配置完成后模型设置可收起", backend.ai.configured
+          and not is_visible(settings_panel))
+    check("已配置且默认收起时内容高度 < 900",
+          configured_height < 900, f"实际 {configured_height:.1f}px")
+    print(f"  [info] 已配置默认内容高度：{configured_height:.1f}px")
+
     print("[1] 对话状态")
     shot_window(dash, "11_ai_chat")
 
@@ -121,6 +162,21 @@ def main() -> int:
     ai._approvalIn.emit("a1", "click", "confirm", "点击 (640, 360) · 单击",
                         False, [])
     pump(800)
+    approval = dash.findChild(QObject, "approvalCard", Qt.FindChildrenRecursively)
+    approval_buttons = [
+        dash.findChild(QObject, name, Qt.FindChildrenRecursively)
+        for name in ("approvalAllowButton", "approvalRejectButton")
+    ]
+    pending_height = float(right_scroll.property("contentHeight"))
+    pending_y = float(right_scroll.property("contentY"))
+    pending_max = max(0.0, pending_height - float(right_scroll.property("height")))
+    check("待确认卡片保持可见", approval is not None and is_visible(approval))
+    check("待确认按钮可见且可用",
+          all(approval_buttons)
+          and all(is_visible(button) and button.isEnabled()
+                  for button in approval_buttons))
+    check("待确认卡片自动滚到可操作位置",
+          pending_y >= pending_max - 4, f"当前位置 {pending_y:.1f} / {pending_max:.1f}")
     shot_window(dash, "12_ai_approval")
 
     # 高危审批
@@ -148,6 +204,12 @@ def main() -> int:
     for _ in range(6):
         app.processEvents()
         pump(30)
+    if FAILED:
+        print(f"失败 {len(FAILED)} 项：")
+        for item in FAILED:
+            print("  - " + item)
+        return 1
+    print("AI 折叠与审批可见性检查全部通过")
     return 0
 
 

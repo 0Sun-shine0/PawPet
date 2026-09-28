@@ -141,6 +141,12 @@ class TaskModel(QAbstractListModel):
         """QAbstractListModel 本身没有 count 属性，QML 里要用得自己加上。"""
         return len(self._visible)
 
+    @Property("QVariantList", notify=changed)
+    def visibleIds(self) -> list[str]:
+        """当前筛选/搜索结果的 ID，供视图层批量选择使用。"""
+        return [str(task.get("id") or "") for task in self._visible
+                if task.get("id")]
+
     @Property(int, notify=countsChanged)
     def pendingCount(self) -> int:
         return sum(1 for t in self._store.tasks if not t.get("done"))
@@ -161,7 +167,18 @@ class TaskModel(QAbstractListModel):
     def lastRemovedText(self) -> str:
         if self._last_removed is None:
             return ""
+        if self.lastRemovedCount > 1:
+            return f"{self.lastRemovedCount} 条待办"
         return str(self._last_removed.get("task", {}).get("text", ""))
+
+    @Property(int, notify=undoChanged)
+    def lastRemovedCount(self) -> int:
+        if self._last_removed is None:
+            return 0
+        items = self._last_removed.get("items")
+        if isinstance(items, list):
+            return len(items)
+        return 1 if self._last_removed.get("task") else 0
 
     @Property(bool, notify=changed)
     def showDone(self) -> bool:
@@ -256,6 +273,27 @@ class TaskModel(QAbstractListModel):
                 return task
         return None
 
+    @Slot(str, result=bool)
+    def containsId(self, task_id: str) -> bool:
+        return bool(str(task_id or "").strip()) and self._find(task_id) is not None
+
+    def _normalize_task_ids(self, task_ids) -> list[str]:
+        if isinstance(task_ids, str):
+            values = [task_ids]
+        elif isinstance(task_ids, (list, tuple, set)):
+            values = task_ids
+        else:
+            return []
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            task_id = str(value or "").strip()
+            if not task_id or task_id in seen or self._find(task_id) is None:
+                continue
+            seen.add(task_id)
+            result.append(task_id)
+        return result
+
     # ----------------------------------------------------------- 供 QML 调用
     @Slot(str, int)
     def add(self, text: str, priority: int = 0) -> None:
@@ -307,28 +345,84 @@ class TaskModel(QAbstractListModel):
 
     @Slot(str)
     def remove(self, task_id: str) -> None:
-        for index, task in enumerate(self._store.tasks):
-            if task.get("id") != task_id:
-                continue
-            self._last_removed = {"task": dict(task), "index": index}
-            del self._store.tasks[index]
-            self._touch()
-            self.undoChanged.emit()
+        self.removeMany([task_id])
+
+    @Slot("QVariantList")
+    def completeMany(self, task_ids) -> None:
+        ids = self._normalize_task_ids(task_ids)
+        self._clear_undo()
+        if not ids:
             return
+
+        now = time.time()
+        completed = 0
+        selected = set(ids)
+        for task in self._store.tasks:
+            if task.get("id") not in selected or task.get("done"):
+                continue
+            task["done"] = True
+            task["done_at"] = now
+            completed += 1
+
+        if completed == 0:
+            return
+        day = self._store.stats.setdefault(today_key(), {})
+        day["tasks_done"] = int(day.get("tasks_done", 0)) + completed
+        self._touch()
+
+    @Slot("QVariantList")
+    def removeMany(self, task_ids) -> None:
+        ids = self._normalize_task_ids(task_ids)
+        if not ids:
+            return
+        selected = set(ids)
+        removed = [
+            {"task": dict(task), "index": index}
+            for index, task in enumerate(self._store.tasks)
+            if task.get("id") in selected
+        ]
+        if not removed:
+            return
+
+        self._last_removed = {
+            "items": removed,
+            "count": len(removed),
+        }
+        if len(removed) == 1:
+            self._last_removed.update(removed[0])
+        self._store.tasks[:] = [
+            task for task in self._store.tasks if task.get("id") not in selected
+        ]
+        self._touch()
+        self.undoChanged.emit()
 
     @Slot()
     def undoRemove(self) -> None:
         if self._last_removed is None:
             return
         removed = self._last_removed
-        task = dict(removed.get("task", {}))
-        task_id = task.get("id")
-        if not task_id or self._find(task_id) is not None:
+        items = removed.get("items")
+        if not isinstance(items, list):
+            items = [{"task": removed.get("task", {}),
+                      "index": removed.get("index", 0)}]
+
+        restorable = []
+        for item in items:
+            task = dict(item.get("task") or {})
+            task_id = task.get("id")
+            if task_id and self._find(task_id) is None:
+                restorable.append({
+                    "task": task,
+                    "index": int(item.get("index", 0)),
+                })
+        if not restorable:
             self._last_removed = None
             self.undoChanged.emit()
             return
-        index = max(0, min(len(self._store.tasks), int(removed.get("index", 0))))
-        self._store.tasks.insert(index, task)
+
+        for item in sorted(restorable, key=lambda value: value["index"]):
+            index = max(0, min(len(self._store.tasks), item["index"]))
+            self._store.tasks.insert(index, item["task"])
         self._last_removed = None
         self._touch()
         self.undoChanged.emit()

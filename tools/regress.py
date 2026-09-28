@@ -94,6 +94,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "启动冒烟", "smoketest.py"),
     ("ui", "桌面鼠标交互", "interactiontest.py"),
     ("ui", "界面配色定制", "themetest.py"),
+    ("ui", "待办批量编辑", "taskbulktest.py"),
     ("ui", "模型配置向导", "setuptest2.py"),
     ("ui", "安装向导界面", "setupui_test.py"),
     ("ui", "设置页截图归档", "screenshothist.py"),

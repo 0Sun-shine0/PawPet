@@ -12,6 +12,9 @@ Item {
     property string editingId: ""
     property string filter: "pending"      // pending | all
     property bool cancellingEdit: false
+    property bool selectionMode: false
+    property var selectedIds: []
+    readonly property int selectedCount: selectedIds.length
 
     ColumnLayout {
         anchors.fill: parent
@@ -197,6 +200,15 @@ Item {
                 onClicked: clearDoneDialog.open()
             }
 
+            PawButton {
+                objectName: "taskSelectionButton"
+                small: true
+                text: "选择"
+                variant: "ghost"
+                visible: !page.selectionMode
+                onClicked: page.enterSelection()
+            }
+
             Menu {
                 id: sortMenu
                 font.family: Theme.font
@@ -234,6 +246,65 @@ Item {
                 SortItem {
                     text: "按优先级"
                     onTriggered: backend.tasks.sortMode = "priority"
+                }
+            }
+        }
+
+        Rectangle {
+            id: selectionToolbar
+            objectName: "taskSelectionToolbar"
+            Layout.fillWidth: true
+            visible: page.selectionMode
+            implicitHeight: 42
+            radius: Theme.radiusMd
+            color: Theme.accentSoft
+            border.width: 1
+            border.color: Theme.accent
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "已选 " + page.selectedCount + " 条"
+                    color: Theme.text
+                    font.family: Theme.font
+                    font.pixelSize: Theme.fsSmall
+                    font.bold: true
+                }
+                PawButton {
+                    objectName: "taskSelectAllButton"
+                    small: true
+                    text: page.allVisibleSelected() ? "取消全选" : "全选当前结果"
+                    variant: "subtle"
+                    enabled: backend.tasks.visibleIds.length > 0
+                    onClicked: page.selectAllVisible()
+                }
+                PawButton {
+                    objectName: "taskCompleteSelectedButton"
+                    small: true
+                    text: "完成"
+                    variant: "primary"
+                    enabled: page.selectedCount > 0
+                    onClicked: page.completeSelected()
+                }
+                PawButton {
+                    objectName: "taskDeleteSelectedButton"
+                    small: true
+                    text: "删除"
+                    variant: "danger"
+                    enabled: page.selectedCount > 0
+                    onClicked: page.confirmDeleteSelected()
+                }
+                PawButton {
+                    objectName: "taskExitSelectionButton"
+                    small: true
+                    text: "退出"
+                    variant: "ghost"
+                    onClicked: page.exitSelection()
                 }
             }
         }
@@ -288,6 +359,15 @@ Item {
                         acceptedButtons: Qt.NoButton
                     }
 
+                    MouseArea {
+                        id: selectionMouse
+                        anchors.fill: parent
+                        visible: page.selectionMode
+                        z: 2
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: page.toggleSelection(model.taskId)
+                    }
+
                     RowLayout {
                         id: rowColumn
                         anchors.left: parent.left
@@ -299,6 +379,7 @@ Item {
 
                         // 勾选框
                         Rectangle {
+                            visible: !page.selectionMode
                             Layout.alignment: Qt.AlignVCenter
                             implicitWidth: 22
                             implicitHeight: 22
@@ -325,6 +406,28 @@ Item {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: backend.tasks.toggle(model.taskId)
+                            }
+                        }
+
+                        Rectangle {
+                            visible: page.selectionMode
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitWidth: 22
+                            implicitHeight: 22
+                            radius: 7
+                            color: page.isSelected(model.taskId)
+                                   ? Theme.accent : "transparent"
+                            border.width: 2
+                            border.color: page.isSelected(model.taskId)
+                                          ? Theme.accent : Theme.border
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✓"
+                                color: Theme.readableOn(parent.color)
+                                font.pixelSize: Theme.px(13)
+                                font.bold: true
+                                visible: page.isSelected(model.taskId)
                             }
                         }
 
@@ -392,6 +495,7 @@ Item {
 
                                 MouseArea {
                                     anchors.fill: parent
+                                    visible: !page.selectionMode
                                     cursorShape: Qt.IBeamCursor
                                     onDoubleClicked: page.editingId = model.taskId
                                 }
@@ -436,6 +540,7 @@ Item {
                         RowLayout {
                             Layout.alignment: Qt.AlignVCenter
                             spacing: 2
+                            visible: !page.selectionMode
                             opacity: rowMouse.containsMouse || model.priority > 0 ? 1.0 : 0.0
                             Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
 
@@ -547,7 +652,9 @@ Item {
 
             Text {
                 Layout.fillWidth: true
-                text: "已删除：" + backend.tasks.lastRemovedText
+                text: backend.tasks.lastRemovedCount > 1
+                      ? "已删除 " + backend.tasks.lastRemovedCount + " 条待办"
+                      : "已删除：" + backend.tasks.lastRemovedText
                 color: Theme.text
                 font.family: Theme.font
                 font.pixelSize: Theme.fsSmall
@@ -570,6 +677,19 @@ Item {
                  + " 条待办，删除后无法恢复。"
         confirmText: "清除已完成"
         onConfirmed: backend.tasks.clearDone()
+    }
+
+    ConfirmDialog {
+        id: deleteSelectedDialog
+        objectName: "deleteSelectedConfirmDialog"
+        heading: "删除选中的待办？"
+        message: "将删除选中的 " + page.selectedCount + " 条待办，删除后可以在下方撤销。"
+        confirmText: "删除选中项"
+        onConfirmed: {
+            var ids = page.selectedIds.slice(0)
+            backend.tasks.removeMany(ids)
+            page.exitSelection()
+        }
     }
 
     // 到期日菜单
@@ -695,12 +815,115 @@ Item {
         backend.tasks.showDone = (value === "all")
     }
 
+    function isSelected(taskId) {
+        return page.selectedIds.indexOf(taskId) >= 0
+    }
+
+    function allVisibleSelected() {
+        var ids = backend.tasks.visibleIds
+        if (ids.length === 0)
+            return false
+        for (var i = 0; i < ids.length; ++i) {
+            if (!page.isSelected(ids[i]))
+                return false
+        }
+        return true
+    }
+
+    function enterSelection() {
+        page.editingId = ""
+        page.selectionMode = true
+        page.cleanupSelection()
+    }
+
+    function exitSelection() {
+        page.selectionMode = false
+        page.selectedIds = []
+    }
+
+    function toggleSelection(taskId) {
+        var ids = page.selectedIds.slice(0)
+        var index = ids.indexOf(taskId)
+        if (index >= 0)
+            ids.splice(index, 1)
+        else
+            ids.push(taskId)
+        page.selectedIds = ids
+    }
+
+    function selectAllVisible() {
+        var ids = backend.tasks.visibleIds
+        var selected = page.selectedIds.slice(0)
+        if (page.allVisibleSelected()) {
+            selected = selected.filter(function (taskId) {
+                return ids.indexOf(taskId) < 0
+            })
+        } else {
+            for (var i = 0; i < ids.length; ++i) {
+                if (selected.indexOf(ids[i]) < 0)
+                    selected.push(ids[i])
+            }
+        }
+        page.selectedIds = selected
+    }
+
+    function completeSelected() {
+        if (page.selectedCount === 0)
+            return
+        backend.tasks.completeMany(page.selectedIds.slice(0))
+        page.exitSelection()
+    }
+
+    function confirmDeleteSelected() {
+        if (page.selectedCount > 0)
+            deleteSelectedDialog.open()
+    }
+
+    function cleanupSelection() {
+        var selected = page.selectedIds.filter(function (taskId) {
+            return backend.tasks.containsId(taskId)
+        })
+        if (selected.length !== page.selectedIds.length)
+            page.selectedIds = selected
+    }
+
+    Connections {
+        target: backend.tasks
+        function onChanged() {
+            page.cleanupSelection()
+        }
+    }
+
     Component.onCompleted: {
         backend.tasks.showDone = (page.filter === "all")
     }
 
     onVisibleChanged: {
-        if (visible)
+        if (visible) {
             input.forceActiveFocus()
+        } else {
+            page.exitSelection()
+        }
+    }
+
+    Shortcut {
+        sequence: "Ctrl+A"
+        context: Qt.WindowShortcut
+        enabled: page.visible && page.selectionMode
+        onActivated: page.selectAllVisible()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        context: Qt.WindowShortcut
+        enabled: page.visible && page.selectionMode
+        onActivated: page.exitSelection()
+    }
+
+    Shortcut {
+        sequence: "Delete"
+        context: Qt.WindowShortcut
+        enabled: page.visible && page.selectionMode && page.selectedCount > 0
+        onActivated: page.confirmDeleteSelected()
     }
 }

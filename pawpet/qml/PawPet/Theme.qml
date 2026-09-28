@@ -45,6 +45,30 @@ QtObject {
         return (value && String(value).length > 0) ? value : fallback
     }
 
+    function _linear(channel) {
+        return channel <= 0.04045
+                ? channel / 12.92
+                : Math.pow((channel + 0.055) / 1.055, 2.4)
+    }
+
+    function _luminance(value) {
+        var red = _linear(value.r)
+        var green = _linear(value.g)
+        var blue = _linear(value.b)
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    // Filled controls may use a user-selected pastel color. Pick the more
+    // readable of white and the warm near-black used by the dark preset.
+    function readableOn(background) {
+        var backgroundLum = _luminance(background)
+        var whiteContrast = 1.05 / (backgroundLum + 0.05)
+        var darkLum = _luminance(Qt.color("#211a25"))
+        var darkContrast = (Math.max(backgroundLum, darkLum) + 0.05)
+                           / (Math.min(backgroundLum, darkLum) + 0.05)
+        return whiteContrast >= darkContrast ? "#ffffff" : "#211a25"
+    }
+
     // ---------------------------------------------------------- 界面配色
     /* 粉白暖色系。
        默认值原来在这里写死；现在作为 pick() 的兜底值保留在调用处。
@@ -68,7 +92,7 @@ QtObject {
 
     readonly property color text:        pick("text",        "#4a3b45")
     readonly property color textDim:     pick("textDim",     "#7d6577")
-    readonly property color textFaint:   pick("textFaint",   "#9a8494")
+    readonly property color textFaint:   pick("textFaint",   "#978092")
     readonly property color accent:      pick("accent",      "#f4879f")
     readonly property color accentSoft:  pick("accentSoft",  "#fde8ee")
     readonly property color violet:      pick("violet",      "#b48ae0")

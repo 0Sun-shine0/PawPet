@@ -28,6 +28,28 @@ FAILED: list[str] = []
 _keep_alive: list = []
 
 
+def _linear(channel: float) -> float:
+    return channel / 12.92 if channel <= 0.04045 else (
+        ((channel + 0.055) / 1.055) ** 2.4
+    )
+
+
+def _luminance(value: str) -> float:
+    text = value.lstrip("#")
+    if len(text) == 3:
+        text = "".join(char * 2 for char in text)
+    if len(text) == 8:
+        text = text[2:]
+    channels = [int(text[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    return sum(weight * _linear(channel)
+               for weight, channel in zip((0.2126, 0.7152, 0.0722), channels))
+
+
+def _contrast(foreground: str, background: str) -> float:
+    first, second = _luminance(foreground), _luminance(background)
+    return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     global PASSED
     if ok:
@@ -90,6 +112,32 @@ def main() -> int:
 
     check("rose 不在可改清单里", "rose" not in keys, str(keys))
 
+    options = theme_mod.preset_options()
+    check("主题预设正好 3 个", len(options) == 3, str(options))
+    check("预设 key 不重复",
+          len({item["key"] for item in options}) == len(options))
+    editable_keys = set(keys)
+    default_colors = theme_mod.preset_colors("default")
+    for option in options:
+        colors = theme_mod.preset_colors(option["key"])
+        check(f"{option['key']} 预设覆盖全部可变角色",
+              set(colors) == editable_keys,
+              f"{set(colors) ^ editable_keys}")
+        check(f"{option['key']} 预设颜色全部合法",
+              all(theme_mod.is_valid_color(value) for value in colors.values()))
+        for text_key in ("text", "textDim", "textFaint"):
+            for background_key in ("bg", "surface", "surfaceAlt", "surfaceHi"):
+                minimum = 4.5 if text_key == "text" else 3.0
+                actual = _contrast(colors[text_key], colors[background_key])
+                baseline = _contrast(default_colors[text_key],
+                                     default_colors[background_key])
+                check(f"{option['key']} {text_key} on {background_key} 可读",
+                      actual >= minimum,
+                      f"{actual:.2f} < {minimum:.1f}")
+                check(f"{option['key']} {text_key} on {background_key} 不低于默认",
+                      actual + 0.01 >= baseline,
+                      f"{actual:.2f} < {baseline:.2f}")
+
     # ================================================================ 二
     print("\n=== 二、读写与持久化 ===")
     path = SCRATCH / "theme.json"
@@ -106,6 +154,11 @@ def main() -> int:
     path.write_text('{"accent": "乱写的", "mint": "#5fc4ad"}', encoding="utf-8")
     loaded = theme_mod.load(path)
     check("读的时候也会过滤非法值", loaded == {"mint": "#5fc4ad"}, str(loaded))
+
+    ok, _ = theme_mod.save_config(path, "dark", {"accent": "#4a90d9"})
+    config = theme_mod.load_config(path)
+    check("预设和覆盖一起持久化", ok and config["preset"] == "dark"
+          and config["colors"] == {"accent": "#4a90d9"}, str(config))
 
     resolved = theme_mod.resolved({"accent": "#4a90d9"})
     check("resolved 给出完整表（默认+覆盖）",
@@ -128,7 +181,7 @@ def main() -> int:
     check("界面能拿到完整配色表",
           len(backend.themeColors) == len(theme_mod.all_roles()),
           f"{len(backend.themeColors)} vs {len(theme_mod.all_roles())}")
-    check("初始摘要说「默认」", "默认" in backend.themeSummary, backend.themeSummary)
+    check("初始摘要说当前预设", "柔粉" in backend.themeSummary, backend.themeSummary)
     check("界面能拿到可改项清单", len(backend.themeRoles) >= 15,
           str(len(backend.themeRoles)))
 
@@ -156,6 +209,21 @@ def main() -> int:
     check("摘要列了改过的项",
           "主色调" in backend.themeSummary, backend.themeSummary)
 
+    rejected = backend.setThemePreset("dark")
+    check("可以切换主题预设", rejected == [] and backend.themePreset == "dark",
+          str(rejected))
+    check("切换后保留用户覆盖",
+          backend.themeColors["accent"] == "#4a90d9")
+    rejected = backend.resetCurrentTheme()
+    check("可以恢复当前预设", rejected == []
+          and backend.themeColors["accent"] == theme_mod.preset_colors("dark")["accent"],
+          str(rejected))
+    rejected = backend.resetDefaultTheme()
+    check("可以恢复柔粉默认", rejected == []
+          and backend.themePreset == "default"
+          and backend.themeColors["accent"] == "#f4879f", str(rejected))
+    backend.applyTheme({"accent": "#4a90d9"})
+
     # ================================================================ 四
     print("\n=== 四、QML 真的读了这个值（端到端）===")
     engine = QQmlEngine()
@@ -172,6 +240,8 @@ def main() -> int:
             property color probeBg: Theme.bg
             property color probeAccent: Theme.accent
             property color probeRose: Theme.rose
+            property color probeFaint: Theme.textFaint
+            property color probeReadable: Theme.readableOn(Theme.accent)
             property string probeText: Theme.text
             width: 200; height: 100
             Rectangle { objectName: "swatch"; anchors.fill: parent
@@ -205,6 +275,9 @@ def main() -> int:
     check("真实控件的颜色也变了（不只是属性）",
           swatch.property("color").name() == "#4a90d9",
           swatch.property("color").name())
+    check("textFaint 使用新的可读默认值",
+          root.property("probeFaint").name() == "#978092",
+          root.property("probeFaint").name())
 
     # 运行时再改一次，不重启
     backend.applyTheme({"accent": "#2e7d32"})
@@ -216,6 +289,12 @@ def main() -> int:
     check("控件跟着变",
           swatch.property("color").name() == "#2e7d32",
           swatch.property("color").name())
+
+    backend.applyTheme({"accent": "#f4b7c4"})
+    for _ in range(20):
+        app.processEvents()
+    readable = root.property("probeReadable").name()
+    check("浅色自定义主色选择深色文字", readable == "#211a25", readable)
 
     # 重置
     backend.resetTheme()
@@ -231,7 +310,9 @@ def main() -> int:
         encoding="utf-8")
     check("Theme.qml 从 backend 读配色", "backend.themeColors" in qml_text)
     check("Theme.qml 有兜底值（Backend 未就绪时不至于黑屏）",
-          "function pick(" in qml_text and "#fdf7f9" in qml_text)
+          "function pick(" in qml_text and "#fdf7f9" in qml_text
+          and "#978092" in qml_text)
+    check("Theme.qml 提供动态可读前景", "function readableOn(" in qml_text)
     check("rose 在 QML 里也是写死的",
           'property color rose:        "#e8607a"' in qml_text,
           "错误色不该能被改")

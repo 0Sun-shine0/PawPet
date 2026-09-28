@@ -164,10 +164,14 @@ class Backend(QObject):
         self._notifier = Notifier(self)
         self._sound.enabled = bool(store.settings.get("sound_enabled", True))
 
-        # 用户定制的界面配色。读不到就是空字典 = 全用默认值。
+        # 用户定制的界面配色。旧版 theme.json 仍可读取；预设和覆盖都在
+        # theme.json 内保存，不把主题状态塞进 settings。
         from . import theme as theme_mod
 
-        self._theme_overrides: dict = theme_mod.load(THEME_FILE)
+        theme_config = theme_mod.load_config(THEME_FILE)
+        self._theme_preset = theme_config["preset"]
+        self._theme_overrides: dict = theme_config["colors"]
+        self._theme_warning = theme_config.get("warning", "")
 
         self._tasks = TaskModel(store, self)
         self._reminders = ReminderModel(store, self)
@@ -364,7 +368,7 @@ class Backend(QObject):
     # 打包后也照样能用（资源目录是只读的，数据目录才写得进去）。
     @Property("QVariantMap", notify=themeChanged)
     def themeColors(self) -> dict:
-        """当前生效的**完整**配色表（默认值 + 用户覆盖）。
+        """当前生效的**完整**配色表（预设 + 用户覆盖 + 固定错误色）。
 
         QML 侧按 key 取用：Theme.qml 里每个颜色都变成
         `backend.themeColors.bg || "#fdf7f9"` 这种带兜底的读法 ——
@@ -373,9 +377,23 @@ class Backend(QObject):
         from . import theme as theme_mod
 
         try:
-            return theme_mod.resolved(self._theme_overrides)
+            return theme_mod.resolved(self._theme_overrides, self._theme_preset)
         except Exception:  # noqa: BLE001 - 配色坏了不该让界面起不来
             return theme_mod.default_overrides()
+
+    @Property("QVariantList", constant=True)
+    def themePresets(self) -> list:
+        from . import theme as theme_mod
+
+        return theme_mod.preset_options()
+
+    @Property(str, notify=themeChanged)
+    def themePreset(self) -> str:
+        return self._theme_preset
+
+    @Property(str, notify=themeChanged)
+    def themeWarning(self) -> str:
+        return self._theme_warning
 
     @Property("QVariantList", constant=True)
     def themeRoles(self) -> list:
@@ -437,7 +455,10 @@ class Backend(QObject):
     def themeSummary(self) -> str:
         from . import theme as theme_mod
 
-        return theme_mod.describe(self._theme_overrides)
+        summary = theme_mod.describe(self._theme_overrides, self._theme_preset)
+        if self._theme_warning:
+            return self._theme_warning + "；" + summary
+        return summary
 
     @Slot("QVariantMap", result="QVariantList")
     def applyTheme(self, overrides) -> list:
@@ -452,20 +473,68 @@ class Backend(QObject):
         if clean:
             merged = dict(self._theme_overrides)
             merged.update(clean)
-            ok, message = theme_mod.save(THEME_FILE, merged)
+            ok, message = theme_mod.save_config(
+                THEME_FILE, self._theme_preset, merged)
             if not ok:
                 return [message]
             self._theme_overrides = merged
+            self._theme_warning = ""
             self.themeChanged.emit()
         return rejected
+
+    @Slot(str, result="QVariantList")
+    def setThemePreset(self, preset: str) -> list:
+        from . import theme as theme_mod
+
+        normalized, warning = theme_mod.normalize_preset(preset)
+        if warning:
+            return [warning]
+        if normalized == self._theme_preset:
+            return []
+        ok, message = theme_mod.save_config(
+            THEME_FILE, normalized, self._theme_overrides)
+        if not ok:
+            return [message]
+        self._theme_preset = normalized
+        self._theme_warning = ""
+        self.themeChanged.emit()
+        return []
+
+    @Slot(result="QVariantList")
+    def resetCurrentTheme(self) -> list:
+        ok, message = self._save_theme(self._theme_preset, {})
+        if not ok:
+            return [message]
+        self._theme_overrides = {}
+        self._theme_warning = ""
+        self.themeChanged.emit()
+        return []
 
     @Slot()
     def resetTheme(self) -> None:
         from . import theme as theme_mod
 
-        theme_mod.reset(THEME_FILE)
+        ok, _message = self._save_theme(self._theme_preset, {})
+        if ok:
+            self._theme_overrides = {}
+            self._theme_warning = ""
+            self.themeChanged.emit()
+
+    @Slot(result="QVariantList")
+    def resetDefaultTheme(self) -> list:
+        ok, message = self._save_theme("default", {})
+        if not ok:
+            return [message]
+        self._theme_preset = "default"
         self._theme_overrides = {}
+        self._theme_warning = ""
         self.themeChanged.emit()
+        return []
+
+    def _save_theme(self, preset: str, overrides: dict) -> tuple[bool, str]:
+        from . import theme as theme_mod
+
+        return theme_mod.save_config(THEME_FILE, preset, overrides)
 
     def _on_reminder_fired(self, kind: str, title: str, body: str) -> None:
         self._notify(kind, title, body, "sit" if kind == "sit" else "reminder")

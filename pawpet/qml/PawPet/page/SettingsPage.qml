@@ -170,6 +170,7 @@ Flickable {
                     font.pixelSize: Theme.fsBody
                 }
                 PawSlider {
+                    objectName: "petScaleSlider"
                     Layout.fillWidth: true
                     from: 0.6
                     to: 2.0
@@ -199,6 +200,7 @@ Flickable {
                     font.pixelSize: Theme.fsBody
                 }
                 PawSlider {
+                    objectName: "petOpacitySlider"
                     Layout.fillWidth: true
                     from: 0.25
                     to: 1.0
@@ -249,7 +251,7 @@ Flickable {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
-                visible: backend.petSnapEnabled
+                visible: backend.petSnapEnabled && backend.advanced_mode
 
                 Text {
                     Layout.preferredWidth: 84
@@ -259,6 +261,7 @@ Flickable {
                     font.pixelSize: Theme.fsBody
                 }
                 PawSlider {
+                    objectName: "petSnapDistanceSlider"
                     Layout.fillWidth: true
                     from: 10
                     to: 120
@@ -295,7 +298,7 @@ Flickable {
             // 之后同一个「只露一部分」读起来是它自己趴在那儿 / 挂在那儿。
             PawSwitch {
                 Layout.fillWidth: true
-                visible: backend.petSnapEnabled
+                visible: backend.petSnapEnabled && backend.advanced_mode
                 text: "贴边时换个姿势（侧躺 / 倒挂）"
                 checked: backend.petEdgePose
                 onToggled: backend.petEdgePose = checked
@@ -304,6 +307,7 @@ Flickable {
             Text {
                 Layout.fillWidth: true
                 visible: backend.petSnapEnabled && backend.petEdgePose
+                      && backend.advanced_mode
                 text: "贴左边和右边时侧躺，贴上边时倒挂着，贴下边还是坐着。"
                       + "旋转只是图形变换，呼吸、眨眼、摇尾照常。"
                 color: Theme.textFaint
@@ -427,12 +431,14 @@ Flickable {
                 font.family: Theme.font
                 font.pixelSize: Theme.fsBody
                 visible: backend.pet_click_action === "command"
+                      && backend.advanced_mode
             }
 
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
                 visible: backend.pet_click_action === "command"
+                      && backend.advanced_mode
 
                 PawButton {
                     text: "跟着小爪"
@@ -479,6 +485,7 @@ Flickable {
                     font.pixelSize: Theme.fsBody
                 }
                 PawSlider {
+                    objectName: "uiScaleSlider"
                     Layout.fillWidth: true
                     from: 0.8
                     to: 2.0
@@ -535,8 +542,73 @@ Flickable {
 
             // 当前展开编辑的那一项（空 = 都没展开）
             property string editing: ""
+            property string feedback: ""
+
+            Text {
+                Layout.fillWidth: true
+                text: "主题预设"
+                color: Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: Theme.fsBody
+            }
+
+            Flow {
+                objectName: "themePresetSelector"
+                Layout.fillWidth: true
+                spacing: 8
+
+                Repeater {
+                    model: backend.themePresets
+                    delegate: PawButton {
+                        objectName: "themePreset_" + modelData.key
+                        small: true
+                        text: modelData.label
+                        variant: backend.themePreset === modelData.key
+                                 ? "primary" : "subtle"
+                        onClicked: {
+                            var rejected = backend.setThemePreset(modelData.key)
+                            themeCard.feedback = rejected.length > 0
+                                              ? rejected.join("；") : ""
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "当前：" + backend.themePreset
+                    color: Theme.textFaint
+                    font.family: Theme.fontMono
+                    font.pixelSize: Theme.fsTiny
+                }
+                PawButton {
+                    small: true
+                    text: "恢复当前预设"
+                    onClicked: {
+                        var rejected = backend.resetCurrentTheme()
+                        themeCard.feedback = rejected.length > 0
+                                              ? rejected.join("；") : "已恢复当前预设"
+                    }
+                }
+                PawButton {
+                    small: true
+                    text: "恢复柔粉默认"
+                    variant: "ghost"
+                    visible: backend.themePreset !== "default"
+                    onClicked: {
+                        var rejected = backend.resetDefaultTheme()
+                        themeCard.feedback = rejected.length > 0
+                                              ? rejected.join("；") : "已恢复柔粉默认"
+                    }
+                }
+            }
 
             GridLayout {
+                visible: backend.advanced_mode
                 Layout.fillWidth: true
                 columns: 3
                 columnSpacing: 8
@@ -615,7 +687,7 @@ Flickable {
             // 展开的编辑行
             RowLayout {
                 Layout.fillWidth: true
-                visible: themeCard.editing.length > 0
+                visible: backend.advanced_mode && themeCard.editing.length > 0
                 spacing: 8
 
                 Text {
@@ -639,7 +711,7 @@ Flickable {
 
             RowLayout {
                 Layout.fillWidth: true
-                visible: themeCard.editing.length > 0
+                visible: backend.advanced_mode && themeCard.editing.length > 0
                 spacing: 8
 
                 PawField {
@@ -678,19 +750,14 @@ Flickable {
                 Text {
                     id: themeHint
                     Layout.fillWidth: true
-                    text: backend.themeSummary
+                    text: themeCard.feedback.length > 0
+                          ? themeCard.feedback
+                          : (backend.themeWarning.length > 0
+                             ? backend.themeWarning : backend.themeSummary)
                     color: Theme.textFaint
                     font.family: Theme.font
                     font.pixelSize: Theme.fsTiny
                     wrapMode: Text.Wrap
-                }
-                PawButton {
-                    small: true
-                    text: "恢复默认配色"
-                    onClicked: {
-                        backend.resetTheme()
-                        themeHint.text = "已恢复默认的粉白"
-                    }
                 }
             }
         }
@@ -700,6 +767,7 @@ Flickable {
             Layout.fillWidth: true
             Layout.leftMargin: Theme.gap
             Layout.rightMargin: Theme.gap
+            visible: backend.advanced_mode
             title: "全局快捷键"
             subtitle: "在任何程序里都能唤出小爪（按 Ctrl+Alt+字母 这种格式写）"
 

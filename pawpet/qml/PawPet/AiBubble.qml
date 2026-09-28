@@ -87,7 +87,7 @@ Item {
             width: parent.width - 26
             text: bubble.text
             textFormat: Text.PlainText
-            color: "#ffffff"
+            color: Theme.readableOn(Theme.violet)
             font.family: Theme.font
             font.pixelSize: Theme.fsBody
             wrapMode: Text.Wrap

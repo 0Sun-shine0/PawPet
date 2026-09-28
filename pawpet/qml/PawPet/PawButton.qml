@@ -34,10 +34,9 @@ Button {
     }
     readonly property color _fg: {
         switch (variant) {
-        // 主色按钮（暖粉/玫红）是中间调，深色字会糊、白字才立得住
-        case "primary": return "#ffffff"
-        case "accent":  return "#ffffff"
-        case "danger":  return "#ffffff"
+        case "primary": return Theme.readableOn(control._bg)
+        case "accent":  return Theme.readableOn(control._bg)
+        case "danger":  return Theme.readableOn(control._bg)
         case "ghost":   return Theme.textDim
         default:        return Theme.text
         }

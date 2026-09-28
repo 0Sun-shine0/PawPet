@@ -63,8 +63,8 @@ class ThemeRole:
 #  角色清单
 # ==========================================================================
 # 默认值必须和 Theme.qml 里的保持一致 —— 那边读不到覆盖时用的就是这些。
-# 不是全部角色都开放：见文件开头的说明。
-ROLES: tuple[ThemeRole, ...] = (
+# 可变角色必须和 Theme.qml 的 pick() 键集合保持一致；固定错误色单独列出。
+EDITABLE_ROLES: tuple[ThemeRole, ...] = (
     # ---- 背景层
     ThemeRole("bg", "页面底色", "#fdf7f9",
               "整个工作台的背景"),
@@ -81,7 +81,7 @@ ROLES: tuple[ThemeRole, ...] = (
     ThemeRole("text", "正文颜色", "#4a3b45",
               "主要文字。注意要能压在上面的底色上看清"),
     ThemeRole("textDim", "次要文字", "#7d6577", "说明性文字"),
-    ThemeRole("textFaint", "最弱文字", "#9a8494",
+    ThemeRole("textFaint", "最弱文字", "#978092",
               "时间戳、附注这类最不重要的文字"),
 
     # ---- 强调色
@@ -95,7 +95,9 @@ ROLES: tuple[ThemeRole, ...] = (
     ThemeRole("gold", "提醒色（琥珀）", "#e8ab4f", "待确认、提醒"),
     ThemeRole("goldSoft", "提醒色浅底", "#fdf3e2"),
 
-    # ---- 不许改的
+)
+
+FIXED_ROLES: tuple[ThemeRole, ...] = (
     ThemeRole("rose", "错误色（玫红）", "#e8607a",
               "失败和危险操作的颜色。改成和背景相近会让用户看不到报错，"
               "所以固定不可改", safe=False),
@@ -103,7 +105,65 @@ ROLES: tuple[ThemeRole, ...] = (
               hint="固定不可改", safe=False),
 )
 
+# 保留 ROLES 这个公共名字，避免 AI 工具和旧测试失去完整色表语义；
+# 新代码应优先使用 EDITABLE_ROLES / FIXED_ROLES，不能把两者混作可变清单。
+ROLES: tuple[ThemeRole, ...] = EDITABLE_ROLES + FIXED_ROLES
+_EDITABLE_BY_KEY = {role.key: role for role in EDITABLE_ROLES}
 _BY_KEY = {role.key: role for role in ROLES}
+
+PRESET_META: tuple[dict[str, str], ...] = (
+    {"key": "default", "label": "柔粉浅色",
+     "hint": "保留 PawPet 的粉白暖色风格"},
+    {"key": "dark", "label": "夜间深色",
+     "hint": "降低夜间亮度，保持状态色清晰"},
+    {"key": "sage", "label": "护眼绿",
+     "hint": "低饱和暖绿底，适合长时间使用"},
+)
+
+PRESETS: dict[str, dict[str, str]] = {
+    "default": {
+        role.key: role.default for role in EDITABLE_ROLES
+    },
+    "dark": {
+        "bg": "#17151b",
+        "surface": "#24212a",
+        "surfaceAlt": "#2d2934",
+        "surfaceHi": "#393341",
+        "border": "#52495d",
+        "borderSoft": "#413949",
+        "text": "#f5eef7",
+        "textDim": "#d7c9dc",
+        "textFaint": "#bbaec2",
+        "accent": "#f28ca6",
+        "accentSoft": "#4b2939",
+        "violet": "#c4a3f3",
+        "violetSoft": "#3b304b",
+        "mint": "#79d6bd",
+        "mintSoft": "#223f38",
+        "gold": "#f3c66f",
+        "goldSoft": "#4c3b20",
+    },
+    "sage": {
+        "bg": "#f3f1e7",
+        "surface": "#fcfbf3",
+        "surfaceAlt": "#eaf0df",
+        "surfaceHi": "#dde8ce",
+        "border": "#c6d1b7",
+        "borderSoft": "#d8e0cd",
+        "text": "#30382e",
+        "textDim": "#5d6b58",
+        "textFaint": "#788571",
+        "accent": "#6f8f5b",
+        "accentSoft": "#e4edd9",
+        "violet": "#73678d",
+        "violetSoft": "#ece8f2",
+        "mint": "#4f987d",
+        "mintSoft": "#ddefe5",
+        "gold": "#8f641c",
+        "goldSoft": "#f3e7c9",
+    },
+}
+FIXED_COLORS = {role.key: role.default for role in FIXED_ROLES}
 
 
 # ==========================================================================
@@ -111,15 +171,42 @@ _BY_KEY = {role.key: role for role in ROLES}
 # ==========================================================================
 def editable_roles() -> list[dict]:
     """能给用户（和模型）看的可调角色。"""
-    return [role.as_dict() for role in ROLES if role.safe]
+    return [role.as_dict() for role in EDITABLE_ROLES]
 
 
 def all_roles() -> list[dict]:
     return [role.as_dict() for role in ROLES]
 
 
+def fixed_colors() -> dict[str, str]:
+    """返回不能被预设或用户覆盖的安全色。"""
+    return dict(FIXED_COLORS)
+
+
+def preset_options() -> list[dict[str, str]]:
+    """返回设置页可展示的预设清单。"""
+    return [dict(item) for item in PRESET_META]
+
+
+def normalize_preset(name: str | None) -> tuple[str, str]:
+    """返回合法预设名和可展示的修复提示。"""
+    value = str(name or "default").strip().lower()
+    if value in PRESETS:
+        return value, ""
+    return "default", f"未知主题预设「{name}」，已恢复为柔粉浅色"
+
+
+def preset_colors(name: str = "default") -> dict[str, str]:
+    """返回完整的 17 项预设表副本。未知名称安全回退到 default。"""
+    normalized, _warning = normalize_preset(name)
+    return dict(PRESETS[normalized])
+
+
 def default_overrides() -> dict[str, str]:
-    return {role.key: role.default for role in ROLES}
+    """返回完整最终色表的默认值（17 个可变 + 2 个固定角色）。"""
+    final = preset_colors("default")
+    final.update(FIXED_COLORS)
+    return final
 
 
 def is_valid_color(value: str) -> bool:
@@ -139,12 +226,12 @@ def sanitize(overrides) -> tuple[dict[str, str], list[str]]:
         return clean, ["覆盖值不是一个键值对"]
 
     for key, raw in overrides.items():
-        role = _BY_KEY.get(str(key))
+        role = _EDITABLE_BY_KEY.get(str(key))
         if role is None:
-            rejected.append(f"没有「{key}」这个配色项")
-            continue
-        if not role.safe:
-            rejected.append(f"「{role.label}」不允许改（{role.hint or '固定'}）")
+            if str(key) in _BY_KEY:
+                rejected.append(f"「{_BY_KEY[str(key)].label}」不允许改（固定）")
+            else:
+                rejected.append(f"没有「{key}」这个配色项")
             continue
         value = str(raw or "").strip()
         if not is_valid_color(value):
@@ -157,23 +244,38 @@ def sanitize(overrides) -> tuple[dict[str, str], list[str]]:
     return clean, rejected
 
 
-def load(path: Path) -> dict[str, str]:
-    """读用户定制的颜色。读不到就返回空 —— 空等于全用默认值。"""
+def load_config(path: Path) -> dict:
+    """读取主题配置，并兼容旧的裸颜色映射格式。"""
     try:
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}
+        return {"preset": "default", "colors": {}, "warning": ""}
     if not isinstance(raw, dict):
-        return {}
-    clean, _rejected = sanitize(raw.get("colors") if "colors" in raw else raw)
-    return clean
+        return {"preset": "default", "colors": {}, "warning": ""}
+    preset_raw = raw.get("preset", "default") if "colors" in raw else "default"
+    preset, warning = normalize_preset(preset_raw)
+    colors_raw = raw.get("colors") if "colors" in raw else raw
+    clean, _rejected = sanitize(colors_raw)
+    return {"preset": preset, "colors": clean, "warning": warning}
 
 
-def save(path: Path, overrides: dict[str, str]) -> tuple[bool, str]:
-    """写回。失败返回 (False, 原因)。"""
+def load(path: Path) -> dict[str, str]:
+    """兼容旧调用：只返回用户定制的颜色。"""
+    return load_config(path)["colors"]
+
+
+def save_config(path: Path, preset: str,
+                overrides: dict[str, str]) -> tuple[bool, str]:
+    """以新格式保存主题；写入前重新过滤用户颜色。"""
+    normalized, warning = normalize_preset(preset)
+    clean, rejected = sanitize(overrides)
+    if rejected:
+        return False, "；".join(rejected)
+    if warning:
+        return False, warning
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"colors": overrides}
+        payload = {"preset": normalized, "colors": clean}
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                        encoding="utf-8")
@@ -181,6 +283,11 @@ def save(path: Path, overrides: dict[str, str]) -> tuple[bool, str]:
         return True, "已保存"
     except OSError as exc:
         return False, f"写不进 {path.name}：{exc}"
+
+
+def save(path: Path, overrides: dict[str, str]) -> tuple[bool, str]:
+    """兼容旧调用：按 default 预设保存用户颜色。"""
+    return save_config(path, "default", overrides)
 
 
 def reset(path: Path) -> tuple[bool, str]:
@@ -193,31 +300,37 @@ def reset(path: Path) -> tuple[bool, str]:
         return False, f"删不掉 {path.name}：{exc}"
 
 
-def resolved(overrides: dict[str, str]) -> dict[str, str]:
-    """默认值 + 覆盖值 = 最终生效的完整配色表。"""
-    final = default_overrides()
+def resolved(overrides: dict[str, str], preset: str = "default") -> dict[str, str]:
+    """预设底色 + 用户覆盖 + 固定错误色 = 最终完整配色表。"""
+    final = preset_colors(preset)
     for key, value in (overrides or {}).items():
-        if key in _BY_KEY and is_valid_color(value):
-            final[key] = value
+        if key in _EDITABLE_BY_KEY and is_valid_color(value):
+            final[key] = str(value).strip()
+    final.update(FIXED_COLORS)
     return final
 
 
-def describe(overrides: dict[str, str]) -> str:
+def describe(overrides: dict[str, str], preset: str = "default") -> str:
     """给界面/模型看的一行摘要。
 
     只说**真的和默认不一样**的项。theme.json 里可能留着「值和默认相同」
     的条目（用户先改成默认色、或者手改过文件），把那些也算成「你改过」
     会让用户莫名其妙 —— 他明明什么都没动。
     """
+    base = preset_colors(preset)
+    preset_label = next(
+        (item["label"] for item in PRESET_META if item["key"] == normalize_preset(preset)[0]),
+        "柔粉浅色",
+    )
     effective = {
         key: value for key, value in (overrides or {}).items()
-        if key in _BY_KEY and is_valid_color(value)
-        and value.lower() != _BY_KEY[key].default.lower()
+        if key in _EDITABLE_BY_KEY and is_valid_color(value)
+        and str(value).strip().lower() != base[key].lower()
     }
     if not effective:
-        return "当前是默认配色（粉白）"
+        return f"当前是{preset_label}（未自定义）"
     parts = []
     for key, value in effective.items():
-        role = _BY_KEY.get(key)
+        role = _EDITABLE_BY_KEY.get(key)
         parts.append(f"{role.label if role else key} {value}")
-    return "你改过：" + "、".join(parts)
+    return f"当前是{preset_label}，你改过：" + "、".join(parts)

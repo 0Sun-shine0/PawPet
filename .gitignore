@@ -84,6 +84,11 @@ theme.json.bak*
 实训材料/
 linshi/
 
+# npm 缓存目录。出现过一次（`_npmtest/.npmcache`，里面有 9MB 的
+# content-v2 缓存块），不是任何人手写的，是某次跑 npm 时落下来的。
+# 已经确认全项目没有任何代码引用 `_npmtest`，所以直接忽略。
+_npmtest/
+
 # 编辑器
 .idea/
 .vscode/

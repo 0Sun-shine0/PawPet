@@ -84,7 +84,12 @@ def main() -> int:
         pet.setY(300)
         backend.commandBarVisible = False
         backend.dashboardVisible = False
-        pump(900)
+        # Let PetWindow finish its asynchronous restore before setting the
+        # deterministic coordinates used by the desktop interaction test.
+        pump(450)
+        pet.setX(500)
+        pet.setY(300)
+        pump(300)
 
         point = pet.mapToGlobal(QPoint(int(pet.width() / 2),
                                        int(pet.height() / 2)))
@@ -98,6 +103,8 @@ def main() -> int:
         pump(450)
         check("Esc 可以收起指令栏", not bar.isVisible())
 
+        point = pet.mapToGlobal(QPoint(int(pet.width() / 2),
+                                       int(pet.height() / 2)))
         pyautogui.click(point.x(), point.y(), clicks=2, interval=0.45)
         pump(1000)
         check("双击小爪打开工作台", dashboard.isVisible())
@@ -105,8 +112,8 @@ def main() -> int:
         check("双击后不会残留指令栏", not bar.isVisible())
         check("工作台打开时暂停碰撞箱", pawapp._pet_hitbox._suspended)
 
-        nav_y = int(dashboard.y() + 46 + 12 + 2 * 44 + 20)
-        pyautogui.click(int(dashboard.x() + 70), nav_y)
+        nav_point = dashboard.mapToGlobal(QPoint(70, 46 + 12 + 2 * 44 + 20))
+        pyautogui.click(nav_point.x(), nav_point.y())
         pump(350)
         check("工作台打开后导航仍可点击",
               dashboard.property("currentPage") == "tasks",

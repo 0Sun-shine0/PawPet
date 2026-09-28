@@ -30,6 +30,10 @@ Window {
 
     property bool hovering: false
     property bool positionReady: false
+    readonly property int doubleClickWindowMs:
+        Math.max(250, Qt.styleHints.mouseDoubleClickInterval)
+    property double lastTapAt: 0
+    property bool tapDoubleHandled: false
 
     // ------------------------------------------------------------ 宠物情绪状态
     // idle | thinking | speaking | sleepy | bored，按优先级取。
@@ -455,17 +459,31 @@ Window {
         onTapped: {
             pet.poke()
             win.idleSeconds = 0
-            clickTimer.restart()
+            var now = Date.now()
+            if (win.lastTapAt > 0
+                    && now - win.lastTapAt <= win.doubleClickWindowMs) {
+                win.lastTapAt = 0
+                win.tapDoubleHandled = true
+                clickTimer.stop()
+                backend.handlePetDoubleClick()
+            } else {
+                win.lastTapAt = now
+                win.tapDoubleHandled = false
+                clickTimer.restart()
+            }
         }
         onDoubleTapped: {
             clickTimer.stop()
-            backend.handlePetDoubleClick()
+            win.lastTapAt = 0
+            if (!win.tapDoubleHandled)
+                backend.handlePetDoubleClick()
+            win.tapDoubleHandled = false
         }
     }
 
     Timer {
         id: clickTimer
-        interval: 180
+        interval: Math.max(250, Qt.styleHints.mouseDoubleClickInterval)
         onTriggered: backend.handlePetClick()
     }
 

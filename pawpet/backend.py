@@ -1726,6 +1726,8 @@ class Backend(QObject):
 
     @Slot(str)
     def showDashboard(self, page: str = "focus") -> None:
+        if self._command_bar_visible:
+            self.commandBarVisible = False
         self._dashboard_visible = True
         self.dashboardVisibilityChanged.emit()
         self.showDashboardRequested.emit(page or "focus")

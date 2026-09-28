@@ -201,10 +201,13 @@ def main() -> int:
         QTimer.singleShot(350, check_double_click)
 
     def check_double_click():
+        bar = window("commandBar")
         dash = window("dashboardWindow")
         check("双击小爪打开工作台", dash.property("visible") is True)
         check("双击落到专注页", dash.property("currentPage") == "focus",
               f"实际 {dash.property('currentPage')}")
+        check("双击打开工作台会收起残留指令栏",
+              bar.property("visible") is False)
 
         # 把单击改成开工作台，行为要跟着变
         pawpet._backend.pet_click_action = "dashboard"

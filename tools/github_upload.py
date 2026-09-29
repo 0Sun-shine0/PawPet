@@ -600,7 +600,8 @@ def publish_commit(owner: str, repo: str, token: str, commit_sha: str,
 
 
 def upload(owner: str, repo: str, token: str, branch: str,
-           info: dict, dry_run: bool = False, ref: str = "HEAD") -> int:
+           info: dict, dry_run: bool = False, ref: str = "HEAD",
+           allow_unrelated: bool = False) -> int:
     # ---------------------------------------------------------- 1. 确认仓库
     print(f"\n=== 1. 检查仓库 {owner}/{repo} ===")
     status, body = request("GET", f"/repos/{owner}/{repo}", token)
@@ -732,7 +733,7 @@ def upload(owner: str, repo: str, token: str, branch: str,
             # 这个是「两棵无关的历史树」，不是「远端比我们新」。
             # 原来没有这一支，于是裸根的无关提交（`remote_parents` 为空）
             # 会掉进下面那个「是根提交，可以安全覆盖」——**静默覆盖掉**。
-            print(f"\n  [XX] 远端和本地**没有共同祖先**。")
+            print(f"\n  [!!] 远端和本地**没有共同祖先**。")
             print(f"       这不是「差几个提交」，是两棵完全无关的历史树：")
             print(f"         远端 {existing_sha[:10]}")
             print(f"         本地 {tip[:10]}")
@@ -740,12 +741,23 @@ def upload(owner: str, repo: str, token: str, branch: str,
             print("       常见成因：有人在别处重建过历史（比如统一改作者名）。")
             print("       commit SHA 的哈希**包含作者名** —— 改一个名字，")
             print("       从根提交起每个 sha 都变，两条线就永久分叉了。")
+            if not allow_unrelated:
+                print()
+                print("       先查清两条线的关系再动手，**不要直接覆盖**：")
+                print("         git fetch <url> main")
+                print("         git merge-base FETCH_HEAD HEAD    # 空输出=无共同祖先")
+                print("         git rev-list --max-parents=0 FETCH_HEAD HEAD  # 比根提交")
+                print()
+                print("       如果确认就是要用本地这条取代远端（例如刚统一了")
+                print("       作者名、并且已核对过远端没有独有内容），")
+                print("       加 `--allow-unrelated` 明确确认。")
+                return 1
+            # 明确确认过 —— 覆盖远端那条历史
             print()
-            print("       先查清两条线的关系再动手，**不要直接覆盖**：")
-            print("         git fetch <url> main")
-            print("         git merge-base FETCH_HEAD HEAD      # 空输出=无共同祖先")
-            print("         git rev-list --max-parents=0 FETCH_HEAD HEAD  # 比根提交")
-            return 1
+            print("       已用 --allow-unrelated 明确确认 → 覆盖远端那条历史。")
+            print("       **远端原本那条线会从分支上移走**（对象仍在，")
+            print("       可以用 sha 直接访问；但分支不再指向它）。")
+            need_force = True
         elif not remote_parents:
             need_force = True
             print(f"\n  远端当前 {existing_sha[:10]} 不在我们历史里，")
@@ -908,6 +920,11 @@ def main() -> int:
                              "有一次网络中断导致中间某个提交没上传成功时，"
                              "用它按顺序补传：先 --ref <旧的那个>，再传 HEAD")
     parser.add_argument("--dry-run", action="store_true", help="只显示计划，不上传")
+    parser.add_argument("--allow-unrelated", action="store_true",
+                        help="远端和本地没有共同祖先时也继续（会用本地这条"
+                             "历史取代远端那条）。用于「刚统一了作者名、"
+                             "需要把改写后的历史推上去」这种情况 —— "
+                             "**先核对远端没有独有内容再用**")
     args = parser.parse_args()
 
     print("GitHub API 上传工具")
@@ -955,7 +972,8 @@ def main() -> int:
 
     try:
         return upload(args.owner, args.repo, token, args.branch,
-                      info, dry_run=args.dry_run, ref=args.ref)
+                      info, dry_run=args.dry_run, ref=args.ref,
+                      allow_unrelated=args.allow_unrelated)
     except GitHubError as exc:
         print(f"\n[XX] 网络错误：{exc}")
         print("     api.github.com 也连不上的话，只能换网络或开代理了。")

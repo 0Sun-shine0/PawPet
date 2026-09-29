@@ -453,6 +453,48 @@ def main() -> int:
         check("分支没被动", api7.refs["main"] == fetched,
               str(api7.refs["main"])[:12])
 
+        # ## 明确确认之后应该能通过
+        #
+        # 上面那条「拒绝」是**保护**，但改写历史（比如统一作者名）之后
+        # 确实需要覆盖远端 —— 所以加了 `--allow-unrelated`。
+        #
+        # **这个开关必须有测试**，否则它可能悄悄坏掉，而它坏掉的表现是
+        # 「改写完历史推不上去」，排查起来很费时间（这次就费了一轮）。
+        print("\n=== 十之二、--allow-unrelated 明确确认后应该能通过 ===")
+        api8 = FakeGitHub(remote_sha=fetched, known={fetched})
+        gh.request = lambda method, path, token, payload=None: api8.handle(
+            method, path, payload)
+        gh.request_with_retry = lambda method, path, token, payload=None: \
+            api8.handle(method, path, payload)
+        api8.commits[fetched] = {"message": "提交 A：加 a.txt",
+                                 "parents": [], "tree": "0" * 40}
+        code = gh.upload("o", "r", "token", "main",
+                         gh.local_commit_info("HEAD"),
+                         allow_unrelated=True)
+        check("加了 allow_unrelated 就能推上去", code == 0, f"返回 {code}")
+        check("确实建了提交",
+              len([s for s in api8.commits if s != fetched]) > 0,
+              str(list(api8.commits)))
+        check("分支被指到新的 tip",
+              api8.refs["main"] not in ("", fetched),
+              str(api8.refs["main"])[:12])
+
+        # 对照：**不开这个开关时不能通过** —— 证明开关真的在起作用，
+        # 而不是那条保护被绕过了
+        api9 = FakeGitHub(remote_sha=fetched, known={fetched})
+        gh.request = lambda method, path, token, payload=None: api9.handle(
+            method, path, payload)
+        gh.request_with_retry = lambda method, path, token, payload=None: \
+            api9.handle(method, path, payload)
+        api9.commits[fetched] = {"message": "提交 A：加 a.txt",
+                                 "parents": [], "tree": "0" * 40}
+        code = gh.upload("o", "r", "token", "main",
+                         gh.local_commit_info("HEAD"),
+                         allow_unrelated=False)
+        check("对照：不开开关时仍然拒绝", code == 1, f"返回 {code}")
+        check("对照：分支没被动", api9.refs["main"] == fetched,
+              str(api9.refs["main"])[:12])
+
         # ============================================================ 十一
         print("\n=== 十一、release.py 的调用方式没被改坏 ===")
         import inspect
@@ -465,6 +507,11 @@ def main() -> int:
         # release.py 是这么调的：gh_upload(owner, repo, token, "main", info)
         check("只传 5 个位置参数也能调用",
               signature.bind("o", "r", "t", "main", {}) is not None)
+        # 新参数必须是**关键字**参数，且默认关闭 —— 不然 release.py
+        # 的 5 参数调用会传错位置，或者保护被默认打开
+        check("allow_unrelated 有默认值 False（保护默认生效）",
+              signature.parameters["allow_unrelated"].default is False,
+              str(signature.parameters["allow_unrelated"].default))
 
     finally:
         gh.ROOT = original_root

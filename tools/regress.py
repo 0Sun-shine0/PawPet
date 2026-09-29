@@ -61,8 +61,9 @@ LOG_DIR = ROOT / ".cache" / "regress"
 # 全跑一遍几分钟，比发一个坏包出去便宜得多。
 SUITES: list[tuple[str, str, str]] = [
     # ---- 逻辑与安全
-    # 静态检查放第一个：不执行代码、秒级完成，语法层面的问题先挡住
+    # 静态检查放前面：不执行代码、秒级完成，语法/口径层面的问题先挡住
     ("core", "静态检查（导入完整性）", "importcheck.py"),
+    ("core", "间距 token 化棘轮", "spacingtest.py"),
     ("core", "上传工具（多提交与父提交合法性）", "uploadtest.py"),
     ("core", "核心逻辑", "selftest.py"),
     ("core", "文件读写安全", "filetest.py"),

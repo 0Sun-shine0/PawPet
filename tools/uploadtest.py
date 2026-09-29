@@ -119,6 +119,68 @@ class FakeGitHub:
     def _exists(self, sha: str) -> bool:
         return sha in self.commits or sha in self.known
 
+    def seed_from_local(self, repo: Path, ref: str = "HEAD") -> str:
+        """把**本地真实的提交**注册成「远端已有的提交」，返回它的 sha。
+
+        ## 为什么必须用本地真实的 sha
+
+        假 API 自己建的提交用的是一套简化的哈希（`_hash`），算出来的 sha
+        和本地 git 不一致 —— 于是 `shares_history()` 去查本地对象库时
+        找不到，把「远端是我们推过的」误判成「两棵无关的历史树」。
+
+        而这正是**真实场景**和**测试场景**的差别：真实世界里如果我们推过
+        一个提交，本地就有那个对象（提交本来就是从本地推上去的）。
+        所以测试里也要让远端 tip 指向一个本地真实存在的提交。
+
+        ## 这个方法做什么
+
+          · 读本地那个提交的 sha、tree、父提交
+          · 把它的 tree 条目注册进假 API（供 `prefetch_blob_cache` 读）
+          · 把提交本身注册进假 API，并把 main 指过去
+        """
+        def run(*args: str) -> str:
+            done = subprocess.run(["git", *args], cwd=str(repo),
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=60)
+            return (done.stdout or "").strip()
+
+        sha = run("rev-parse", ref)
+        tree_sha = run("rev-parse", f"{ref}^{{tree}}")
+        parents = run("rev-list", "--parents", "-n", "1", ref).split()[1:]
+        message = run("log", "-1", "--format=%B", ref)
+
+        # tree 条目：`<mode> <type> <sha>\t<path>`，用 -z 拿 NUL 分隔
+        raw = subprocess.run(["git", "ls-tree", "-r", "-z", ref],
+                             cwd=str(repo), capture_output=True,
+                             timeout=60).stdout
+        items: list[dict] = []
+        for record in raw.split(b"\x00"):
+            if not record:
+                continue
+            meta, _tab, path_bytes = record.partition(b"\t")
+            parts = meta.split(b" ")
+            if len(parts) < 3:
+                continue
+            items.append({
+                "path": path_bytes.decode("utf-8", "surrogateescape"),
+                "mode": parts[0].decode(),
+                "type": parts[1].decode(),
+                "sha": parts[2].decode(),
+            })
+        self.trees[tree_sha] = {"tree": items}
+
+        self.commits[sha] = {
+            "sha": sha,
+            "message": message,
+            "tree": {"sha": tree_sha,
+                     "url": f"https://example.invalid/trees/{tree_sha}"},
+            "parents": [{"sha": p} for p in parents],
+        }
+        self.known.add(sha)
+        self.refs["main"] = sha
+        return sha
+
     # ---- 路由 ----
     def handle(self, method: str, path: str, payload=None) -> tuple[int, dict]:
         self.calls.append((method, path))
@@ -145,6 +207,16 @@ class FakeGitHub:
                 return 200, self.commits[sha]
             return 404, {"message": "Not Found"}
 
+        # 读树（`prefetch_blob_cache` 用这个预填去重缓存）。
+        # 注意路径可能带 `?recursive=1`，要剥掉再查。
+        if method == "GET" and "/git/trees/" in path:
+            sha = path.split("/git/trees/")[-1].split("?")[0]
+            if sha in self.trees:
+                body = dict(self.trees[sha])
+                body["truncated"] = False
+                return 200, body
+            return 404, {"message": "Not Found"}
+
         if method == "POST" and path.endswith("/git/blobs"):
             content = payload["content"]
             import base64
@@ -164,6 +236,19 @@ class FakeGitHub:
             self.trees[key] = {"tree": items}
             return 201, {"sha": key}
 
+        # 引导提交：**空仓库**第一次上传时，Git Data API 还不可用
+        # （真 API 会返回 409），所以要先经 Contents API 造一个提交。
+        # 假 API 也要支持这条，否则「从零推送」的场景测不了。
+        if method == "PUT" and "/contents/" in path:
+            branch = str(payload.get("branch") or "main")
+            key = self._hash("bootstrap", str(payload.get("message", "")),
+                             branch)
+            self.commits[key] = {"message": payload.get("message", ""),
+                                 "parents": [], "tree": "0" * 40}
+            self.known.add(key)
+            self.refs[branch] = key
+            return 201, {"commit": {"sha": key}}
+
         if method == "POST" and path.endswith("/git/commits"):
             # **真 API 会在这里拒绝未知的父提交**
             for parent in payload.get("parents") or []:
@@ -174,7 +259,24 @@ class FakeGitHub:
             key = self._hash(payload["tree"],
                              *sorted(payload.get("parents") or []),
                              payload["message"])
-            self.commits[key] = payload
+            # **存成「响应」的格式，不是「请求」的格式。**
+            #
+            # 真 API 的 `GET /git/commits/{sha}` 返回里，`tree` 是个对象：
+            #     "tree": {"sha": "...", "url": "..."}
+            # 而**创建时**请求体里的 `tree` 是字符串。
+            #
+            # 第一版直接存了请求 payload，于是 `tree` 是字符串 ——
+            # `prefetch_blob_cache()` 按真 API 的格式去读 `.get("sha")`，
+            # 读到空，预填缓存失效。**假 API 必须模拟响应，不是原样回显请求**，
+            # 否则测出来的行为跟真实环境不一致。
+            self.commits[key] = {
+                **payload,
+                "sha": key,
+                "tree": {
+                    "sha": payload["tree"],
+                    "url": f"https://example.invalid/trees/{payload['tree']}",
+                },
+            }
             return 201, {"sha": key}
 
         if method in ("POST", "PATCH") and "/git/refs" in path:
@@ -496,7 +598,103 @@ def main() -> int:
               str(api9.refs["main"])[:12])
 
         # ============================================================ 十一
-        print("\n=== 十一、release.py 的调用方式没被改坏 ===")
+        print("\n=== 十一、增量推送不重传没变的文件（预填缓存）===")
+        #
+        # ## 这个测试盯的是什么
+        #
+        # `publish_commit()` 会遍历提交里的**全部**文件。没有预填缓存时，
+        # 第一个提交会把所有 blob 传一遍 —— 哪怕只改了 1 个文件。
+        #
+        # 实测过：推 2 个提交（改 3 个文件、仓库约 200 个文件）时传了
+        # 200 个 blob，其中 197 个远端本来就有。
+        #
+        # 预填的做法：连远端 tip 的 tree 递归读一次，把已有的 blob sha
+        # 放进缓存。git 的 blob 是**内容寻址**的，所以 sha 相同 == 内容相同，
+        # 复用是安全的。
+        #
+        # ## 怎么造这个场景
+        #
+        # 先完整推一次（远端从空到有），再加一个「只改 1 个文件」的提交，
+        # 然后数第二次推送时真正上传了几个 blob。
+        #
+        # 断言用「实际 POST 到 /git/blobs 的次数」，不是看日志 ——
+        # 日志可能骗人，请求次数不会。
+        fresh_repo = base / "incremental"
+        fresh_repo.mkdir()
+        git(fresh_repo, "init", "-b", "main")
+        git(fresh_repo, "config", "user.name", "测试")
+        git(fresh_repo, "config", "user.email", "test@example.com")
+        git(fresh_repo, "config", "commit.gpgsign", "false")
+        for index in range(5):
+            (fresh_repo / f"file{index}.txt").write_text(
+                f"内容 {index}\n", encoding="utf-8")
+        git(fresh_repo, "add", "-A")
+        git(fresh_repo, "commit", "-m", "初始：5 个文件")
+
+        original_root = gh.ROOT
+        gh.ROOT = fresh_repo
+        try:
+            # 第一次：远端空 → 全部文件都要传
+            api_full = FakeGitHub()
+            gh.request = lambda method, path, token, payload=None: \
+                api_full.handle(method, path, payload)
+            gh.request_with_retry = lambda method, path, token, payload=None: \
+                api_full.handle(method, path, payload)
+            code = gh.upload("o", "r", "token", "main",
+                             gh.local_commit_info("HEAD"))
+            check("首次推送成功", code == 0, f"返回 {code}")
+            first_blobs = [p for m, p in api_full.calls
+                           if m == "POST" and p.endswith("/git/blobs")]
+            check("首次推送传了 5 个文件（远端空，全要传）",
+                  len(first_blobs) == 5, f"实际 {len(first_blobs)} 个")
+
+            # 加一个只改 1 个文件的提交
+            (fresh_repo / "file2.txt").write_text("改过了\n", encoding="utf-8")
+            git(fresh_repo, "add", "file2.txt")
+            git(fresh_repo, "commit", "-m", "只改 file2")
+
+            # 第二次：远端 tip 指向**本地真实的**上一个提交。
+            #
+            # 用 `seed_from_local` 而不是假 API 自己建的提交 —— 后者 sha
+            # 是简化哈希算的，本地对象库里没有，`shares_history()` 会把它
+            # 判成「无关历史」而拒绝（第一版就卡在这里）。
+            # 真实世界里推过的提交本地就有，所以这里也该用真实 sha。
+            api_inc = FakeGitHub()
+            api_inc.blobs = dict(api_full.blobs)   # 远端已有那些 blob
+            remote_now = api_inc.seed_from_local(fresh_repo, "HEAD~1")
+            print(f"      远端 tip 指向本地真实提交 {remote_now[:9]}")
+
+            gh.request = lambda method, path, token, payload=None: \
+                api_inc.handle(method, path, payload)
+            gh.request_with_retry = lambda method, path, token, payload=None: \
+                api_inc.handle(method, path, payload)
+
+            code = gh.upload("o", "r", "token", "main",
+                             gh.local_commit_info("HEAD"))
+            check("增量推送成功", code == 0, f"返回 {code}")
+
+            # 只数「这一轮」新发的 blob 请求
+            second_blobs = [p for m, p in api_inc.calls
+                            if m == "POST" and p.endswith("/git/blobs")]
+            check("增量推送只传了改动的 1 个文件（不是 5 个）",
+                  len(second_blobs) == 1, f"实际 {len(second_blobs)} 个")
+            check("其余 4 个文件复用了远端已有的 blob",
+                  len(api_inc.blobs) == len(api_full.blobs) + 1,
+                  f"远端 blob 从 {len(api_full.blobs)} 变成 "
+                  f"{len(api_inc.blobs)}")
+
+            # 顺带确认预填真的读到了东西（不然上面可能是别的原因过的）
+            cache = gh.prefetch_blob_cache("o", "r", "token", remote_now)
+            check("prefetch_blob_cache 能读到远端已有的 blob",
+                  len(cache) == 5, f"读到 {len(cache)} 个")
+            check("缓存里的 key 和 value 相同（内容寻址）",
+                  all(k == v for k, v in cache.items()),
+                  "不同的话说明映射逻辑有问题")
+        finally:
+            gh.ROOT = original_root
+
+        # ============================================================ 十二
+        print("\n=== 十二、release.py 的调用方式没被改坏 ===")
         import inspect
 
         signature = inspect.signature(gh.upload)

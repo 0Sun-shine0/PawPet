@@ -338,6 +338,9 @@ def is_ancestor(sha: str, ref: str = "HEAD") -> bool:
     """sha 是不是 ref 的祖先。
 
     本地没有这个对象时返回 False（比如远端那份提交不是我们推的）。
+
+    **注意它返回 False 有两种完全不同的含义**，要区分请用
+    `shares_history()` —— 见那个函数的说明。
     """
     if not sha:
         return False
@@ -349,6 +352,57 @@ def is_ancestor(sha: str, ref: str = "HEAD") -> bool:
         return False
     result = subprocess.run(
         ["git", "merge-base", "--is-ancestor", sha, ref], cwd=str(ROOT),
+        capture_output=True, timeout=30,
+    )
+    return result.returncode == 0
+
+
+def shares_history(left: str, right: str = "HEAD") -> bool:
+    """两个提交有没有**任何**共同祖先。
+
+    ## 为什么需要单独一个函数
+
+    `is_ancestor()` 返回 False 有两种含义，严重程度差很远：
+
+      · **远端比我们新**（正常）—— 两边同一棵树，只是它们多了几个提交。
+        处理方式：先 fetch、看差了什么、合并。
+      · **远端是另一棵完全无关的历史树**（异常）—— 两边的**根提交都不是
+        同一个**。这不是「差几个提交」，是结构性问题，没有「合并一下
+        就好」这种选项。
+
+    原来只有 `is_ancestor`，两种情况都被笼统说成
+    「远端已有 N 个父提交的真实历史，用 API 覆盖会丢东西」——
+    读到的人会以为「那就先合并」，但根本没有可合并的基础。
+
+    ## 实测踩过（2026-09-29）
+
+    本地 89 个提交、远端 88 个，**提交说明逐字对应、顺序相同**，
+    但 `merge-base` 找不到任何共同祖先。查根提交：
+
+        c4e9df7  作者 马靖凯  2026-09-14 18:31:28   （本地）
+        ca75541  作者 颐安    2026-09-14 18:31:28   （远端）
+
+    **同一秒、同一个提交说明，只有 `author.name` 差一个字。**
+
+    而 commit SHA 的哈希**包含作者名** —— 改一个名字，从根提交起
+    每个 sha 都跟着变，整条历史分裂成两条互不相干的时间线。
+    成因通常是有人在别处重建过历史（`filter-branch` 统一改作者名之类）。
+
+    所以这个函数不只是「查得更细」，它把一类**看起来像普通落后、
+    实际是结构性分叉**的情况单独标出来。
+    """
+    if not left or not right:
+        return False
+    for sha in (left, right):
+        exists = subprocess.run(
+            ["git", "cat-file", "-e", sha], cwd=str(ROOT),
+            capture_output=True, timeout=30,
+        )
+        if exists.returncode != 0:
+            # 本地没有这个对象（远端那份不是我们推的）—— 谈不上共同祖先
+            return False
+    result = subprocess.run(
+        ["git", "merge-base", left, right], cwd=str(ROOT),
         capture_output=True, timeout=30,
     )
     return result.returncode == 0
@@ -672,6 +726,26 @@ def upload(owner: str, repo: str, token: str, branch: str,
     if branch_existed:
         if existing_sha == tip or is_ancestor(existing_sha, ref):
             print(f"\n  远端是我们历史的一部分 → 正常快进更新")
+        elif not shares_history(existing_sha, ref):
+            # **必须放在 `not remote_parents` 之前。**
+            #
+            # 这个是「两棵无关的历史树」，不是「远端比我们新」。
+            # 原来没有这一支，于是裸根的无关提交（`remote_parents` 为空）
+            # 会掉进下面那个「是根提交，可以安全覆盖」——**静默覆盖掉**。
+            print(f"\n  [XX] 远端和本地**没有共同祖先**。")
+            print(f"       这不是「差几个提交」，是两棵完全无关的历史树：")
+            print(f"         远端 {existing_sha[:10]}")
+            print(f"         本地 {tip[:10]}")
+            print()
+            print("       常见成因：有人在别处重建过历史（比如统一改作者名）。")
+            print("       commit SHA 的哈希**包含作者名** —— 改一个名字，")
+            print("       从根提交起每个 sha 都变，两条线就永久分叉了。")
+            print()
+            print("       先查清两条线的关系再动手，**不要直接覆盖**：")
+            print("         git fetch <url> main")
+            print("         git merge-base FETCH_HEAD HEAD      # 空输出=无共同祖先")
+            print("         git rev-list --max-parents=0 FETCH_HEAD HEAD  # 比根提交")
+            return 1
         elif not remote_parents:
             need_force = True
             print(f"\n  远端当前 {existing_sha[:10]} 不在我们历史里，")

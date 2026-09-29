@@ -381,7 +381,80 @@ def main() -> int:
               f"被拒：{[s[:8] for s in api6.rejected]}，本地 B 是 {b[:8]}")
 
         # ============================================================ 十
-        print("\n=== 十、release.py 的调用方式没被改坏 ===")
+        print("\n=== 十、两棵无关的历史树要被拦住（实测踩过）===")
+        #
+        # ## 这个场景是真实发生过的（2026-09-29）
+        #
+        # 本地 89 个提交、远端 88 个，**提交说明逐字对应、顺序相同**，
+        # 但 `merge-base` 找不到任何共同祖先。查根提交：
+        #
+        #     c4e9df7  作者 马靖凯  2026-09-14 18:31:28   （本地）
+        #     ca75541  作者 颐安    2026-09-14 18:31:28   （远端）
+        #
+        # **同一秒、同一个提交说明，只有 author.name 差一个字。**
+        # 而 commit SHA 的哈希**包含作者名** —— 改一个名字，从根提交起
+        # 每个 sha 都变，整条历史分裂成两条互不相干的时间线。
+        #
+        # ## 测试怎么造这个场景
+        #
+        # 造第二个仓库：同样的文件、同样的提交说明、**但作者名不同**，
+        # 然后 fetch 进本地（只带对象过来，不合并）—— 这正是
+        # 「远端是另一棵树」在本地看起来的样子。
+        foreign = base / "foreign"
+        foreign.mkdir()
+        git(foreign, "init", "-b", "main")
+        git(foreign, "config", "user.name", "另一个人")
+        git(foreign, "config", "user.email", "other@example.com")
+        git(foreign, "config", "commit.gpgsign", "false")
+        (foreign / "a.txt").write_text("第一个文件\n", encoding="utf-8")
+        git(foreign, "add", "a.txt")
+        git(foreign, "commit", "-m", "提交 A：加 a.txt")
+        foreign_head = git(foreign, "rev-parse", "HEAD")
+
+        # **同样的提交说明、同样的文件，只有作者名不同** ——
+        # 所以 sha 必然不同（这就是分叉的成因）
+        check("两边同一个提交说明、同一个文件，但 sha 不同",
+              foreign_head != a, f"{foreign_head[:8]} vs {a[:8]}")
+
+        # fetch 进本地：对象过来了，但两边没有共同祖先
+        git(repo, "fetch", "--no-tags", str(foreign), "main")
+        fetched = git(repo, "rev-parse", "FETCH_HEAD")
+
+        check("is_ancestor 说它不是我们的祖先", not gh.is_ancestor(fetched),
+              "这是当然的——但**不够**，它区分不出两种含义")
+        check("shares_history 能确认没有共同祖先",
+              not gh.shares_history(fetched),
+              "这才是真正的判据：两棵无关的树")
+
+        # 对照：我们自己的提交当然共享历史
+        check("对照：本地自己的提交共享历史", gh.shares_history(a),
+              "不然这个函数就是永远返回 False 的假货")
+        check("对照：HEAD 和自己共享历史", gh.shares_history(c),
+              "")
+
+        # ## 关键：upload() 必须拒绝，而不是覆盖
+        #
+        # 这里用一个「假 API 说远端 HEAD 就是那棵无关的树」的场景。
+        # 修之前它会掉进「是根提交，可以安全覆盖」——**静默覆盖掉**。
+        api7 = FakeGitHub(remote_sha=fetched, known={fetched})
+        gh.request = lambda method, path, token, payload=None: api7.handle(
+            method, path, payload)
+        gh.request_with_retry = lambda method, path, token, payload=None: \
+            api7.handle(method, path, payload)
+        api7.commits[fetched] = {"message": "提交 A：加 a.txt",
+                                 "parents": [], "tree": "0" * 40}
+        code = gh.upload("o", "r", "token", "main", gh.local_commit_info("HEAD"))
+        check("upload 拒绝在无关历史上操作", code == 1, f"返回 {code}")
+        check("没有建任何提交",
+              not [s for s in api7.commits
+                   if s not in (fetched,) and "提交" in str(
+                       api7.commits[s].get("message", ""))],
+              "拒绝了还建东西，说明拦的位置不对")
+        check("分支没被动", api7.refs["main"] == fetched,
+              str(api7.refs["main"])[:12])
+
+        # ============================================================ 十一
+        print("\n=== 十一、release.py 的调用方式没被改坏 ===")
         import inspect
 
         signature = inspect.signature(gh.upload)

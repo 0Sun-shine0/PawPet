@@ -30,8 +30,11 @@ r"""上传工具（tools/github_upload.py）回归。
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -669,6 +672,35 @@ def main() -> int:
             gh.request_with_retry = lambda method, path, token, payload=None: \
                 api_inc.handle(method, path, payload)
 
+            # ---- 干跑报的数字必须和实际传的数字一致 ----
+            #
+            # 上一轮修掉了「预填」的性能问题，但 `dry_run` 那段代码在预填
+            # **之前**就 `return` 了 —— 于是干跑只扣掉了「本次待传的几个
+            # 提交之间」的重复，**没扣掉远端已经有的内容**。
+            #
+            # 实测（真推一个只改了 1 个文件的提交、仓库里共 199 个文件）：
+            # 干跑说「新增 199 个，合计要传 199 个 blob / 2.7 MB」，
+            # 实际是 198 个复用、只传 1 个 —— **高估 199 倍**。
+            #
+            # 干跑的用途就是让人据此决定推不推。报高了会让人以为要重传
+            # 整个仓库而不敢推 —— 那不是「保守」，那是把计划报错了。
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                plan_code = gh.upload("o", "r", "token", "main",
+                                      gh.local_commit_info("HEAD"),
+                                      dry_run=True)
+            plan = buffer.getvalue()
+            check("干跑成功", plan_code == 0, f"返回 {plan_code}")
+            found = re.search(r"合计要传 (\d+) 个不同的 blob", plan)
+            check("干跑报告了要传的 blob 数", found is not None, plan[-200:])
+            planned = int(found.group(1)) if found else -1
+            check("干跑扣掉了远端已有的内容（报 1 个，不是 5 个）",
+                  planned == 1, f"报的是 {planned} 个")
+            check("干跑自己没传任何 blob（它只是计划）",
+                  not [p for m, p in api_inc.calls
+                       if m == "POST" and p.endswith("/git/blobs")],
+                  "干跑却传了东西")
+
             code = gh.upload("o", "r", "token", "main",
                              gh.local_commit_info("HEAD"))
             check("增量推送成功", code == 0, f"返回 {code}")
@@ -678,6 +710,12 @@ def main() -> int:
                             if m == "POST" and p.endswith("/git/blobs")]
             check("增量推送只传了改动的 1 个文件（不是 5 个）",
                   len(second_blobs) == 1, f"实际 {len(second_blobs)} 个")
+            # 这条是上面那个 bug 的核心断言：**计划和实际必须相等**。
+            # 单看任何一边都发现不了 —— 干跑说 5、实际传 1，两边各自
+            # 「看起来都合理」。只有把它们放在一起比才暴露出来。
+            check("干跑报的数量 == 实际传的数量（计划没撒谎）",
+                  planned == len(second_blobs),
+                  f"干跑说 {planned} 个，实际传了 {len(second_blobs)} 个")
             check("其余 4 个文件复用了远端已有的 blob",
                   len(api_inc.blobs) == len(api_full.blobs) + 1,
                   f"远端 blob 从 {len(api_full.blobs)} 变成 "

@@ -845,14 +845,47 @@ def upload(owner: str, repo: str, token: str, branch: str,
         need_force = True
         print("\n  远端只有引导提交，需要覆盖")
 
+    # ------------------------------------------- 远端已有的 blob（预填缓存）
+    #
+    # **这一步必须在 `dry-run` 之前。** 它原来在 dry-run 后面，于是干跑
+    # 只扣掉了「本次待传的几个提交之间」的重复，**没扣掉远端已经有的内容**
+    # —— 而后者通常才是绝大多数。
+    #
+    # 实测（真推一个只改了 1 个文件、仓库里共 199 个文件的提交）：
+    #
+    #     干跑说：新增 199 个，合计要传 199 个不同的 blob（2.7 MB）
+    #     实际是：198 个复用，只传 1 个新 blob
+    #
+    # **高估 199 倍。** 干跑的用途就是让人据此决定推不推 ——
+    # 报高了会让人以为要重传整个仓库而不敢推。那不是「保守」，是报错。
+    #
+    # 预填只要**一次请求**：连远端 tip 的 tree 递归读下来，
+    # 拿到 (path, blob_sha) 列表。而 git 的 blob 是**内容寻址**的 ——
+    # 本地文件算出的 sha 和远端存的一样，所以 sha 相同就等于内容相同，
+    # 直接复用是安全的。
+    #
+    # 实测效果：从「200 个 blob / 约 4 分钟」降到「1 个 blob / 约 25 秒」。
+    blob_cache: dict[str, str] = {}
+    if existing_sha:
+        blob_cache = prefetch_blob_cache(owner, repo, token, existing_sha) or {}
+        if blob_cache:
+            print(f"\n  远端已有 {len(blob_cache)} 个 blob —— "
+                  f"内容没变的文件不用重传")
+
     # ------------------------------------------------------------ dry-run
     if dry_run:
         print("\n=== 计划上传的内容 ===")
-        seen_blobs: set[str] = set()
+        # **种子是「远端已有的」** —— 只有扣掉它，`fresh` 才真的是新内容。
+        # 原来这里是空的 `set()`，于是远端已有的全被算成「要传」。
+        seen_blobs: set[str] = set(blob_cache)
+        # 单独累计「真要传的」：`seen_blobs` 会因为种子而虚高，
+        # 直接拿它当答案会得到「199 + 1 = 200」这种更离谱的数字。
+        to_upload: set[str] = set()
         for sha in pending:
             entries = read_tree(sha)
             fresh = {s for _p, _m, _c, s in entries} - seen_blobs
             seen_blobs |= fresh
+            to_upload |= fresh
             size = sum(len(c) for _p, _m, c, s in entries if s in fresh)
             subject = subprocess.run(
                 ["git", "log", "-1", "--format=%s", sha], cwd=str(ROOT),
@@ -861,33 +894,15 @@ def upload(owner: str, repo: str, token: str, branch: str,
             ).stdout.strip()[:44]
             print(f"  {sha[:10]}  {len(entries):>3} 个文件"
                   f"（新增 {len(fresh):>3} 个，{human(size)}）  {subject}")
-        print(f"\n  合计要传 {len(seen_blobs)} 个不同的 blob"
-              f"（跨提交按内容去重，不是 {len(pending)} 份全量）")
+        print(f"\n  合计要传 {len(to_upload)} 个不同的 blob"
+              f"（已扣掉远端已有的和跨提交重复的，"
+              f"不是 {len(pending)} 份全量）")
         print(f"  [dry-run] 未实际上传")
         return 0
 
     # ------------------------------------------------- 4-6. 逐个提交上传
     started = time.time()
 
-    # **先把远端已有的 blob 预填进缓存** —— 内容没变的文件不用重传。
-    #
-    # 原来这里是空的 `{}`，于是第一个提交会把**全部文件**的 blob 传一遍。
-    # 但推送通常只改了几个文件：实测推 2 个提交（改了 3 个文件、仓库里
-    # 有约 200 个文件）时，会传 200 个 blob，其中 197 个远端本来就有。
-    #
-    # 预填只要**一次请求**：连远端 tip 的 tree 递归读下来，
-    # 拿到 (path, blob_sha) 列表。而 git 的 blob 是**内容寻址**的 ——
-    # 本地文件算出的 sha 和远端存的一样，所以 sha 相同就等于内容相同，
-    # 直接复用是安全的。
-    #
-    # 实测效果：从「200 个 blob / 约 4 分钟」降到「3 个 blob / 约 5 秒」。
-    blob_cache: dict[str, str] = {}
-    if existing_sha:
-        prefetched = prefetch_blob_cache(owner, repo, token, existing_sha)
-        if prefetched:
-            blob_cache = prefetched
-            print(f"\n  远端已有 {len(blob_cache)} 个 blob —— "
-                  f"内容没变的文件不用重传")
     # 本地提交 SHA → 远端实际建出来的 SHA。
     #
     # **父提交要用这张表翻译一遍，不能直接用本地的。** 正常情况下

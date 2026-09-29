@@ -32,7 +32,17 @@ E1（间距 token 化）要的是一个**单调下降的棘轮**，而棘轮的�
 ### 大小写
 **区分大小写。** `bodySpacing` 和 `spacing` 是两个不同的属性 ——
 用不区分大小写的工具（比如 PowerShell 的 `Select-String` 默认行为）
-会把 `bodySpacing: 10` 也数进去，这是实测踩过的（169 vs 177 的差）。
+会把 `bodySpacing: 10` 也数进去。**实测这一项差 8 处**
+（区分大小写 `182` → 不区分 `190`；早先那次记录是 `169 → 177`，
+差额同样是 **8** —— 所以这个 8 是复核过的，不是估的）。
+
+⚠️ **别把两个成因算成一个。** 本扫描器除了区分大小写，还会**剥离注释**、
+把 `0` 单独列为「零值」、把表达式列为「间接」。所以拿它的 `literal`
+子集（`164`）去比一个不区分大小写的**总数**（`177`），是**拿子集比总数**
+—— 差出来的 13 里只有 8 是大小写，剩下 5 是换口径。
+
+（我曾在方案文档里把它写成「差 13 处**全部**来自不区分大小写」，
+那是错的。见 `docs/体验优化-技术方案.md` 文末修正记录第五条。）
 
 ### 算什么（间距类属性）
 | 属性 | 为什么算 |
@@ -146,6 +156,22 @@ RATCHET: dict[str, dict[str, int]] = {
     "margin": {"literal": 86, "seam": 2},
     "padding": {"literal": 19, "seam": 0},
 }
+
+# **本批迁移范围** —— 和上面那个棘轮保护范围**不是一回事**，
+# 所以是两个常量，不是一个：
+#
+#   棘轮保护范围 = RATCHET 的全部键（三类，共 272 处）
+#       涨了就红 —— 防止有人图快写回裸数字。
+#   本批迁移范围 = 这个常量（一类，共 165 处）
+#       没改完不算失败，只是还没轮到。
+#
+# **棘轮该宽、迁移该窄**：如果棘轮不管 `padding`，那有人把
+# `padding: Theme.gap` 改回 `padding: 10` 就溜过去了 —— 而
+# 「哪些属性算间距」和「这一批改哪些」本来就没有关系。
+#
+# E2 只动 `spacing`，因为密度轴对它的效果最直接；`margin` 有 88 处、
+# `padding` 有 19 处，一起并进来会让这一批大到没法审。
+MIGRATION_SCOPE: tuple[str, ...] = ("spacing",)
 
 # 间距类属性。顺序无所谓，正则拼起来用。
 SPACING_PROPS: dict[str, str] = {
@@ -327,6 +353,24 @@ def main() -> int:
           f"不需要迁移）")
     print(f"  （`写死` + `seam` = 还没真正接上语义 token 的数量："
           f"{totals['literal'] + totals['seam']} 处）")
+
+    # **保护范围和迁移范围要分开报。** 它们容易被当成同一个进度条：
+    # 棘轮绿了不等于迁移做完了（绿只说明没人退步），
+    # 迁移没做完也不会让棘轮变红。见本文件 docstring 那一节。
+    protected = sum(
+        counts.get(f"{c}.{k}", 0)
+        for c in SPACING_PROPS for k in ("literal", "seam")
+    )
+    migrating = sum(
+        counts.get(f"{c}.{k}", 0)
+        for c in MIGRATION_SCOPE for k in ("literal", "seam")
+    )
+    print()
+    print(f"  棘轮保护范围：全部 {len(SPACING_PROPS)} 类，共 {protected} 处"
+          f"（{'/'.join(SPACING_PROPS)}）")
+    print(f"  本批迁移范围：只用 {len(MIGRATION_SCOPE)} 类，共 {migrating} 处"
+          f"（{'/'.join(MIGRATION_SCOPE)}）"
+          f"　← E2 的密度轴只对这类生效")
 
     print()
     print("=" * 74)

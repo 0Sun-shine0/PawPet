@@ -21,6 +21,72 @@ QtObject {
         return Math.round(value * scale)
     }
 
+    // ------------------------------------------------------ 间距：两条轴
+    /* 为什么是**两个**函数，不是一个。
+
+       现有的间距分两种，行为**不一样**：
+
+         `spacing: 8`          裸数字，**不跟** uiScale（字面量就是 8px）
+         `Theme.gap` = px(12)  **跟** uiScale（= round(12 × scale)）
+
+       实测（`spacing` 这一类）：跟 uiScale 的 11 处、不跟的 164 处。
+
+       如果只做一个 `space(v) = round(v × scale × density)`，把裸数字换过去
+       会让那 164 处**突然开始跟 uiScale**：滑块从 1.0 调到 2.0 时，
+       迁移过的间距翻倍、没迁移的不变 —— 反而制造新的「又紧又不紧」。
+       （这条是 Codex 指出的，我复核成立：滑块范围 0.8~2.0。）
+
+       所以两条轴必须分开：
+
+         space(value)        **只**接密度轴，不碰 uiScale —— 给裸数字用
+         scaledSpace(value)  缩放轴 × 密度轴 —— 给本来就在缩放轴上的值用
+         px(value)           保持原样，只有缩放轴（不改它的含义）
+
+       **`space()` 是迁移接缝，不是终点**：它把密度轴接通，让 E2 能生效，
+       但数值仍然写死。棘轮把这类算作 `seam`（欠债），不算 `token`
+       —— 否则「都包上 space() 就等于做完了」这个误解会让棘轮假性归零。 */
+
+    // 密度轴。**现在没有用户开关**（E1 不公开），E2 才决定档位。
+    // 写成可写属性是为了让契约测试能验非 1.0 的行为 —— 否则小值规则
+    // 在 density=1 时两个分支结果相同，等于测不到（V2：测不到的规则
+    // 和不存在的规则一样）。
+    property real density: 1.0
+
+    // 小值不参与密度缩放的门槛。
+    /* 4px 及以下是「结构性紧贴」（行内元素之间），不是「可以压缩的留白」。
+       实测这一类有 33 处（1px×5、2px×9、3px×5、4px×12，另有两处 -1px）。
+       继续线性缩放在 density=0.70 时会把 2px/3px/4px 压成同一档，
+       原本刻意的层级就没了。 */
+    readonly property int denseFloor: 4
+
+    /* 密度轴。**默认 density=1 时逐像素等于原值**。
+
+       小值分支返回 `value` 本身，而**不是** `Math.round(value)`。
+       这不是风格选择，是实测逼出来的：`Pet.qml:529` 有一个
+
+           spacing: 3.5      // 三点指示器，配 width: 4.5 的亚像素圆点
+
+       `Math.round(3.5)` = 4 —— **在 density=1 时就已经改变布局了**，
+       而 E1 的硬前提是「默认视觉不变」。所以小值分支必须原值返回。
+
+       代价是：**小数且大于门槛**的值在 density=1 时会被 `round` 改变
+       （今天不存在这种值）。契约测试会枚举代码里真实的间距值来断言
+       恒等，所以以后有人写了这种值，测试会红，而不是悄悄改布局。 */
+    function space(value) {
+        if (Math.abs(value) <= denseFloor)
+            return value
+        return Math.round(value * density)
+    }
+
+    /* 缩放轴 × 密度轴。`density=1` 时**逐像素等于 `px(value)`**。
+       给小值用同一条门槛，但小值也要过 scale —— 因为它们本来就在
+       缩放轴上（比如 `Theme.gap`）。 */
+    function scaledSpace(value) {
+        if (Math.abs(value) <= denseFloor)
+            return Math.round(value * scale)
+        return Math.round(value * scale * density)
+    }
+
     // ------------------------------------------------------- 用户定制配色
     /* 「通过对话定制主题」的读取入口。
 
@@ -161,9 +227,14 @@ QtObject {
     readonly property int radiusMd: px(14)
     readonly property int radiusLg: px(20)
     readonly property int radiusXl: px(28)
-    readonly property int gap:      px(12)
-    readonly property int gapLg:    px(18)
-    readonly property int pad:      px(18)
+    // 这三个走 `scaledSpace()` 而不是 `px()` —— **density=1 时两者逐像素
+    // 相同**（契约测试对一组 uiScale 取样逐点验过），但前者已经把密度轴
+    // 接上了，E2 改 `density` 就能生效。
+    // 不能用 `space()` 顶替：那会让它们**丢掉 uiScale 行为**
+    // （uiScale=2.0 时 gap 从 24 变回 12）。
+    readonly property int gap:      scaledSpace(12)
+    readonly property int gapLg:    scaledSpace(18)
+    readonly property int pad:      scaledSpace(18)
 
     // 轻柔投影。浅色界面靠阴影分层，比描边自然。
     readonly property color shadowColor: "#26b08a9a"   // 带透明度的暖粉灰

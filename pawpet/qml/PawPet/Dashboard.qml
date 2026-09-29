@@ -237,6 +237,30 @@ Window {
 
                         delegate: Rectangle {
                             id: navItem
+                            // 稳定的名字，给自动化测试按**真实控件**取坐标用。
+                            /* 以前测试是用写死的像素偏移算导航项的位置：
+
+                                   mapToGlobal(QPoint(70, 46 + 12 + 2 * 44 + 20))
+
+                               那个式子在**默认布局下算出来是对的**（46 标题栏
+                               + 12 边距 + 2×44 + 20 行中 = 166，正好是「待办」
+                               那一项的中心）。但它把四个布局常数写死在测试里，
+                               任何一个变了就会点到隔壁 —— 实测确实出现过一次
+                               落在 `focus` 而期望 `tasks`，
+                               **偏差正好是一个导航项的高度**。
+
+                               加上 objectName 之后，测试找真实控件、读它自己的
+                               中心点，不再依赖这些常数。 */
+
+                            /* ⚠ 注意：加了这个名字之后，测试**不能**用
+                               `findChild(QObject, "nav_tasks", ...)` 去找它 ——
+                               Repeater 生成的 delegate，**QObject 父子关系和
+                               视觉父子关系不一致**：实测 `findChild` 返回 None，
+                               而控件确实存在（走 `childItems()` 能看到 7 个
+                               nav_* 控件，名字和坐标都对）。
+                               测试里要在**视觉树**里递归找（见 interactiontest.py
+                               的 `find_visual`）。 */
+                            objectName: "nav_" + modelData.key
                             Layout.fillWidth: true
                             implicitHeight: 40
                             focus: stack.currentIndex === index

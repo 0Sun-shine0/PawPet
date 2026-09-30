@@ -96,7 +96,7 @@ Item {
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: 12
-                    spacing: 8
+                    spacing: Theme.space(8)
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -153,7 +153,7 @@ Item {
                         ColumnLayout {
                             anchors.centerIn: parent
                             width: parent.width - 40
-                            spacing: 8
+                            spacing: Theme.space(8)
                             visible: !backend.ai.hasPreview
 
                             Text {
@@ -176,7 +176,7 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
 
                         PawButton {
                             Layout.fillWidth: true
@@ -282,7 +282,7 @@ Item {
                     anchors.fill: parent
                     anchors.leftMargin: 14
                     anchors.rightMargin: 14
-                    spacing: 10
+                    spacing: Theme.space(10)
 
                     Text {
                         text: backend.ai.configured ? "🤖" : "⚠️"
@@ -290,7 +290,7 @@ Item {
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: 1
+                        spacing: Theme.space(1)
                         Text {
                             Layout.fillWidth: true
                             text: backend.ai.configured ? backend.ai.clientLabel : "还没有配置模型"
@@ -397,7 +397,7 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 10
-                    spacing: 7
+                    spacing: Theme.space(7)
 
                     Rectangle {
                         implicitWidth: 7
@@ -514,7 +514,7 @@ Item {
                     anchors.fill: parent
                     anchors.margins: 10
                     clip: true
-                    spacing: 8
+                    spacing: Theme.space(8)
                     model: backend.ai.messages
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -544,7 +544,7 @@ Item {
                 ColumnLayout {
                     anchors.centerIn: parent
                     width: parent.width - 60
-                    spacing: 10
+                    spacing: Theme.space(10)
                     visible: backend.ai.messageCount === 0
 
                     Text {
@@ -605,11 +605,11 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 14
-                    spacing: 10
+                    spacing: Theme.space(10)
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
                         Text {
                             text: "✨"
                             font.pixelSize: Theme.px(16)
@@ -661,7 +661,7 @@ Item {
                     // 分人群切换：学生 / 上班党 / 日常
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 6
+                        spacing: Theme.space(6)
 
                         Repeater {
                             model: backend.ai.taskGroups
@@ -748,7 +748,7 @@ Item {
                                     anchors.verticalCenter: parent.verticalCenter
                                     anchors.leftMargin: 12
                                     anchors.rightMargin: 10
-                                    spacing: 2
+                                    spacing: Theme.space(2)
 
                                     Text {
                                         Layout.fillWidth: true
@@ -810,11 +810,11 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 14
-                    spacing: 10
+                    spacing: Theme.space(10)
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
                         Text {
                             text: "💬"
                             font.pixelSize: Theme.px(16)
@@ -844,7 +844,7 @@ Item {
                     // 卡着他比答错更烦。
                     Flow {
                         Layout.fillWidth: true
-                        spacing: 6
+                        spacing: Theme.space(6)
                         visible: askCard.answerOptions.length > 0
 
                         Repeater {
@@ -860,7 +860,7 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
 
                         PawField {
                             id: askField
@@ -924,11 +924,11 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 14
-                    spacing: 10
+                    spacing: Theme.space(10)
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
                         Text {
                             text: "⚠️"
                             font.pixelSize: Theme.px(16)
@@ -969,7 +969,7 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
 
                         PawButton {
                             objectName: "approvalAllowButton"
@@ -1079,11 +1079,11 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 14
-                    spacing: 10
+                    spacing: Theme.space(10)
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
                         Text {
                             text: "📋"
                             font.pixelSize: Theme.px(16)
@@ -1116,7 +1116,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.margins: 8
-                                spacing: 8
+                                spacing: Theme.space(8)
 
                                 Text {
                                     Layout.preferredWidth: 18
@@ -1154,7 +1154,7 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
 
                         PawButton {
                             text: "全部允许"
@@ -1222,7 +1222,7 @@ Item {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.margins: 12
-                    spacing: 8
+                    spacing: Theme.space(8)
 
                     Rectangle {
                         Layout.fillWidth: true
@@ -1269,7 +1269,7 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 8
+                        spacing: Theme.space(8)
 
                         PawButton {
                             text: backend.ai.running ? "停止" : "发送"

@@ -62,11 +62,19 @@ E1（间距 token 化）要的是一个**单调下降的棘轮**，而棘轮的�
 
 | 分类 | 判据 | 含义 | 棘轮 |
 |---|---|---|---|
-| `literal` | 裸数字（`10`） | 什么都没接 | **只许降** |
-| `seam` | 值里有字面数字的 `Theme.*` 表达式 | 接进了某个轴，但**数值仍写死** | **只许降** |
+| `literal` | 裸数字（`10`） | 什么都没接 | **不能增加** |
+| `seam` | 值里有字面数字的 `Theme.*` 表达式 | 接进了某个轴，但**数值仍写死** | 和 literal 合计的 debt **不能增加** |
 | `token` | 纯语义名（`Theme.gap`，不含数字） | 真的接了语义 token | 只许升 |
 | `zero` | 数值意义上的 `0` | 不需要迁移（`0 × 密度 = 0`） | 不计入 |
 | `indirect` | 标识符（`card.bodySpacing`） | 指向别处，要连源头一起看 | 不计入 |
+
+**棘轮盯三个数：`literal`、`debt = literal + seam`、`scaleSeam`。**
+
+`debt` 而不是「seam 自己只许降」，因为把裸数字迁成 `Theme.space(N)` 是
+E1 的**预期动作**：`literal` 减 1、`seam` 加 1。要求 seam 只许降，
+第一批合法迁移就一定被自己的棘轮拦住，唯一出路是把 seam 基线往上改 ——
+而那正是本工具报错文案禁止的（「棘轮不是用来记录现状的」）。
+**那条规则是自相矛盾的，不是「不方便」。**
 
 **`seam` 这一类是必须单独分出来的。** 起因是一次真实的误判：
 
@@ -77,11 +85,30 @@ E1（间距 token 化）要的是一个**单调下降的棘轮**，而棘轮的�
 
 > 一个会自己归零的棘轮比没有棘轮更糟 —— 它会让人以为债还完了。
 
-`Theme.px(10)` 和 `Theme.gap * 2` 也有同样的问题（值里含字面数字），
-只是当前代码里没人在间距上这么写，所以没暴露。
-
 判据用「**值里有没有字面数字**」最简单可靠：`Theme.gap` 没有 → `token`；
 `Theme.space(10)` 有 → `seam`。
+
+### `seam` 还要再按**轴**分一层（`scaleSeam` 单独棘轮化）
+
+`seam` 里混着两种**不同轴**的写法，计数上完全一样，行为却不同：
+
+| 写法 | 接的轴 | 跟 uiScale 吗 | 裸数字迁过来的正确形态？ |
+|---|---|---|---|
+| `Theme.space(N)` | 密度 | **不跟** | ✓ 是 |
+| `Theme.px(N)` | 缩放 | **跟** | ✗ 不是 |
+| `Theme.scaledSpace(N)` | 缩放 × 密度 | **跟** | ✗ 不是 |
+
+裸 `spacing: 8` **恒为 8**；迁成 `Theme.px(8)` 之后 uiScale=2.0 时变 **16**。
+**而这违反 E1 的硬前提**（不改变它与 uiScale 的关系），
+计数上却是 `literal −1 / seam +1 / debt 不变` → 只看计数的棘轮**照样放行**。
+
+实测确认过：把一处 `spacing: Theme.space(8)` 换成 `Theme.px(8)`，
+`literal` 和 `debt` 都持平、**棘轮通过**。所以加了 `scaleSeam`
+（=`seam` 里接缩放轴的那部分）单独只许降，当前基线是
+`spacing 1 / margin 2 / padding 0`（都是历史遗留，不是迁移引入的）。
+
+> 只盯总量会让「接错轴」和「接对轴」看起来一模一样。
+> **总量防的是「欠债变多」，轴防的是「欠债接错地方」—— 两件事。**
 
 ### 棘轮保护范围 vs 本批迁移范围
 
@@ -89,7 +116,7 @@ E1（间距 token 化）要的是一个**单调下降的棘轮**，而棘轮的�
 
 | | 含义 | 涨了会怎样 |
 |---|---|---|
-| **棘轮保护范围** | 所有「不该涨的写死值」= `literal` + `seam` | 红 —— 防止有人图快写回裸数字 |
+| **棘轮保护范围** | 所有「不该涨的写死值」= `literal` + `seam` | 红 —— 防止回退或伪完成 |
 | **本批迁移范围** | 这一批实际要改的（当前是 `spacing`） | 没改完不算失败，只是还没轮到 |
 
 **棘轮该宽、迁移该窄**：棘轮把 `spacing` / `margin` / `padding` 都罩住
@@ -122,6 +149,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 QML_DIR = ROOT / "pawpet" / "qml"
+sys.path.insert(0, str(ROOT / "tools"))
+
+from console import configure_utf8
+
+configure_utf8()
 
 # ---------------------------------------------------------------- 棘轮基线
 #
@@ -133,8 +165,13 @@ QML_DIR = ROOT / "pawpet" / "qml"
 # 也不是从别处抄的）。`zero` 不计入 —— 理由见模块 docstring。
 #
 # **两项都盯：**
-#   `literal` —— 裸数字，什么都没接
-#   `seam`    —— 接了轴（`Theme.space(N)` / `Theme.px(N)`）但数值仍写死
+#   `literal` —— 裸数字，什么都没接；不能增加
+#   `debt`    —— `literal + seam`，仍未接上语义 token 的总量；不能增加
+#
+# `literal` 迁移成 `Theme.space(N)` 时，会从 literal 变成 seam。这个过程是
+# E1 的预期动作，所以不能把 seam 单独也设成「只许下降」；否则第一批迁移
+# 一定会被自己的棘轮拦住。seam 仍单独展示，防止「包一层函数就算完成」的
+# 假进度，但棘轮保护的是未完成债务总量。
 #
 # 只盯 `literal` 是不够的：把它改成 `Theme.space(N)` 就能让那个数归零，
 # 而数字一个都没少。
@@ -152,9 +189,9 @@ QML_DIR = ROOT / "pawpet" / "qml"
 # 这也说明口径这件事值得做：旧口径看起来「margin 已 39% token 化」，
 # 实际有 2 处是被误算进去的。
 RATCHET: dict[str, dict[str, int]] = {
-    "spacing": {"literal": 164, "seam": 1},
-    "margin": {"literal": 86, "seam": 2},
-    "padding": {"literal": 19, "seam": 0},
+    "spacing": {"literal": 106, "debt": 165, "scaleSeam": 1},
+    "margin": {"literal": 86, "debt": 88, "scaleSeam": 2},
+    "padding": {"literal": 19, "debt": 19, "scaleSeam": 0},
 }
 
 # **本批迁移范围** —— 和上面那个棘轮保护范围**不是一回事**，
@@ -280,6 +317,42 @@ def classify_value(raw: str) -> str:
     return "indirect"
 
 
+# 接了**缩放轴**的写法 —— 它们会随用户的界面缩放变。
+# 裸数字**不会**，所以把裸数字迁成它们会改变行为（见 `seam_axis`）。
+SCALE_AXIS = re.compile(r"Theme\.(?:px|scaledSpace)\s*\(")
+
+
+def seam_axis(value: str) -> str:
+    """这条接缝接在**哪条轴**上：`density`（不跟 uiScale）还是 `scale`（跟）。
+
+    这个区分不是分类癖，是 E1 的硬前提所需：
+
+        spacing: 8                裸数字，**不跟** uiScale（恒为 8px）
+        spacing: Theme.space(8)   **不跟** uiScale  ← 迁移到这里的正确形态
+        spacing: Theme.px(8)      **跟** uiScale    ← uiScale=2.0 时变 16px
+
+    **两者在计数上完全一样**（literal 减 1、seam 加 1、debt 不变），
+    所以只看计数的棘轮分辨不出来。实测：把一处
+    `spacing: Theme.space(8)` 换成 `spacing: Theme.px(8)`，棘轮
+    **照样通过**，而那已经改变了这个值与 uiScale 的关系。
+
+    所以 `seam` 必须再按轴分一层，并且**把缩放轴那一层也棘轮化**。
+
+    判据刻意简单：
+      · 出现 `Theme.px(` / `Theme.scaledSpace(` → `scale`
+      · 出现 `Theme.space(`                     → `density`
+      · 其余（如 `Theme.gap * 2`，`gap` 是 `px()` 派生）→ `scale`
+
+    最后一条取「保守算成 scale」：未知表达式的欠债记在**更严**的那一边，
+    宁可多拦一次也不放过一次轴接错。
+    """
+    if SCALE_AXIS.search(value):
+        return "scale"
+    if "Theme.space(" in value:
+        return "density"
+    return "scale"
+
+
 def scan() -> tuple[Counter, list[tuple[str, int, str, str, str]]]:
     """扫一遍，返回 (分类计数, 明细)。
 
@@ -304,6 +377,10 @@ def scan() -> tuple[Counter, list[tuple[str, int, str, str, str]]]:
                 for match in pattern.finditer(line):
                     kind = classify_value(match.group(1))
                     counts[f"{category}.{kind}"] += 1
+                    # seam 再按轴分一层。`counts` 里的 `category.seam` 仍是
+                    # **总数**（debt 用它），这里只是多记两个子计数。
+                    if kind == "seam":
+                        counts[f"{category}.seam.{seam_axis(match.group(1))}"] += 1
                     details.append((relative, number, category, kind,
                                     match.group(1).strip()[:40]))
 
@@ -372,16 +449,35 @@ def main() -> int:
           f"（{'/'.join(MIGRATION_SCOPE)}）"
           f"　← E2 的密度轴只对这类生效")
 
+    # 接缝按轴拆开报。**不报出来就只有棘轮红了才知道接错轴** ——
+    # 而那时人已经改完一片了。
+    print()
+    for category in SPACING_PROPS:
+        dens = counts.get(f"{category}.seam.density", 0)
+        scal = counts.get(f"{category}.seam.scale", 0)
+        if dens or scal:
+            note = "　← 缩放轴接缝：裸数字迁到这里会**开始跟 uiScale**" \
+                if scal else ""
+            print(f"  {category} 的接缝：密度轴 {dens} 处 / 缩放轴 {scal} 处"
+                  f"{note}")
+
     print()
     print("=" * 74)
-    print("棘轮检查（literal 和 seam 各自只允许下降）")
+    print("棘轮检查（literal 不增加；debt = literal+seam 不增加；"
+          "缩放轴接缝不增加）")
     print("=" * 74)
-    print(f"  {'类别':10s} {'literal':>18s} {'seam':>18s}")
+    print(f"  {'类别':10s} {'literal':>18s} {'debt':>18s} {'缩放轴接缝':>20s}")
     failures: list[str] = []
     for category, baseline in RATCHET.items():
         cells: list[str] = []
-        for kind in ("literal", "seam"):
-            current = counts.get(f"{category}.{kind}", 0)
+        for kind in ("literal", "debt", "scaleSeam"):
+            if kind == "debt":
+                current = sum(counts.get(f"{category}.{part}", 0)
+                              for part in ("literal", "seam"))
+            elif kind == "scaleSeam":
+                current = counts.get(f"{category}.seam.scale", 0)
+            else:
+                current = counts.get(f"{category}.{kind}", 0)
             was = baseline.get(kind, 0)
             if current > was:
                 failures.append(
@@ -391,7 +487,8 @@ def main() -> int:
                 cells.append(f"  [ok] {was} → {current} 持平")
             else:
                 cells.append(f"  [ok] {was} → {current} 降 {was - current}")
-        print(f"  {category:10s} {cells[0]:>18s} {cells[1]:>18s}")
+        print(f"  {category:10s} {cells[0]:>18s} {cells[1]:>18s} "
+              f"{cells[2]:>20s}")
 
     if args.detail:
         print()
@@ -417,7 +514,8 @@ def main() -> int:
         print("  如果这是有意的，请**同时**修改 RATCHET（两种类别的基线都要改）"
               "并在提交信息里说明原因 —— 棘轮不是用来记录现状的，是用来防退步的。")
         return 1
-    print("棘轮通过：写死的间距（literal + seam）没有增加")
+    print("棘轮通过：literal、未完成债务（literal + seam）、"
+          "缩放轴接缝都没有增加")
     return 0
 
 

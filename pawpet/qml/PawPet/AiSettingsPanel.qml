@@ -31,7 +31,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.margins: 14
-        spacing: 10
+        spacing: Theme.space(10)
 
         Text {
             text: "模型设置"
@@ -51,7 +51,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             Text {
                 Layout.preferredWidth: 72
                 text: "接口地址"
@@ -72,7 +72,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             Text {
                 Layout.preferredWidth: 72
                 text: "模型名"
@@ -115,7 +115,7 @@ Rectangle {
         ColumnLayout {
             Layout.fillWidth: true
             visible: !backend.ai.configured
-            spacing: 8
+            spacing: Theme.space(8)
 
             // 先安抚，再给步骤。
             //
@@ -157,7 +157,7 @@ Rectangle {
             // 第 1 步：一个显眼的外链按钮
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: Theme.space(8)
 
                 PawButton {
                     text: "① " + backend.ai.keyPageLabel
@@ -214,7 +214,7 @@ Rectangle {
             // 其他服务商：默认收起
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 6
+                spacing: Theme.space(6)
 
                 PawButton {
                     small: true
@@ -242,7 +242,7 @@ Rectangle {
             ColumnLayout {
                 Layout.fillWidth: true
                 visible: showProviders
-                spacing: 6
+                spacing: Theme.space(6)
 
                 Repeater {
                     model: backend.ai.otherProviders
@@ -268,11 +268,11 @@ Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
-                            spacing: 3
+                            spacing: Theme.space(3)
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 6
+                                spacing: Theme.space(6)
                                 Text {
                                     Layout.fillWidth: true
                                     text: modelData.name
@@ -329,7 +329,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             Text {
                 Layout.preferredWidth: 72
                 text: "API Key"
@@ -367,7 +367,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             PawButton {
                 text: "保存接口设置"
                 onClicked: backend.ai.saveEndpoint(baseField.text, modelField.text)
@@ -379,7 +379,7 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             visible: backend.ai.availableModels.length > 0
-            spacing: 8
+            spacing: Theme.space(8)
             Text {
                 Layout.preferredWidth: 72
                 text: "选择模型"
@@ -437,7 +437,7 @@ Rectangle {
         // 所以和权限、自动截图放在一起。
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             Text {
                 Layout.preferredWidth: 72
                 text: "执行步数"
@@ -500,7 +500,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
             PawSwitch {
                 Layout.fillWidth: true
                 text: "每轮开始自动看一眼屏幕"
@@ -526,7 +526,7 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.margins: 10
-                spacing: 8
+                spacing: Theme.space(8)
 
                 PawSwitch {
                     Layout.fillWidth: true
@@ -558,7 +558,7 @@ Rectangle {
                 ColumnLayout {
                     Layout.fillWidth: true
                     visible: showMemory
-                    spacing: 6
+                    spacing: Theme.space(6)
 
                     // 最近一次自动学习的收获，放在最上面 ——
                     // 用户最想知道的是「它刚刚自己记了什么」
@@ -585,7 +585,7 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 6
+                    spacing: Theme.space(6)
                     PawButton {
                         small: true
                         text: showMemory ? "收起" : "看看记住了什么"
@@ -634,7 +634,7 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.margins: 10
-                spacing: 8
+                spacing: Theme.space(8)
 
                 Text {
                     Layout.fillWidth: true
@@ -660,7 +660,7 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 6
+                    spacing: Theme.space(6)
                     PawField {
                         id: kbPathField
                         Layout.fillWidth: true
@@ -680,7 +680,7 @@ Rectangle {
                 // 让用户自己验证检索效果 —— 比只显示「导入了 N 块」有用得多
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 6
+                    spacing: Theme.space(6)
                     PawField {
                         id: kbQueryField
                         Layout.fillWidth: true
@@ -723,7 +723,7 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 6
+                    spacing: Theme.space(6)
                     PawButton {
                         small: true
                         text: showKnowledge ? "收起" : "看看导入了什么"

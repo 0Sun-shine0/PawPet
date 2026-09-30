@@ -48,6 +48,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
+from console import configure_utf8
+
+configure_utf8()
+
 SCRATCH = ROOT / ".cache" / "spacetest"
 os.environ["PAWPET_HOME"] = str(SCRATCH)
 
@@ -330,7 +334,7 @@ def main() -> int:
 
         # ================================================ 六、不是终点
         print("\n=== 六、接缝不是终点：扫描器把 space(N) 算成 seam ===")
-        from spacingtest import classify_value
+        from spacingtest import classify_value, seam_axis
 
         cases = [("10", "literal"), ("Theme.gap", "token"),
                  ("Theme.space(10)", "seam"),
@@ -343,6 +347,46 @@ def main() -> int:
 
         print("\n  如果 space(N) 被算成 token，棘轮会在迁移后假性归零 ——")
         print("  164 个数字一个没少，却显示债还完了。这条断言就是防它的。")
+
+        # ================================================ 七、接缝的**轴**
+        print("\n=== 七、接缝接在哪条轴上（接错轴 = 计数看不出来的行为改变）===")
+        print("  裸数字不跟 uiScale。迁成 Theme.space(N) 保持不跟（对），")
+        print("  迁成 Theme.px(N) 就开始跟（错）—— 而两者的 literal/seam/debt")
+        print("  计数**完全一样**，所以只看总量的棘轮分辨不出来。\n")
+
+        axis_cases = [
+            ("Theme.space(10)", "density", "裸数字迁到这里的正确形态"),
+            ("Theme.space(3.5)", "density", "同上（小数）"),
+            ("Theme.px(10)", "scale", "会开始跟 uiScale —— 迁移时不该用"),
+            ("Theme.scaledSpace(12)", "scale", "同上"),
+            ("Theme.gap * 2", "scale", "gap 是 px() 派生，跟着 uiScale"),
+        ]
+        for raw, want, why in axis_cases:
+            got = seam_axis(raw)
+            check(f"{raw:24s} → {want:8s}（{why}）", got == want,
+                  f"实际 {got}")
+
+        # 关键的**因果**断言：接错轴时，总量计数确实**看不出区别**。
+        # 这条是整个守卫存在的理由 —— 如果总量能看出来，就不需要轴这一层。
+        total_before = sum(
+            1 for v in ("Theme.space(8)",) if classify_value(v) == "seam")
+        total_after = sum(
+            1 for v in ("Theme.px(8)",) if classify_value(v) == "seam")
+        check("接对轴和接错轴的 debt 计数**确实相同**"
+              "（所以必须单独看轴）",
+              total_before == total_after == 1,
+              "两者计数不同的话，轴那一层就是多余的")
+
+        only_axis_differs = (classify_value("Theme.space(8)")
+                             == classify_value("Theme.px(8)")
+                             and seam_axis("Theme.space(8)")
+                             != seam_axis("Theme.px(8)"))
+        check("分类相同、只有轴不同 → 轴必须单独棘轮化", only_axis_differs,
+              "分类就已经不同了，说明轴那一层没必要")
+
+        print("\n  实测（真扫描器）：把一处 spacing: Theme.space(8) 换成")
+        print("  Theme.px(8)，literal 和 debt 都持平 —— 加轴之前**棘轮通过**，")
+        print("  加轴之后报 `[XX] 1 → 2 涨了`。")
 
     finally:
         engine.deleteLater()

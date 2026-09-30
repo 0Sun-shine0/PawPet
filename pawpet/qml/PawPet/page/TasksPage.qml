@@ -36,11 +36,11 @@ Item {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.margins: 14
-                spacing: 10
+                spacing: Theme.space(10)
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 8
+                    spacing: Theme.space(8)
 
                     Rectangle {
                         Layout.fillWidth: true
@@ -79,7 +79,7 @@ Item {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 8
+                    spacing: Theme.space(8)
 
                     Text {
                         text: "优先级"
@@ -118,7 +118,7 @@ Item {
         // ------------------------------------------------------ 筛选
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: Theme.space(8)
 
             PawButton {
                 small: true
@@ -265,7 +265,7 @@ Item {
                 anchors.fill: parent
                 anchors.leftMargin: 10
                 anchors.rightMargin: 8
-                spacing: 8
+                spacing: Theme.space(8)
 
                 Text {
                     Layout.fillWidth: true
@@ -325,7 +325,7 @@ Item {
                 anchors.fill: parent
                 anchors.margins: 8
                 clip: true
-                spacing: 4
+                spacing: Theme.space(4)
                 model: backend.tasks
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -375,7 +375,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: 10
                         anchors.rightMargin: 10
-                        spacing: 10
+                        spacing: Theme.space(10)
 
                         // 勾选框
                         Rectangle {
@@ -434,7 +434,7 @@ Item {
                         // 内容
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            spacing: Theme.space(2)
 
                             TextField {
                                 id: editField
@@ -502,7 +502,7 @@ Item {
                             }
 
                             RowLayout {
-                                spacing: 8
+                                spacing: Theme.space(8)
                                 visible: page.editingId !== model.taskId
 
                                 Text {
@@ -539,7 +539,7 @@ Item {
                         // 操作
                         RowLayout {
                             Layout.alignment: Qt.AlignVCenter
-                            spacing: 2
+                            spacing: Theme.space(2)
                             visible: !page.selectionMode
                             opacity: rowMouse.containsMouse || model.priority > 0 ? 1.0 : 0.0
                             Behavior on opacity { NumberAnimation { duration: Theme.animFast } }
@@ -587,7 +587,7 @@ Item {
                 ColumnLayout {
                     anchors.centerIn: parent
                     width: parent.width - 40
-                    spacing: 8
+                    spacing: Theme.space(8)
                     visible: list.count === 0
 
                     Text {
@@ -648,7 +648,7 @@ Item {
             anchors.fill: parent
             anchors.leftMargin: 12
             anchors.rightMargin: 8
-            spacing: 8
+            spacing: Theme.space(8)
 
             Text {
                 Layout.fillWidth: true

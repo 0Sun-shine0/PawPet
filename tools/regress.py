@@ -87,6 +87,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "界面自检", "uicheck.py"),
     ("ui", "界面缩放", "uiscaletest.py"),
     ("ui", "间距接缝契约", "spacetest.py"),
+    ("ui", "紧凑密度结构", "densitytest.py"),
     ("ui", "布局不变量", "layoutcheck.py"),
     ("ui", "两栏布局", "layouttest.py"),
     ("ui", "气泡渲染", "bubshot.py"),

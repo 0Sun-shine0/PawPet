@@ -344,7 +344,32 @@ Item {
                 delegate: Rectangle {
                     id: row
                     width: list.width
-                    implicitHeight: rowColumn.implicitHeight + 16
+                    // 行高 = 列内容高 + 上下留白（约 8px + 8px）。
+                    //
+                    /* ⚠️ **这个 `Theme.space(16)` 是 E2 新增的密度接缝，
+                          不属于 E1 那 58 处 `spacing` 迁移。**
+
+                       它原本是裸字面量 `+ 16`，而它是**待办页在
+                       `density < 1` 时完全不变化的主要原因之一**：
+                       任务行里唯一的纵向 `spacing` 是 `Theme.space(2)`，
+                       而 `2 <= denseFloor(4)` 被小值门槛保护、不参与缩放。
+                       两处一叠加，整页在 density=0.70 下量出来是 338 → 338，
+                       **一点没变**。
+
+                       它是**表达式里的数字**（不是 `spacing:` 属性的值），
+                       所以 E1 的扫描器**看不到它** —— 这也是为什么
+                       E1 做完这一页仍然纹丝不动。
+
+                       `density=1` 时 `Theme.space(16)` 逐像素等于 `16`
+                       （`16 > 4`，走 `round(16 × 1.0) = 16`），
+                       所以默认视觉不变；`density < 1` 时**只压这段行内
+                       留白**，不动字号、复选框尺寸和点击区域。
+
+                       为什么不写进 E1 口径：那会引出「表达式里的裸数字
+                       算不算间距」这个**口径变更**，按约定要双方同意。
+                       Codex 第 6 轮明确：这是 E2 的局部视觉实现，
+                       **不回写 E1 的扫描基线**。 */
+                    implicitHeight: rowColumn.implicitHeight + Theme.space(16)
                     radius: Theme.radiusMd
                     color: rowMouse.containsMouse ? Theme.surfaceHi : "transparent"
                     border.width: 1

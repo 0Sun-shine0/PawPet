@@ -58,7 +58,11 @@ SCRATCH = ROOT / ".cache" / "densitytest"
 SHOTS = ROOT / ".cache" / "density"
 
 BASE_DENSITY = 1.0
-DENSITIES = [1.0, 0.90, 0.85, 0.70]
+# **Codex 第 6 轮定的档位**（原为 1.00 / 0.90 / 0.85 / 0.70）。
+# `0.85` 被去掉：实测 `0.90` 和 `0.85` 在迁移过的真实值集合上四舍五入到
+# **完全相同**的布局（`8×0.90=7.20→7`、`8×0.85=6.80→7`），
+# 留着两档等于只做了一组实验。这四档互不相同。
+DENSITIES = [1.00, 0.90, 0.80, 0.70]
 PAGES = [("ai", "aiPage", "rightScroll"),
          ("tasks", "tasksPage", "taskList")]
 
@@ -345,6 +349,25 @@ def main() -> int:
                       f"{rows_sorted[-1][0]:.2f}→{rows_sorted[0][0]:.2f} 时 "
                       f"内容高 {top:.0f} → {bottom:.0f}px"
                       f"（{(top - bottom) / top * 100:.1f}%）")
+
+        # **核心断言：必须是「严格变矮」，不是「不增」。**
+        #
+        # Codex 第 6 轮要求的：「增加待办页内容高度确实随 density 下降的
+        # 断言，避免再次出现对首行高度写 `after <= before` 的恒真测试」。
+        #
+        # 「不增」（`<=`）就够了吗？不够 —— 待办页在 `+16` 接缝之前是
+        # 338 → 338，**完全相等也照样通过**，那正是恒真断言的来源。
+        # 所以这里要求从最大 density 到最小 density **必须严格变小**。
+        #
+        # 这条断言在 `+16` 未接入密度轴时**会真的报红** —— 已用注入验证过
+        # （把 `Theme.space(16)` 改回 `16`，两个页面里待办页立刻变红）。
+        if len(rows_sorted) >= 2:
+            check(f"{page_key}: density 从 "
+                  f"{rows_sorted[-1][0]:.2f} 降到 {rows_sorted[0][0]:.2f} "
+                  f"时内容高**严格变矮**",
+                  top > 0 and bottom > 0 and bottom < top,
+                  f"没有变矮（{top:.0f} → {bottom:.0f}）—— "
+                  f"density 对这个页面无效")
 
     print(f"\n通过 {PASSED} 项，失败 {len(FAILED)} 项")
     for item in FAILED:

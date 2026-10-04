@@ -172,7 +172,7 @@ Flickable {
                     }
 
                     contentItem: Text {
-                        leftPadding: 11
+                        leftPadding: Theme.space(11)
                         text: repeatBox.displayText
                         color: Theme.text
                         font: repeatBox.font
@@ -214,7 +214,7 @@ Flickable {
                         width: repeatBox.width - 8
                         implicitHeight: 30
                         contentItem: Text {
-                            leftPadding: 8
+                            leftPadding: Theme.space(8)
                             // **读 modelData.label。**
                             //
                             // 这里原来写的是 `text: repeatItem.text` ——
@@ -463,8 +463,8 @@ Flickable {
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
+                        anchors.leftMargin: Theme.space(12)
+                        anchors.rightMargin: Theme.space(12)
                         spacing: 8
 
                         Text {
@@ -790,7 +790,7 @@ Flickable {
                     }
 
                     contentItem: Text {
-                        leftPadding: 11
+                        leftPadding: Theme.space(11)
                         text: editRepeatBox.displayText
                         color: Theme.text
                         font: editRepeatBox.font
@@ -809,7 +809,7 @@ Flickable {
                         width: editRepeatBox.width - 8
                         implicitHeight: 30
                         contentItem: Text {
-                            leftPadding: 8
+                            leftPadding: Theme.space(8)
                             text: modelData && modelData.label ? modelData.label : ""
                             color: Theme.text
                             font.family: Theme.font

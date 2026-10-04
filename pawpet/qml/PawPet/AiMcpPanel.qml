@@ -98,8 +98,8 @@ Rectangle {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
+                    anchors.leftMargin: Theme.space(10)
+                    anchors.rightMargin: Theme.space(10)
                     spacing: 3
 
                     RowLayout {

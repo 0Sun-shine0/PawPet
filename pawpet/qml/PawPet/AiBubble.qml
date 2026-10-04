@@ -199,7 +199,7 @@ Item {
         Rectangle {
             id: reportLine
             anchors.top: assistantText.bottom
-            anchors.topMargin: 9
+            anchors.topMargin: Theme.space(9)
             x: 18
             width: parent.width - 36
             height: 1
@@ -210,7 +210,7 @@ Item {
         Text {
             id: reportText
             anchors.top: reportLine.bottom
-            anchors.topMargin: 7
+            anchors.topMargin: Theme.space(7)
             x: 18
             width: parent.width - 36
             text: bubble.report

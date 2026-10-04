@@ -574,7 +574,7 @@ Window {
             id: mi
             implicitHeight: 34
             contentItem: Text {
-                leftPadding: 14
+                leftPadding: Theme.space(14)
                 text: mi.text
                 font: mi.font
                 color: mi.enabled ? Theme.text : Theme.textFaint

@@ -208,7 +208,7 @@ Flickable {
                 }
 
                 contentItem: Text {
-                    leftPadding: 11
+                    leftPadding: Theme.space(11)
                     text: focusTaskBox.displayText || "暂无未完成待办"
                     color: focusTaskBox.enabled ? Theme.text : Theme.textFaint
                     font: focusTaskBox.font
@@ -252,7 +252,7 @@ Flickable {
                     width: focusTaskBox.width - 8
                     implicitHeight: 32
                     contentItem: Text {
-                        leftPadding: 8
+                        leftPadding: Theme.space(8)
                         text: modelData && modelData.text ? modelData.text : ""
                         color: Theme.text
                         font.family: Theme.font

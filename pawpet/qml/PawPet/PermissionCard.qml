@@ -73,8 +73,8 @@ Rectangle {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
+                    anchors.leftMargin: Theme.space(10)
+                    anchors.rightMargin: Theme.space(10)
                     spacing: 8
 
                     Rectangle {

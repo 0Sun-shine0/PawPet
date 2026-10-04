@@ -266,8 +266,8 @@ Rectangle {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 10
+                            anchors.leftMargin: Theme.space(10)
+                            anchors.rightMargin: Theme.space(10)
                             spacing: Theme.space(3)
 
                             RowLayout {
@@ -395,7 +395,7 @@ Rectangle {
                 font.pixelSize: Theme.fsSmall
                 onActivated: modelField.text = currentText
                 contentItem: Text {
-                    leftPadding: 10
+                    leftPadding: Theme.space(10)
                     text: parent.displayText
                     color: Theme.text
                     font: parent.font
@@ -472,7 +472,7 @@ Rectangle {
                 }
 
                 contentItem: Text {
-                    leftPadding: 10
+                    leftPadding: Theme.space(10)
                     text: parent.displayText
                     color: Theme.text
                     font: parent.font

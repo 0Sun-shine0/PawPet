@@ -190,12 +190,8 @@ configure_utf8()
 # 实际有 2 处是被误算进去的。
 RATCHET: dict[str, dict[str, int]] = {
     "spacing": {"literal": 106, "debt": 165, "scaleSeam": 1},
-    # E7 批 1（2026-10-04）：`anchors.margins` 39 处 + 两处 `padding`
-    # 接到 `Theme.space()`。`literal` 从 86 降到 47、`padding` 从 19 降到 17。
-    # **`debt` 一分没少**（88 / 19）—— 这正是「迁移 ≠ 还债」：
-    # 只是把裸数字接到了密度轴上，数值仍然写死。
-    "margin": {"literal": 47, "debt": 88, "scaleSeam": 2},
-    "padding": {"literal": 17, "debt": 19, "scaleSeam": 0},
+    "margin": {"literal": 25, "debt": 88, "scaleSeam": 2},
+    "padding": {"literal": 2, "debt": 19, "scaleSeam": 0},
 }
 
 # **本批迁移范围** —— 和上面那个棘轮保护范围**不是一回事**，
@@ -566,6 +562,43 @@ def main() -> int:
         print("  如果这是有意的，请**同时**修改 RATCHET（两种类别的基线都要改）"
               "并在提交信息里说明原因 —— 棘轮不是用来记录现状的，是用来防退步的。")
         return 1
+
+    # **基线滞后检查。** 棘轮只在「涨」时报红，所以**降了不更新基线
+    # 也不会红** —— 但那样保护就被削弱了：基线留在旧值，等于允许以后
+    # 悄悄涨回旧值而不被发现。
+    #
+    # 实测就撞上了：批 2 把 `margin.literal` 降到 25，而基线还是 47，
+    # 输出显示 `47 → 25 降 22` 报 `[ok]` —— 看起来正常，实际上基线
+    # 已经和现实脱节 22 处。
+    #
+    # 所以降了要**提醒**（不报红，因为降本身是好事），让人在提交前
+    # 更新基线。基线应当精确等于「上次提交时的实际值」。
+    stale = []
+    for category, baseline in RATCHET.items():
+        for kind in ("literal", "debt", "scaleSeam"):
+            if kind == "debt":
+                current = sum(counts.get(f"{category}.{part}", 0)
+                              for part in ("literal", "seam"))
+            elif kind == "scaleSeam":
+                current = counts.get(f"{category}.seam.scale", 0)
+            else:
+                current = counts.get(f"{category}.{kind}", 0)
+            was = baseline.get(kind, 0)
+            if current < was:
+                stale.append((category, kind, was, current))
+    if stale:
+        print()
+        print(f"⚠ **棘轮基线滞后（{len(stale)} 项）** —— 降了但没更新基线：")
+        for cat, kind, was, cur in stale:
+            print(f"    {cat}.{kind}: 基线 {was}，实际 {cur}"
+                  f"（滞后 {was - cur}）")
+        print()
+        print("  棘轮只在「涨」时报红，所以滞后**不会自己变红** ——")
+        print("  但基线留在旧值等于允许以后悄悄涨回去而没人发现。")
+        print("  **提交前请把 RATCHET 更新为上面的实际值。**")
+        # 不返回 1：降本身是好事，不该因此挡住回归。
+        # 但要让它在输出里显眼 —— 上面那段就是。
+
     print("棘轮通过：literal、未完成债务（literal + seam）、"
           "缩放轴接缝都没有增加")
     return 0

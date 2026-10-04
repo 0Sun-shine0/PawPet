@@ -14,8 +14,8 @@ TextField {
     font.family: Theme.font
     font.pixelSize: Theme.fsBody
     selectByMouse: true
-    leftPadding: 11
-    rightPadding: 11
+    leftPadding: Theme.space(11)
+    rightPadding: Theme.space(11)
 
     background: Rectangle {
         radius: Theme.radiusMd

@@ -200,7 +200,7 @@ Flickable {
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     anchors.bottom: parent.top
-                                    anchors.bottomMargin: 3
+                                    anchors.bottomMargin: Theme.space(3)
                                     text: model.minutes > 0 ? model.minutes : ""
                                     color: Theme.textDim
                                     font.family: Theme.font

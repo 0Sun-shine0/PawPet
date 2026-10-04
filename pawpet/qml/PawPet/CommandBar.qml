@@ -216,8 +216,8 @@ Window {
                     TextField {
                         id: input
                         anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
+                        anchors.leftMargin: Theme.space(12)
+                        anchors.rightMargin: Theme.space(12)
                         placeholderText: !backend.ai.configured
                                          ? "还没有配置模型，去「设置 → AI 操作」填一个 API Key"
                                          : (bar.busy ? "小爪正在干活…" : "想让小爪做什么？回车发送")

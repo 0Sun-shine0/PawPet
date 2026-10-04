@@ -280,8 +280,8 @@ Item {
                 RowLayout {
                     id: topRow
                     anchors.fill: parent
-                    anchors.leftMargin: 14
-                    anchors.rightMargin: 14
+                    anchors.leftMargin: Theme.space(14)
+                    anchors.rightMargin: Theme.space(14)
                     spacing: Theme.space(10)
 
                     Text {

@@ -170,7 +170,7 @@ Window {
                     font.family: Theme.font
                     font.pixelSize: Theme.fsSmall
                     elide: Text.ElideRight
-                    leftPadding: 8
+                    leftPadding: Theme.space(8)
                 }
 
                 PawButton {
@@ -446,8 +446,8 @@ Window {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
+                anchors.leftMargin: Theme.space(16)
+                anchors.rightMargin: Theme.space(16)
                 spacing: 8
 
                 Text {

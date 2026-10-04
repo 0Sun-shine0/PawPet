@@ -55,8 +55,8 @@ Item {
                         TextField {
                             id: input
                             anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
+                            anchors.leftMargin: Theme.space(12)
+                            anchors.rightMargin: Theme.space(12)
                             placeholderText: "今天要做的下一件小事…  （回车添加）"
                             color: Theme.text
                             placeholderTextColor: Theme.textFaint
@@ -168,7 +168,7 @@ Item {
                     id: clearTaskSearch
                     objectName: "clearTaskSearchButton"
                     anchors.right: parent.right
-                    anchors.rightMargin: 4
+                    anchors.rightMargin: Theme.space(4)
                     anchors.verticalCenter: parent.verticalCenter
                     small: true
                     text: "×"
@@ -223,7 +223,7 @@ Item {
                     id: si
                     implicitHeight: 32
                     contentItem: Text {
-                        leftPadding: 14
+                        leftPadding: Theme.space(14)
                         text: si.text
                         color: Theme.text
                         font.family: Theme.font
@@ -398,8 +398,8 @@ Item {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
+                        anchors.leftMargin: Theme.space(10)
+                        anchors.rightMargin: Theme.space(10)
                         spacing: Theme.space(10)
 
                         // 勾选框
@@ -733,7 +733,7 @@ Item {
             id: di
             implicitHeight: 32
             contentItem: Text {
-                leftPadding: 14
+                leftPadding: Theme.space(14)
                 text: di.text
                 color: Theme.text
                 font.family: Theme.font
@@ -770,7 +770,7 @@ Item {
             checkable: true
             implicitHeight: 32
             contentItem: Text {
-                leftPadding: 14
+                leftPadding: Theme.space(14)
                 text: pi.text
                 color: Theme.text
                 font.family: Theme.font

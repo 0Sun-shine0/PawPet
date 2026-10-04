@@ -392,6 +392,109 @@ def main() -> int:
         engine.deleteLater()
         app.processEvents()
 
+    # ================================================ 八、不把「读」当「写」
+    #
+    # 这一节**不需要 QML engine**（下面是纯文本扫描），所以放在 finally 之后。
+    print("\n=== 八、扫描器不把「读属性」当成「写属性」===")
+    print("  误报现场（真实存在于 PawSwitch.qml:18）：")
+    print("      x: control.text.length > 0 ? control.leftPadding : 0")
+    print("                                     ^^^^^^^^^^^^^ 曾经被数成一处 padding")
+    print()
+
+    import tempfile
+    import re as _re
+    import spacingtest
+
+    def scan_snippet(source: str) -> tuple:
+        """把一段 QML 当临时文件扫一遍，返回 (计数, 明细)。
+
+        `scan()` 读的是模块级的 `QML_DIR`，这里临时替换掉再还原 ——
+        比在真源码里插桩干净。
+
+        ⚠ **临时目录必须放在 `ROOT` 下面**：`scan()` 会算
+        `path.relative_to(ROOT)`，放系统临时目录会 ValueError。
+        第一版就踩了这个。
+        """
+        original_dir = spacingtest.QML_DIR
+        holder = ROOT / ".cache" / "spacetest-snippet"
+        holder.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.TemporaryDirectory(dir=holder) as tmp:
+                probe = Path(tmp) / "Probe.qml"
+                probe.write_text(source, encoding="utf-8")
+                spacingtest.QML_DIR = Path(tmp)
+                try:
+                    return spacingtest.scan()
+                finally:
+                    spacingtest.QML_DIR = original_dir
+        finally:
+            pass
+
+    # 误报的三种典型形态，都必须**不计入**
+    FALSE_POSITIVES = [
+        ("三元表达式里读 padding",
+         'QtObject { x: control.text.length > 0 ? control.leftPadding : 0 }'),
+        ("读 spacing",
+         'QtObject { x: other.spacing }'),
+        ("读 margin",
+         'QtObject { x: other.anchors.leftMargin + 1 }'),
+    ]
+    for label, src in FALSE_POSITIVES:
+        counts, _details = scan_snippet(src)
+        total = sum(v for k, v in counts.items())
+        check(f"不计入：{label}", total == 0,
+              f"却数出了 {total} 处：{dict(counts)}")
+
+    # 真赋值必须**仍然计入** —— 否则修过头，全漏了
+    TRUE_POSITIVES = [
+        ("行首 padding", 'QtObject { padding: 10 }', "padding"),
+        ("行首 leftPadding", 'QtObject { leftPadding: 10 }', "padding"),
+        ("anchors.margins（属性名自带点）",
+         'QtObject { anchors.margins: 10 }', "margin"),
+        ("Layout.leftMargin（属性名自带点）",
+         'QtObject { Layout.leftMargin: 10 }', "margin"),
+        ("spacing", 'QtObject { spacing: 10 }', "spacing"),
+    ]
+    for label, src, cat in TRUE_POSITIVES:
+        counts, _details = scan_snippet(src)
+        got = sum(v for k, v in counts.items() if k.startswith(f"{cat}."))
+        check(f"仍然计入：{label}", got == 1, f"数出 {got} 处")
+
+    # 同一行里「先写后读」：只能算一次（写那次）
+    counts, _d = scan_snippet(
+        'QtObject { padding: other.padding + 2 }')
+    got = sum(v for k, v in counts.items() if k.startswith("padding."))
+    check("同一行里「写 padding + 读 other.padding」只算 1 处",
+          got == 1, f"数出 {got} 处")
+
+    # 对照：**修之前**的正则在同一行会数出 1 处假债。
+    # 用旧正则复现一次，证明这条断言确实在测「排除点号」这件事，
+    # 而不是碰巧永远成立。
+    #
+    # ⚠ 第一版对照写的是 `padding: other.padding + 2`，**结论错了**：
+    # 旧正则会把 `other.padding + 2` 整个当成**值**吞掉，所以也只数出 1 处。
+    # 真正会误报的形态是「点号开头的引用**出现在值的位置**」——
+    # 也就是 `PawSwitch.qml:18` 那种三元表达式。用真实那行做对照。
+    old_pattern = r"(?:(?<![A-Za-z_])(?:left|right|top|bottom)?[Pp]adding)"
+    false_line = "x: control.text.length > 0 ? control.leftPadding : 0"
+    old_hits = len(_re.findall(old_pattern + r"\s*:\s*([^,;\n}]+)",
+                               false_line))
+    new_hits = len(_re.findall(
+        r"(?:(?<![A-Za-z_.])(?:left|right|top|bottom)?[Pp]adding)"
+        r"\s*:\s*([^,;\n}]+)", false_line))
+    check(f"对照：真实的误报行 —— 旧正则数出 {old_hits} 处、新正则 {new_hits} 处",
+          old_hits == 1 and new_hits == 0,
+          f"旧 {old_hits} / 新 {new_hits}")
+
+    print("\n  这一条修的是一个**假债**：`control.leftPadding` 是读值，")
+    print("  迁移时**无处可改** —— 棘轮盯着一个永远降不下去的数字。")
+
+    # 先跑真实扫描器，确认「假债」已经从基线里去掉
+    real_counts, _real_details = spacingtest.scan()
+    zero_padding = real_counts.get("padding.zero", 0)
+    check("真实代码里 padding 的零值现在是 2 处（原 3 处，去掉 1 处假债）",
+          zero_padding == 2, f"实际 {zero_padding}")
+
     print(f"\n通过 {PASSED} 项，失败 {len(FAILED)} 项")
     for item in FAILED:
         print(f"  - {item}")

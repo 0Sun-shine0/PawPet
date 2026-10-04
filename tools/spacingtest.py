@@ -211,15 +211,31 @@ RATCHET: dict[str, dict[str, int]] = {
 MIGRATION_SCOPE: tuple[str, ...] = ("spacing",)
 
 # 间距类属性。顺序无所谓，正则拼起来用。
+#
+# ⚠ **前瞻必须排除 `.`** —— 否则会把「读属性」当成「写属性」。
+#
+# 实测误报（`PawSwitch.qml:18`）：
+#
+#     x: control.text.length > 0 ? control.leftPadding : 0
+#                                    ^^^^^^^^^^^^^ 被数成「一处 padding」
+#
+# `leftPadding` 前面是 `.`，而原来的 `(?<![A-Za-z_])` 只管字母和
+# 下划线 —— `.` 不是字母，于是匹配上了。但那是**读**一个属性的值，
+# 不是**写**它：这种「债」在迁移时**无处可改**。
+#
+# 棘轮盯着一个永远降不下去的数字 = 假债。所以把 `.` 也排除掉。
+# 副作用检查过：`anchors.margins` / `Layout.leftMargin` 这些
+# **属性名本身带点**的写法不受影响 —— 看的是属性名**开头**前一个字符，
+# 而它们前面是行首空白或 `{`/`;`。
 SPACING_PROPS: dict[str, str] = {
-    "spacing": r"(?<![A-Za-z_])spacing",
-    "margin": (r"(?:"
+    "spacing": r"(?<![A-Za-z_.])spacing",
+    "margin": (r"(?<![A-Za-z_.])(?:"
                r"Layout\.(?:left|right|top|bottom)Margin"
                r"|anchors\.(?:margins|leftMargin|rightMargin"
                r"|topMargin|bottomMargin)"
                r")"),
     "padding": (r"(?:"
-                r"(?<![A-Za-z_])(?:left|right|top|bottom)?[Pp]adding"
+                r"(?<![A-Za-z_.])(?:left|right|top|bottom)?[Pp]adding"
                 r")"),
 }
 

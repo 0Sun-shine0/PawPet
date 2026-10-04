@@ -17,7 +17,7 @@ Dialog {
     modal: true
     focus: true
     anchors.centerIn: parent
-    padding: 20
+    padding: Theme.space(20)
     width: Math.max(240, Math.min(420,
                                   parent && parent.width > 0
                                   ? parent.width - 32 : 420))

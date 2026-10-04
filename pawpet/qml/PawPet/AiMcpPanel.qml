@@ -21,7 +21,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: 14
+        anchors.margins: Theme.space(14)
         spacing: 8
 
         // 标题行。**永远显示** —— 状态点、工具数、开关都在这里，

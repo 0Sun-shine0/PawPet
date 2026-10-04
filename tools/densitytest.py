@@ -63,8 +63,30 @@ BASE_DENSITY = 1.0
 # **完全相同**的布局（`8×0.90=7.20→7`、`8×0.85=6.80→7`），
 # 留着两档等于只做了一组实验。这四档互不相同。
 DENSITIES = [1.00, 0.90, 0.80, 0.70]
-PAGES = [("ai", "aiPage", "rightScroll"),
-         ("tasks", "tasksPage", "taskList")]
+# (页面, 页面 objectName, 结构探针, 结构探针是否应当随 density 变化)
+#
+# ⚠ 最后一个字段不能想当然。`notes` 的探针 `noteBodyArea` 是个 `TextArea`，
+# 它的 `contentHeight` 是**文本高度** —— 边距收紧不会改文本高度，
+# 所以它**必然**是 19 → 19。第一版对所有页面都断言「严格变矮」，
+# 于是在 notes 上报了一条**假红**（页面确实变紧了，只是这个探针量不到）。
+#
+# notes 页「确实变紧」的证据是第五节那个边距接缝（`notesInner` 宽度变大）。
+PAGES = [
+    ("ai", "aiPage", "rightScroll", True),
+    ("tasks", "tasksPage", "taskList", True),
+    ("notes", "notesPage", "noteBodyArea", False),
+]
+
+# E7 批 1 迁移过的**四边边距**（`anchors.margins`）—— 用来验
+# 「`density` 变小，四边边距同步收紧」这条（Codex 第 8 轮第 4 条）。
+#
+# 取的是页面根级的 `anchors.margins`，它们的值分布在 8~20，
+# 都大于小值门槛 4，所以**都参与密度缩放**。
+MARGIN_PROBES = [
+    # (页面, 控件 objectName, 期望的基准值)
+    ("ai", "aiPage", None),
+    ("tasks", "tasksPage", None),
+]
 
 PASSED = 0
 FAILED: list[str] = []
@@ -78,6 +100,58 @@ def check(label: str, ok: bool, detail: str = "") -> None:
     else:
         FAILED.append(f"{label} {detail}".strip())
         print(f"  [XX] {label} {detail}")
+
+
+def _collect_anchor_margins(root) -> list[float]:
+    """走**视觉树**收集所有 `anchors.margins` 的值（> 0 的）。
+
+    ⚠ **这条路走不通，保留在这里当记录。** 实测：
+
+      · `item.property("anchors")` → `RuntimeError: Can't find converter
+        for 'QQuickAnchors*'` —— `anchors` 是 QML 的**分组属性**，
+        PySide6 侧拿不到
+      · `QQmlExpression(ctx, item, "anchors.margins").evaluate()`
+        → 遍历 1970 个项，**全部返回空**
+
+    所以「直接读每个控件的 `anchors.margins`」在 PySide6 里做不到。
+    改用的办法见 `_measure_margin_seam()`：`anchors.fill` + `anchors.margins`
+    会让**子项宽度 = 父宽 − 2N**，而 `width` 是普通属性、读得到。
+    """
+    out: list[float] = []
+    stack = [root]
+    while stack:
+        item = stack.pop()
+        if item is None:
+            continue
+        try:
+            anchors = item.property("anchors")
+            if anchors is not None:
+                v = anchors.property("margins")
+                if v is not None and float(v) > 0:
+                    out.append(float(v))
+            stack.extend(item.childItems())
+        except Exception:
+            continue
+    return out
+
+
+# 迁移过的**可测接缝**：`objectName` → 说明
+#
+# 这些控件是 `anchors.fill: parent` + `anchors.margins: Theme.space(N)`，
+# 所以 `width = 父宽 − 2N`。**density 变小 → N 变小 → 宽度变大**。
+# 宽度是普通属性，读得到；`anchors` 分组属性读不到（见上面）。
+MARGIN_SEAMS = [
+    ("notesInner", "NotesPage 内层 ColumnLayout（`anchors.margins` 10）"),
+]
+
+
+def _measure_margin_seam(dash, name: str) -> float:
+    """量一个「边距接缝」控件的宽度。返回 -1 表示没找到。"""
+    from PySide6.QtCore import QObject, Qt
+    item = dash.findChild(QObject, name, Qt.FindChildrenRecursively)
+    if item is None:
+        return -1.0
+    return float(item.property("width") or 0.0)
 
 
 def _seed_tasks(store) -> None:
@@ -258,6 +332,9 @@ def main() -> int:
     print("\n=== 二、各 density 下各页面的结构 ===")
     heights: dict[str, list[tuple[float, float]]] = {}
     clipped_by: dict[tuple[float, str], Counter] = {}
+    clip_shots: dict[tuple[float, str], Counter] = {}
+    seam_widths: dict[str, list[tuple[float, dict]]] = {}
+    height_expect: dict[str, bool] = {}
     for density in DENSITIES:
         boot = _new_app(density)
         if boot is None:
@@ -275,7 +352,7 @@ def main() -> int:
             dash.setProperty("visible", True)
             pump(1200)
 
-            for page_key, page_name, probe_name in PAGES:
+            for page_key, page_name, probe_name, expect_change in PAGES:
                 dash.setProperty("currentPage", page_key)
                 pump(900)
                 page = dash.findChild(QObject, page_name,
@@ -290,7 +367,19 @@ def main() -> int:
                     continue
                 ch = float(probe.property("contentHeight") or 0.0)
                 heights.setdefault(page_key, []).append((density, ch))
+                height_expect[page_key] = expect_change
                 clipped_by[(density, page_key)] = _clipped_texts(page, Qt, QObject)
+
+                # 四边边距（批 1 迁的 `anchors.margins`）也要跟着收紧。
+                # 宽度 = 父宽 − 2×margins，所以边距缩小时宽度**变大**。
+                widths = {}
+                for seam_name, _desc in MARGIN_SEAMS:
+                    widths[seam_name] = _measure_margin_seam(dash, seam_name)
+                seam_widths.setdefault(page_key, []).append((density, widths))
+                for seam_name, _desc in MARGIN_SEAMS:
+                    w = widths[seam_name]
+                    print(f"      [info] density={density} {page_key}: "
+                          f"{seam_name} 宽 {w:.0f}")
 
                 if want_shots:
                     pump(300)
@@ -310,7 +399,7 @@ def main() -> int:
 
     # ====================================== 三、裁切：相对基线
     print("\n=== 三、文本裁切：相对 density=1.0 基线，**没有新增** ===")
-    for page_key, _pn, _pr in PAGES:
+    for page_key, _pn, _pr, _chg in PAGES:
         base = clipped_by.get((BASE_DENSITY, page_key), Counter())
         if base:
             print(f"  [info] {page_key} 在 density=1.0（E2 之前）就有 "
@@ -361,13 +450,58 @@ def main() -> int:
         #
         # 这条断言在 `+16` 未接入密度轴时**会真的报红** —— 已用注入验证过
         # （把 `Theme.space(16)` 改回 `16`，两个页面里待办页立刻变红）。
-        if len(rows_sorted) >= 2:
+        if len(rows_sorted) >= 2 and height_expect.get(page_key, True):
             check(f"{page_key}: density 从 "
                   f"{rows_sorted[-1][0]:.2f} 降到 {rows_sorted[0][0]:.2f} "
                   f"时内容高**严格变矮**",
                   top > 0 and bottom > 0 and bottom < top,
                   f"没有变矮（{top:.0f} → {bottom:.0f}）—— "
                   f"density 对这个页面无效")
+        elif len(rows_sorted) >= 2:
+            # **不对这个探针断言变化。** 它量的是文本高度，边距收紧
+            # 不会改文本高度 —— 见 `PAGES` 里那一列的说明。
+            # 这个页面的「确实变紧」由第五节的边距接缝证明。
+            check(f"{page_key}: 探针高度保持不变（这个探针量的是文本高度，"
+                  f"不该随 density 变）",
+                  len(set(vals)) == 1,
+                  f"实际 {vals} —— 文本高度变了才是问题")
+
+    # ====================================== 五、四边边距同步收紧
+    #
+    # Codex 第 8 轮第 4 条：「`density=0.90/0.80/0.70` 下四边边距同步收紧」。
+    #
+    # **直接读 `anchors.margins` 在 PySide6 里做不到**（分组属性，
+    # `property("anchors")` 抛 `Can't find converter for 'QQuickAnchors*'`，
+    # `QQmlExpression` 求值也全空 —— 都实测过）。
+    #
+    # 改用等价的可测量：`anchors.fill: parent` + `anchors.margins: N`
+    # 意味着 **宽度 = 父宽 − 2N**，所以边距缩小时**宽度变大**，
+    # 而 `width` 是普通属性、读得到。
+    print("\n=== 五、四边边距（anchors.margins）随 density 收紧 ===")
+    print("  直接读 `anchors.margins` 读不到（分组属性），")
+    print("  量的是等价量：`宽度 = 父宽 − 2×margins` → 边距缩小则宽度变大。")
+    for seam_name, desc in MARGIN_SEAMS:
+        print(f"\n  {seam_name} —— {desc}")
+        for page_key, rows in seam_widths.items():
+            # **按 density 降序排**（1.00 → 0.70），这样宽度期望是**升序**，
+            # 与下面断言的 `vals == sorted(vals)` 一致。
+            #
+            # 这已经是第三次在「方向」上出错了（`contentHeight` 那次、
+            # 单调性那次、这次）。**教训：写断言前先把数据方向打印出来看，
+            # 而不是凭直觉定升序还是降序。**
+            series = [(d, w.get(seam_name, -1.0))
+                      for d, w in sorted(rows, reverse=True)]
+            if all(v < 0 for _d, v in series):
+                continue
+            cells = " ".join(f"{d:.2f}:{v:.0f}" for d, v in series)
+            print(f"    [{page_key}] density 从高到低 → {cells}")
+            vals = [v for _d, v in series]
+            # density 变小 → margins 变小 → 宽度 = 父宽 − 2N 变大
+            check(f"{seam_name}: 边距随 density 变小而**变宽**（{page_key} 页）",
+                  all(v > 0 for v in vals)
+                  and vals == sorted(vals) and len(set(vals)) > 1,
+                  f"宽度序列 {vals}（按 density 从高到低，期望升序）—— "
+                  f"不升说明这一处没接上密度轴")
 
     print(f"\n通过 {PASSED} 项，失败 {len(FAILED)} 项")
     for item in FAILED:

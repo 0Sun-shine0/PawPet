@@ -35,7 +35,7 @@ Item {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 14
+                anchors.margins: Theme.space(14)
                 spacing: Theme.space(10)
 
                 RowLayout {
@@ -323,7 +323,7 @@ Item {
                 id: list
                 objectName: "taskList"
                 anchors.fill: parent
-                anchors.margins: 8
+                anchors.margins: Theme.space(8)
                 clip: true
                 spacing: Theme.space(4)
                 model: backend.tasks

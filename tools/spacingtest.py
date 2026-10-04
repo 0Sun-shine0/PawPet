@@ -190,8 +190,12 @@ configure_utf8()
 # 实际有 2 处是被误算进去的。
 RATCHET: dict[str, dict[str, int]] = {
     "spacing": {"literal": 106, "debt": 165, "scaleSeam": 1},
-    "margin": {"literal": 86, "debt": 88, "scaleSeam": 2},
-    "padding": {"literal": 19, "debt": 19, "scaleSeam": 0},
+    # E7 批 1（2026-10-04）：`anchors.margins` 39 处 + 两处 `padding`
+    # 接到 `Theme.space()`。`literal` 从 86 降到 47、`padding` 从 19 降到 17。
+    # **`debt` 一分没少**（88 / 19）—— 这正是「迁移 ≠ 还债」：
+    # 只是把裸数字接到了密度轴上，数值仍然写死。
+    "margin": {"literal": 47, "debt": 88, "scaleSeam": 2},
+    "padding": {"literal": 17, "debt": 19, "scaleSeam": 0},
 }
 
 # **本批迁移范围** —— 和上面那个棘轮保护范围**不是一回事**，
@@ -209,6 +213,31 @@ RATCHET: dict[str, dict[str, int]] = {
 # E2 只动 `spacing`，因为密度轴对它的效果最直接；`margin` 有 88 处、
 # `padding` 有 19 处，一起并进来会让这一批大到没法审。
 MIGRATION_SCOPE: tuple[str, ...] = ("spacing",)
+
+# ⚠⚠ **本工具没有「成对间距」守卫。** 这一条是实测确认的，不是推断。
+#
+# 背景：`margin` / `padding` 里有成对写法（`leftPadding` / `rightPadding`、
+# `anchors.leftMargin` / `rightMargin`）。理论上「只迁一侧」会让界面
+# 左右不对称。
+#
+# **实测（2026-10-04，E7 批 1 期间）**：
+#
+#     人为造出「`leftPadding: Theme.space(11)` + `rightPadding: 11`」
+#     （左迁了、右没迁）→
+#         spacingtest.py  退出码 0，变红 0 条
+#         densitytest.py  退出码 0，变红 0 条
+#
+# **没有任何断言抓住它。** 原因很直接：本工具按「**处**」计数，
+# 它不知道 `leftPadding` 和 `rightPadding` 是一对，也就无从判断
+# 「只迁了一半」。
+#
+# 所以 Codex 第 8 轮那句「如果目前没有配对守卫，先不声称它已被自动保护，
+# 只把它作为审查规则记录」—— **答案就是「没有」**。
+# 成对间距的规则写在方案文档 E6/E7，**靠人审，不靠这个工具**。
+#
+# 要变成自动守卫需要：按「对」建模（识别哪个属性和哪个属性成对、
+# 值是否相等、是否同时迁移），那是**口径变更**，得双方同意才做。
+PAIR_GUARD_IMPLEMENTED = False
 
 # 间距类属性。顺序无所谓，正则拼起来用。
 #
@@ -476,6 +505,13 @@ def main() -> int:
                 if scal else ""
             print(f"  {category} 的接缝：密度轴 {dens} 处 / 缩放轴 {scal} 处"
                   f"{note}")
+
+    if not PAIR_GUARD_IMPLEMENTED:
+        print()
+        print("  ⚠ **本工具不检查「成对间距只迁了一半」** —— 实测确认：")
+        print("     人为造出 `leftPadding: Theme.space(11)` + `rightPadding: 11`，")
+        print("     本工具与 densitytest **都不报红**。")
+        print("     规则在文档 E6/E7，**靠人审**。别以为它被自动守住了。")
 
     print()
     print("=" * 74)

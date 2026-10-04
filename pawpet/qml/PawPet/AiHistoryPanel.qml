@@ -25,7 +25,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: 14
+        anchors.margins: Theme.space(14)
         spacing: 8
 
         RowLayout {

@@ -229,7 +229,7 @@ Window {
 
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 12
+                    anchors.margins: Theme.space(12)
                     spacing: 4
 
                     Repeater {
@@ -377,7 +377,7 @@ Window {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.margins: 10
+                            anchors.margins: Theme.space(10)
                             spacing: 6
 
                             Text {

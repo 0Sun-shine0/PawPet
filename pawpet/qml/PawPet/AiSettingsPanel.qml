@@ -30,7 +30,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: 14
+        anchors.margins: Theme.space(14)
         spacing: Theme.space(10)
 
         Text {
@@ -421,7 +421,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 9
+                anchors.margins: Theme.space(9)
                 // 把「当前跑的是什么版本、步数设置是多少」也摆出来。
                 // 改了代码却没重启时，这里一眼就能看出来。
                 text: backend.buildInfo + "\n" + backend.ai.capabilityReport
@@ -525,7 +525,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 10
+                anchors.margins: Theme.space(10)
                 spacing: Theme.space(8)
 
                 PawSwitch {
@@ -633,7 +633,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 10
+                anchors.margins: Theme.space(10)
                 spacing: Theme.space(8)
 
                 Text {

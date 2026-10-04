@@ -36,7 +36,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        anchors.margins: 12
+        anchors.margins: Theme.space(12)
         spacing: 8
 
         Text {
@@ -145,7 +145,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 10
+                anchors.margins: Theme.space(10)
                 spacing: 8
 
                 Text {

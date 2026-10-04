@@ -144,7 +144,7 @@ Window {
         // 浅色界面不靠阴影分层，看起来会「贴」在壁纸上。
         Rectangle {
             anchors.fill: parent
-            anchors.margins: -1
+            anchors.margins: Theme.space(-1)
             z: -1
             radius: parent.radius + 1
             color: "transparent"

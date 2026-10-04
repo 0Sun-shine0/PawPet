@@ -173,7 +173,7 @@ Window {
     Rectangle {
         id: panel
         anchors.fill: parent
-        anchors.margins: 9
+        anchors.margins: Theme.space(9)
         radius: Theme.radiusLg
         color: Theme.surfaceHi
         border.width: backend.ai.hasPendingApproval ? 2 : 1
@@ -190,7 +190,7 @@ Window {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.margins: 14
+            anchors.margins: Theme.space(14)
             spacing: 9
 
             // ---------------------------------------------------- 输入行
@@ -312,7 +312,7 @@ Window {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 11
+                    anchors.margins: Theme.space(11)
                     spacing: 10
 
                     Text {
@@ -397,7 +397,7 @@ Window {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 11
+                    anchors.margins: Theme.space(11)
                     spacing: 5
 
                     // 助手回复是 Markdown，用 Python 转好的富文本渲染，

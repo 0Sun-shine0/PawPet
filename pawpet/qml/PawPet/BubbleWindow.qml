@@ -103,7 +103,7 @@ Window {
     Rectangle {
         id: frame
         anchors.fill: parent
-        anchors.margins: 9
+        anchors.margins: Theme.space(9)
         color: Theme.surface
         radius: Theme.radiusXl
         border.width: 1
@@ -114,7 +114,7 @@ Window {
         // 而且竖条会让气泡看起来像「告警框」而不是「说话」。
         Rectangle {
             anchors.fill: parent
-            anchors.margins: -1
+            anchors.margins: Theme.space(-1)
             z: -1
             radius: parent.radius + 1
             color: "transparent"

@@ -241,7 +241,7 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            anchors.margins: 12
+            anchors.margins: Theme.space(12)
             spacing: 7
 
             RowLayout {
@@ -310,7 +310,7 @@ Item {
 
                 Image {
                     anchors.fill: parent
-                    anchors.margins: 3
+                    anchors.margins: Theme.space(3)
                     source: bubble.imageSource
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true

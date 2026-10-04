@@ -51,7 +51,7 @@ Flickable {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: 12
+                anchors.margins: Theme.space(12)
                 text: "✨ " + backend.migrationNote
                 color: Theme.mint
                 font.family: Theme.font
@@ -114,7 +114,7 @@ Flickable {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: 6
+                            anchors.margins: Theme.space(6)
                             spacing: 2
 
                             Item {

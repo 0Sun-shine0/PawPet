@@ -28,8 +28,22 @@ Item {
             border.color: Theme.borderSoft
 
             ColumnLayout {
+                // 给自动化测试一个**能测的接缝**。
+                /* `anchors.margins` 是 QML 的**分组属性**，PySide6 侧
+                   `item.property("anchors")` 会抛
+                   `Can't find converter for 'QQuickAnchors*'`，
+                   `QQmlExpression` 求值也读不到（实测 1970 个项全空）。
+
+                   但 `anchors.fill: parent` + `anchors.margins: N` 意味着
+                   **子项宽度 = 父宽 − 2N** —— 所以边距缩小时宽度会**变大**，
+                   而 `width` 是普通属性、读得到。
+
+                   所以测试用这个 objectName 取控件，量它的宽度变化，
+                   就等于量了 `anchors.margins` 的变化。
+                   （E7 批 1 迁的正是这一处：原来的裸 `10`。） */
+                objectName: "notesInner"
                 anchors.fill: parent
-                anchors.margins: 10
+                anchors.margins: Theme.space(10)
                 spacing: 8
 
                 PawButton {
@@ -83,7 +97,7 @@ Item {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.margins: 9
+                            anchors.margins: Theme.space(9)
                             spacing: 2
 
                             Text {
@@ -127,7 +141,7 @@ Item {
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 14
+                anchors.margins: Theme.space(14)
                 spacing: 10
 
                 RowLayout {
@@ -170,7 +184,7 @@ Item {
 
                     ScrollView {
                         anchors.fill: parent
-                        anchors.margins: 4
+                        anchors.margins: Theme.space(4)
                         clip: true
 
                         TextArea {
@@ -184,7 +198,7 @@ Item {
                             wrapMode: TextArea.Wrap
                             selectByMouse: true
                             background: null
-                            padding: 10
+                            padding: Theme.space(10)
                             onTextChanged: page.touchSave()
                         }
                     }

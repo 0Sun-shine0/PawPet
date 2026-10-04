@@ -95,7 +95,7 @@ Item {
 
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 12
+                    anchors.margins: Theme.space(12)
                     spacing: Theme.space(8)
 
                     RowLayout {
@@ -142,7 +142,7 @@ Item {
                         Image {
                             id: preview
                             anchors.fill: parent
-                            anchors.margins: 4
+                            anchors.margins: Theme.space(4)
                             source: backend.ai.previewSource
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
@@ -396,7 +396,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 10
+                    anchors.margins: Theme.space(10)
                     spacing: Theme.space(7)
 
                     Rectangle {
@@ -512,7 +512,7 @@ Item {
                     id: chat
                     objectName: "chat"      // 布局回归测试靠它量对话区高度
                     anchors.fill: parent
-                    anchors.margins: 10
+                    anchors.margins: Theme.space(10)
                     clip: true
                     spacing: Theme.space(8)
                     model: backend.ai.messages
@@ -604,7 +604,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 14
+                    anchors.margins: Theme.space(14)
                     spacing: Theme.space(10)
 
                     RowLayout {
@@ -809,7 +809,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 14
+                    anchors.margins: Theme.space(14)
                     spacing: Theme.space(10)
 
                     RowLayout {
@@ -923,7 +923,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 14
+                    anchors.margins: Theme.space(14)
                     spacing: Theme.space(10)
 
                     RowLayout {
@@ -1078,7 +1078,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 14
+                    anchors.margins: Theme.space(14)
                     spacing: Theme.space(10)
 
                     RowLayout {
@@ -1115,7 +1115,7 @@ Item {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
-                                anchors.margins: 8
+                                anchors.margins: Theme.space(8)
                                 spacing: Theme.space(8)
 
                                 Text {
@@ -1221,7 +1221,7 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: 12
+                    anchors.margins: Theme.space(12)
                     spacing: Theme.space(8)
 
                     Rectangle {
@@ -1246,7 +1246,7 @@ Item {
                             id: inputArea
                             objectName: "aiInput"
                             anchors.fill: parent
-                            anchors.margins: 9
+                            anchors.margins: Theme.space(9)
                             placeholderText: backend.ai.configured
                                              ? "让小爪做什么？回车发送，Shift+回车换行"
                                              : "先在上面配置模型 API Key"

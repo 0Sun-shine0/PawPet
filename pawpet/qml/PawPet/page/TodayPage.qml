@@ -41,7 +41,7 @@ Flickable {
             RowLayout {
                 id: head
                 anchors.fill: parent
-                anchors.margins: 20
+                anchors.margins: Theme.space(20)
                 spacing: 16
 
                 ColumnLayout {

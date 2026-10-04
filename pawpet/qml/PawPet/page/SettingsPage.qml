@@ -378,8 +378,8 @@ Flickable {
 
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 11
-                            anchors.rightMargin: 11
+                            anchors.leftMargin: Theme.space(11)
+                            anchors.rightMargin: Theme.space(11)
                             spacing: 9
 
                             Rectangle {
@@ -634,8 +634,8 @@ Flickable {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
+                            anchors.leftMargin: Theme.space(8)
+                            anchors.rightMargin: Theme.space(8)
                             spacing: 7
 
                             // 色块本身：一眼看到当前颜色

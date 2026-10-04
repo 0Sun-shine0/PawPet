@@ -194,8 +194,8 @@ Flickable {
                     popup: Popup {
                         y: repeatBox.height + 4
                         width: repeatBox.width
-                        implicitHeight: contentItem.implicitHeight + 8
-                        padding: 4
+                        implicitHeight: contentItem.implicitHeight + Theme.space(8)
+                        padding: Theme.space(4)
                         background: Rectangle {
                             color: Theme.surfaceHi
                             radius: Theme.radiusMd

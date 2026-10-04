@@ -190,8 +190,8 @@ configure_utf8()
 # 实际有 2 处是被误算进去的。
 RATCHET: dict[str, dict[str, int]] = {
     "spacing": {"literal": 106, "debt": 165, "scaleSeam": 1},
-    "margin": {"literal": 25, "debt": 88, "scaleSeam": 2},
-    "padding": {"literal": 2, "debt": 19, "scaleSeam": 0},
+    "margin": {"literal": 21, "debt": 88, "scaleSeam": 2},
+    "padding": {"literal": 0, "debt": 19, "scaleSeam": 0},
 }
 
 # **本批迁移范围** —— 和上面那个棘轮保护范围**不是一回事**，

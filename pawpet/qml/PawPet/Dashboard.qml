@@ -148,8 +148,8 @@ Window {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 16
-                anchors.rightMargin: 8
+                anchors.leftMargin: Theme.space(16)
+                anchors.rightMargin: Theme.space(8)
                 spacing: 10
 
                 Text {
@@ -306,8 +306,8 @@ Window {
 
                             RowLayout {
                                 anchors.fill: parent
-                                anchors.leftMargin: 14
-                                anchors.rightMargin: 12
+                                anchors.leftMargin: Theme.space(14)
+                                anchors.rightMargin: Theme.space(12)
                                 spacing: 10
 
                                 Text {

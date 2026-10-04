@@ -746,8 +746,8 @@ Item {
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.verticalCenter: parent.verticalCenter
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                    anchors.leftMargin: Theme.space(12)
+                                    anchors.rightMargin: Theme.space(10)
                                     spacing: Theme.space(2)
 
                                     Text {

@@ -146,8 +146,8 @@ Item {
                     id: taskSearch
                     objectName: "taskSearchField"
                     anchors.fill: parent
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 38
+                    anchors.leftMargin: Theme.space(10)
+                    anchors.rightMargin: Theme.space(38)
                     placeholderText: "\u641c\u7d22\u5f85\u529e\u2026"
                     color: Theme.text
                     placeholderTextColor: Theme.textFaint
@@ -263,8 +263,8 @@ Item {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 10
-                anchors.rightMargin: 8
+                anchors.leftMargin: Theme.space(10)
+                anchors.rightMargin: Theme.space(8)
                 spacing: Theme.space(8)
 
                 Text {
@@ -671,8 +671,8 @@ Item {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 8
+            anchors.leftMargin: Theme.space(12)
+            anchors.rightMargin: Theme.space(8)
             spacing: Theme.space(8)
 
             Text {

@@ -33,8 +33,8 @@ Item {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            anchors.leftMargin: 12
-            anchors.rightMargin: 8
+            anchors.leftMargin: Theme.space(12)
+            anchors.rightMargin: Theme.space(8)
             spacing: 8
 
             ColumnLayout {

@@ -7,7 +7,7 @@
 
 产物：
     dist\\PawPet\\                       解压即用的绿色版目录
-    dist\\小爪助手-<版本>-安装包.exe      安装程序（需要 Inno Setup）
+    dist\\小爪助手-<版本>-安装包.exe      安装程序（PyInstaller 打的自解压安装器，不需要 Inno Setup）
     dist\\小爪助手-<版本>-绿色版.zip      绿色版压缩包
 
 打包前会做的事：

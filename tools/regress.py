@@ -89,6 +89,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "间距接缝契约", "spacetest.py"),
     ("ui", "成对边距不塌陷", "pairsafe.py"),
     ("ui", "成对边距同步（显式清单）", "pairguard.py"),
+    ("ai", "Markdown 可见文本无标签", "mdvisibletest.py"),
     ("ui", "紧凑密度结构", "densitytest.py"),
     ("ui", "布局不变量", "layoutcheck.py"),
     ("ui", "两栏布局", "layouttest.py"),

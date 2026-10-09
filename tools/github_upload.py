@@ -104,6 +104,60 @@ class GitHubError(Exception):
     pass
 
 
+def _follow_redirects(method: str, url: str, headers: dict,
+                      data: bytes | None, timeout: int, max_hops: int = 5):
+    """手工跟随重定向，**保留请求方法和 body**。
+
+    ## 为什么不能用 `urlopen` 的默认重定向
+
+    `urllib` 的 `HTTPRedirectHandler.redirect_request` 只在两种情况下
+    放行：
+
+      · `GET` / `HEAD`（任意重定向码）
+      · **`POST` + 301 / 302 / 303**（会把方法改成 `GET`）
+
+    **`POST` + 307 / 308 直接被拒**，抛 `HTTPError`。
+
+    这不是假想的边界情况 —— 实测撞上过：
+
+        仓库改名（`PawPet` → `PawPet-live2Dpet`）之后，
+        GitHub 对**旧名字**的所有请求返回
+
+            307 Temporary Redirect
+            Location: https://api.github.com/repositories/<id>/...
+
+        于是：
+          · `GET` 正常（自动跟随）→ **看起来网络没问题**
+          · `POST .../git/blobs` 全挂 → 报 `Moved Permanently`
+            / 307，**推送彻底坏掉**
+
+    ## 307 / 308 的语义恰好是我们想要的
+
+    它们的定义就是「**保持方法和 body** 重发到新地址」——
+    所以手工跟随是**语义正确**的做法，不是绕过一个限制。
+
+    301 / 302 也照做（GitHub 只在改名时用 301 指旧页面，
+    Git Data API 用 307）。**不**把 POST 降级成 GET ——
+    那会把「上传」变成「查询」，静默失败。
+    """
+    for _hop in range(max_hops):
+        req = urllib.request.Request(url, headers=headers, data=data,
+                                     method=method)
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (301, 302, 303, 307, 308):
+                raise
+            loc = exc.headers.get("Location") if exc.headers else None
+            if not loc:
+                raise
+            url = loc
+            # 303 的语义是「去 GET 那个地址」；其余保持方法。
+            if exc.code == 303:
+                method, data = "GET", None
+    raise GitHubError(f"重定向超过 {max_hops} 跳，放弃：{url}")
+
+
 def request(method: str, path: str, token: str,
             payload: dict | None = None, timeout: int = 120) -> tuple[int, dict]:
     url = path if path.startswith("http") else f"{API}{path}"
@@ -118,9 +172,8 @@ def request(method: str, path: str, token: str,
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
 
-    req = urllib.request.Request(url, headers=headers, data=data, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with _follow_redirects(method, url, headers, data, timeout) as response:
             body = response.read().decode("utf-8", "replace")
             try:
                 return response.status, json.loads(body) if body else {}

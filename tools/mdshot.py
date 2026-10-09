@@ -51,7 +51,7 @@ for i in range(3):
 
 ---
 
-普通段落，可以点这个链接 https://github.com/0Sun-shine0/PawPet 。""",
+普通段落，可以点这个链接 https://github.com/0Sun-shine0/PawPet-live2Dpet 。""",
 
     "md-4-表格": """| 类型 | 数量 | 去向 |
 | --- | --- | --- |

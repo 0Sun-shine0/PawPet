@@ -33,11 +33,11 @@ import urllib.request
 # 在国内经常连不上，而 api.github.com 相对稳（tools/github_upload.py
 # 的注释里也是这么说的，它正是因为这个才走 API 上传）。
 VERSION_SOURCES = (
-    "https://raw.githubusercontent.com/0Sun-shine0/PawPet/main/version.json",
-    "https://api.github.com/repos/0Sun-shine0/PawPet/releases/latest",
+    "https://raw.githubusercontent.com/0Sun-shine0/PawPet-live2Dpet/main/version.json",
+    "https://api.github.com/repos/0Sun-shine0/PawPet-live2Dpet/releases/latest",
 )
 
-DOWNLOAD_PAGE = "https://github.com/0Sun-shine0/PawPet/releases/latest"
+DOWNLOAD_PAGE = "https://github.com/0Sun-shine0/PawPet-live2Dpet/releases/latest"
 
 # 超时要短。这是个锦上添花的功能，卡住启动或后台线程久了不值得。
 TIMEOUT = 6

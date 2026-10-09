@@ -102,7 +102,7 @@ def sync_version_file() -> str:
 
     data["version"] = VERSION
     # 缺失时补上默认值，不动已经写好的
-    data.setdefault("url", "https://github.com/0Sun-shine0/PawPet/releases/latest")
+    data.setdefault("url", "https://github.com/0Sun-shine0/PawPet-live2Dpet/releases/latest")
     data.setdefault("note", "")
 
     try:

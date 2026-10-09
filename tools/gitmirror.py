@@ -32,7 +32,7 @@ r"""按需使用 Gitee 镜像 —— 不再全局改写 github 地址。
 .venv\Scripts\python.exe tools\gitmirror.py status
 
 # 用镜像跑一次 git 命令 —— **不改任何配置**，只影响这一次
-.venv\Scripts\python.exe tools\gitmirror.py run clone https://github.com/0Sun-shine0/PawPet
+.venv\Scripts\python.exe tools\gitmirror.py run clone https://github.com/0Sun-shine0/PawPet-live2Dpet
 .venv\Scripts\python.exe tools\gitmirror.py run push origin main
 
 # 确实想全局启用时（会写进 ~/.gitconfig，影响所有仓库）

@@ -48,6 +48,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+from animfreeze import freeze as freeze_anim
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -186,6 +188,21 @@ def render(qml_root: Path, density: float, page: str,
     # 区域很小（x 12~155, y 278~317 = 导航项那一格 430 像素），但**不稳定**，
     # 而「偶发大差异」正是会让像素断言变得不可信的东西。
     pump(1200)
+
+    # **冻住动画再抓图。**
+    #
+    # 这个工具写于 round 12，早于 `densityshots.py` 里那套冻结逻辑，
+    # 所以一直只靠「等」——而设置页有 4 个宠物预览在永远呼吸/眨眼。
+    # 实测后果：那一页的噪声地板**双峰**（556 / 207463），
+    # 触发了本工具自己的「容差没有判别力」断言（63.59% > 2%）。
+    #
+    # 冻两遍（`freeze()` 内部就是这么做的）：第一遍停掉，
+    # 第二遍收掉「冻结本身触发的重绘又带起来」的。两边渲染都要冻，
+    # 否则比较不公平。
+    frozen = freeze_anim(dash.property("contentItem"))
+    pump(400)
+    freeze_anim(dash.property("contentItem"))
+    pump(400)
 
     structure: dict = {}
     probe_name = PROBES.get(page)

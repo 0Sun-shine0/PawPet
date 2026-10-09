@@ -58,6 +58,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from console import configure_utf8  # noqa: E402
+from animfreeze import freeze as freeze_anim
+from animfreeze import walk_visual
 
 configure_utf8()
 
@@ -512,7 +514,7 @@ def _one_line(s: str) -> str:
 def _count_clipped(container, QObject, ctx) -> Counter:
     """数竖向/横向装不下的 `QQuickText`（按**可见文本**计数）。"""
     out: Counter = Counter()
-    for child in _walk_visual(container):
+    for child in walk_visual(container):
         try:
             if "Text" not in child.metaObject().className():
                 continue
@@ -547,121 +549,6 @@ CLICKABLE_HINTS = ("Button", "CheckBox", "Switch", "TextField",
                    "ComboBox", "SpinBox", "Slider")
 
 
-def _walk_visual(root_item):
-    """遍历**视觉树**（`childItems()`）。
-
-    ## ⚠️ 为什么不能用 `findChildren(QObject)`
-
-    实测对比（设置页）：
-
-      · `dash.findChildren(QObject)` → 3097 个对象，
-        **但一个有 `tailAngle` 的都没有**、`CanvasItem` 只有 1 个
-      · 视觉树 `childItems()` → 1963 个对象，
-        **4 个 `Pet_QMLTYPE_18`**（`tailAngle` / `bob` 都在）、
-        `CanvasItem` **13 个**
-
-    `findChildren` 返回的对象**更多**，却**漏掉了整个 Pet 子树** ——
-    所以「返回得多」不等于「覆盖全」。
-    """
-    stack = [root_item]
-    while stack:
-        item = stack.pop()
-        if item is None:
-            continue
-        yield item
-        try:
-            stack.extend(item.childItems())
-        except Exception:
-            continue
-
-
-def _qobject_tree(node):
-    """从某节点出发遍历它的 QObject 子树（动画/定时器挂在这里）。"""
-    stack = [node]
-    while stack:
-        cur = stack.pop()
-        if cur is None:
-            continue
-        yield cur
-        try:
-            stack.extend(cur.children())
-        except Exception:
-            continue
-
-
-def _freeze_animations(dash, QObject) -> dict:
-    """把界面上**所有动画和定时器停掉**，并把被动画驱动的属性归位。
-
-    ## 为什么必须做（Codex 第 13 轮明确要求「截图时停掉动画」）
-
-    来源是**宠物**：`Pet.qml` 里
-
-      · `breathAnim { running: true; loops: Animation.Infinite }`
-        —— **永远在呼吸**（`NumberAnimation` 动 `bob`）
-      · `blinkTimer` —— 随机 1600~4800ms 眨一次眼（动 `blinking`）
-      · 还有摇尾、thinking / bored / sleepy / idle 各自的定时器
-
-    而**设置页有 4 个宠物预览**。所以那一页连续两帧的差异在
-    **1400~1000 像素**、集中在宠物那一条带上 —— 就是呼吸动画。
-    （裁图看过了：差异带正好压在四张卡片里宠物的脸上。）
-
-    ## 三个坑（都实测踩过）
-
-    **一、`findChildren(QObject)` 看不到 Pet 子树。** 见 `_walk_visual`。
-    所以这里走**视觉树**。
-
-    **二、`property("running")` 读出 `False`，动画却真的在跑。**
-    实测那 4 个 Pet 的 `bob` 是 `-3.37`（呼吸中），
-    但 8 个动画对象的 `running` **全部读成 `False`**。
-    → 所以**不判断、无条件 `stop()`**。
-
-    **三、改属性值不够，还要「归位」。** 停掉动画只是不再变化，
-    `bob` 会**停在半口气的位置**。静止值必须显式归位，
-    否则不同档位的图会落在**不同的呼吸相位**上 ——
-    那正是假的布局差异。
-    """
-    stopped = 0
-    reset: set[str] = set()
-
-    # 被动画驱动的属性 → 静止值
-    REST = {
-        "bob": 0.0, "tailAngle": 0.0, "sway": 0.0,
-        "hop": 0.0, "loopHop": 0.0,
-        "squashX": 1.0, "squashY": 1.0,
-        "loopSquashX": 1.0, "loopSquashY": 1.0,
-        "blinking": False,
-    }
-
-    from PySide6.QtCore import QMetaObject
-
-    for item in _walk_visual(dash.property("contentItem")):
-        # ---- 停这个节点上的动画/定时器（走它的 QObject 子树）----
-        for node in _qobject_tree(item):
-            cls = node.metaObject().className()
-            if "Animation" in cls:
-                try:
-                    QMetaObject.invokeMethod(node, "stop")
-                    stopped += 1
-                except Exception:
-                    pass
-            elif cls.startswith("QQuickTimer") or cls == "QQmlTimer":
-                try:
-                    QMetaObject.invokeMethod(node, "stop")
-                    stopped += 1
-                except Exception:
-                    pass
-        # ---- 归位被动画驱动的属性 ----
-        for prop, value in REST.items():
-            try:
-                if item.property(prop) is not None:
-                    if item.setProperty(prop, value):
-                        reset.add(prop)
-            except Exception:
-                pass
-
-    return {"stopped": stopped, "reset": sorted(reset)}
-
-
 def _click_targets(container, QObject) -> list[tuple[str, float, float]]:
     """收集**可见可点击控件**的几何尺寸。
 
@@ -685,7 +572,7 @@ def _click_targets(container, QObject) -> list[tuple[str, float, float]]:
     """
     out: list[tuple[str, float, float]] = []
     # 走**视觉树** —— `findChildren(QObject)` 会漏掉 Pet 子树（见 `_walk_visual`）
-    for child in _walk_visual(container):
+    for child in walk_visual(container):
         try:
             cls = child.metaObject().className()
             if not any(h in cls for h in CLICKABLE_HINTS):
@@ -777,10 +664,10 @@ def capture(density: float, app) -> tuple[dict, list[str]]:
 
         # **再冻结一次** —— 切页可能让某些 `running: true` 的动画重新开始。
         # 每页都冻结，而不是只在开头冻一次。
-        frozen = _freeze_animations(dash, QObject)
+        frozen = freeze_anim(dash.property("contentItem"))
         _pump(app, 600)
         # 冻结后再冻一次：冻结本身可能触发重绘/新动画
-        frozen2 = _freeze_animations(dash, QObject)
+        frozen2 = freeze_anim(dash.property("contentItem"))
         _pump(app, 500)
         data.setdefault("freeze", frozen2)
         if key == PAGES[0][0]:

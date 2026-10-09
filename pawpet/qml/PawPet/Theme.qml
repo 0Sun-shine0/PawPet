@@ -236,6 +236,45 @@ QtObject {
     readonly property int gapLg:    scaledSpace(18)
     readonly property int pad:      scaledSpace(18)
 
+    // ------------------------------------------------- 语义 token（密度轴）
+    /* 下面这一组是**密度轴**的语义 token —— 和上面 `gap` / `gapLg` / `pad`
+       （**缩放轴**）在轴上是无关的两类。
+
+       ## 命名里带 `density` 是刻意的
+
+       两个轴无关（E1 的核心结论）：`uiScale` 0.8~2.0、`density` 1.0~0.7，
+       互不影响。而 `gap` 这类老名字**看不出它跟哪个轴**。
+
+       如果新 token 叫 `gapSm` 这种，早晚有人把它们当一回事去「统一」——
+       那会**静默换轴**：要么 `gap` 丢掉 uiScale 行为，要么新 token
+       突然开始跟 uiScale。所以 `density` 前缀不是啰嗦，是
+       **让轴在调用处可见**。
+
+       （Codex 第 16 轮定的：不用单字母 `d`，用完整 `density`，
+       理由是「维护时不应要求读者先记住 d 代表什么」。）
+
+       ## 形态：一个角色一个 token，**不做共享原语**
+
+       这些 token 现在恰好都等于 `space(8)`，但**不能**因此抽一个共享的
+       `_d8` 让它们联动。盘点实测：`spacing = 8` 有 32 处、
+       **跨 12 个语义** ——「同一个数字」根本不等于「同一个语义」。
+
+       共享原语会把「碰巧都是 8」变成「必须都是 8」：以后调一个角色会
+       意外改掉其他角色。真要联动时再显式共享，而不是现在绑死。
+
+       （也是 Codex 第 16 轮定的。我原本建议共享原语，被它说服了 ——
+       我的建议和**我自己那份盘点的结论**是矛盾的，见协作记录第 16 轮。） */
+
+    /* 表单里「标签 ↔ 输入控件」的横向间距。
+
+       用在 `RowLayout` 上：左边一个定宽标签（`Layout.preferredWidth`
+       通常是 72），右边 `PawField` / `ComboBox` 这类输入控件。
+       原值是裸 `8`，E7 批 2 接到密度轴，这里给它一个语义名。
+
+       `density=1.00/0.90/0.80/0.70` → `8 / 7 / 6 / 6`；
+       **不随 `uiScale` 变**（那走 `scaledSpace` 那一类）。 */
+    readonly property int densityLabelGap: space(8)
+
     // 轻柔投影。浅色界面靠阴影分层，比描边自然。
     readonly property color shadowColor: "#26b08a9a"   // 带透明度的暖粉灰
     readonly property int   shadowY:     px(2)

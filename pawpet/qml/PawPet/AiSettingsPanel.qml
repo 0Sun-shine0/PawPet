@@ -51,7 +51,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: Theme.space(8)
+            spacing: Theme.densityLabelGap
             Text {
                 Layout.preferredWidth: 72
                 text: "接口地址"
@@ -379,7 +379,7 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             visible: backend.ai.availableModels.length > 0
-            spacing: Theme.space(8)
+            spacing: Theme.densityLabelGap
             Text {
                 Layout.preferredWidth: 72
                 text: "选择模型"
@@ -437,7 +437,7 @@ Rectangle {
         // 所以和权限、自动截图放在一起。
         RowLayout {
             Layout.fillWidth: true
-            spacing: Theme.space(8)
+            spacing: Theme.densityLabelGap
             Text {
                 Layout.preferredWidth: 72
                 text: "执行步数"

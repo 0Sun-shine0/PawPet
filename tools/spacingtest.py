@@ -189,7 +189,7 @@ configure_utf8()
 # 这也说明口径这件事值得做：旧口径看起来「margin 已 39% token 化」，
 # 实际有 2 处是被误算进去的。
 RATCHET: dict[str, dict[str, int]] = {
-    "spacing": {"literal": 106, "debt": 165, "scaleSeam": 1},
+    "spacing": {"literal": 106, "debt": 162, "scaleSeam": 1},
     "margin": {"literal": 1, "debt": 88, "scaleSeam": 2},
     "padding": {"literal": 0, "debt": 19, "scaleSeam": 0},
 }

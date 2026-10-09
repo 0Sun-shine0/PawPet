@@ -87,6 +87,7 @@ SUITES: list[tuple[str, str, str]] = [
     ("ui", "界面自检", "uicheck.py"),
     ("ui", "界面缩放", "uiscaletest.py"),
     ("ui", "间距接缝契约", "spacetest.py"),
+    ("ui", "语义 token 合同", "tokencontracttest.py"),
     ("ui", "成对边距不塌陷", "pairsafe.py"),
     ("ui", "成对边距同步（显式清单）", "pairguard.py"),
     ("ai", "Markdown 可见文本无标签", "mdvisibletest.py"),
@@ -205,6 +206,11 @@ class AppInstance:
         creationflags = 0
         if os.name == "nt":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            # **放进自己的进程组**，退出时能连带子孙一起收。
+            # 见 `stop()` 的说明：应用会 `Popen` 派生 MCP server 子进程，
+            # 只 `terminate()` 直接子进程会把它漏下。
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                     0)
         try:
             log_handle = open(self.log_path, "w", encoding="utf-8",
                               errors="replace")
@@ -231,11 +237,50 @@ class AppInstance:
         return "已拉起"
 
     def stop(self) -> None:
+        """停掉实例 —— **连带它派生的子孙进程**。
+
+        ## 为什么不能只 `terminate()`
+
+        实测踩到：清理出 **4 个**从 08:47 就在跑的孤儿
+        （2 个主程序 + 2 个 `--mcp-server pawkit`），而回归每次都会起
+        应用。根因是 `backend.py` 会 `Popen` 派生 MCP server 子进程：
+
+            subprocess.Popen(command, cwd=cwd, close_fds=True)
+
+        `Popen.terminate()` 只杀**直接子进程**，子孙留下继续跑、
+        继续占着 `PAWPET_HOME` 下的 `theme.json`。
+
+        后果不是「多几个进程」，而是**回归会随机红**：
+        `themetest` 写 `theme.json` 走的是
+
+            tmp.replace(path)      # 原子替换
+
+        而 Windows **不允许覆盖被占用的文件**（POSIX 允许），于是偶发
+
+            [WinError 5] 拒绝访问。: '...\\theme.tmp' -> '...\\theme.json'
+
+        我实测复现过一次全量红（65/66）。**所以这里收干净是必须的，
+        不是洁癖。**
+
+        ## 做法
+
+        `taskkill /T` 杀整棵进程树（Windows）。非 Windows 走
+        `terminate()`（那边没有这个问题，且没有 /T 这种工具）。
+        """
         if self.process is None or not self.started_by_us:
             return
+        pid = self.process.pid
         try:
-            self.process.terminate()
-            self.process.wait(timeout=15)
+            if os.name == "nt":
+                # `/T` = 连子孙一起；`/F` = 强制。
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               capture_output=True, timeout=20)
+            else:
+                self.process.terminate()
+            try:
+                self.process.wait(timeout=15)
+            except Exception:  # noqa: BLE001
+                self.process.kill()
         except Exception:  # noqa: BLE001
             try:
                 self.process.kill()
@@ -243,6 +288,9 @@ class AppInstance:
                 pass
         self.process = None
         self.started_by_us = False
+        # 树杀完之后还可能有一小段「端口/句柄还没放」的窗口，
+        # 给文件系统一点时间，免得紧接着的套件又撞上。
+        time.sleep(1)
 
 
 # ==========================================================================
